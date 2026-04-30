@@ -1,8 +1,19 @@
-# Runbook: Install, Run, Test, Recover
+# Runbook: Remote Machine Setup and Operations
 
-This is the operator guide for running the monitor on your local PC with n8n already working.
+This runbook is the current, functional guide for running the **search-only** monitor on the client remote machine.
 
-## 1) Install (One Time)
+## 1) Remote Machine Requirements
+
+Set up the remote machine with:
+
+- Windows 10/11
+- Python 3.10+ (`python --version`)
+- Google Chrome installed
+- Git installed (`git --version`)
+- Internet access stable enough for Amazon browsing
+- Local n8n running and reachable from this machine
+
+## 2) One-Time Install
 
 From `amazon_monitor/`:
 
@@ -11,106 +22,171 @@ From `amazon_monitor/`:
 3. `pip install -r requirements.txt`
 4. `playwright install chrome`
 
-## 2) Configure
+If PowerShell blocks activation:
 
-Edit `.env`:
+1. `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`
+2. `.\\.venv\\Scripts\\Activate.ps1`
+
+## 3) Required Configuration
+
+### `.env`
+
+Set:
 
 - `AMAZON_EMAIL`
 - `AMAZON_PASSWORD`
-- optional Telegram fallback (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`)
 
-Edit `config.yaml`:
+Optional:
 
-- webhook URLs
-- affiliate tag
-- modem reconnect command
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
 
-## 3) First-Time Session Setup
+### `config.yaml`
+
+Set and verify:
+
+- `webhook_alert`
+- `webhook_heartbeat`
+- `affiliate_tag`
+- `modem_reconnect_command`
+- `modem_auto_refresh_hours`
+
+Note: search URLs are already configured for your use case, including free-shipping filter on the `amazon_com` URL.
+
+## 4) First-Time Session Bootstrap
 
 Run:
 
 - `python first_time_setup.py`
 
-Checklist:
+Complete:
 
-- complete login + 2FA in opened browser
-- confirm Amazon session is valid
-- confirm dummy alert reaches your n8n -> WhatsApp flow
+1. Amazon login + 2FA in opened browser.
+2. Confirm logged-in session works.
+3. Confirm setup test alert reaches n8n/WhatsApp.
 
-## 4) Start and Stop
+## 5) Start / Stop
 
 Start:
 
-- `python main.py`
+1. `.\\.venv\\Scripts\\Activate.ps1`
+2. `python main.py`
 
 Stop:
 
 - `Ctrl + C`
 
-## 5) Daily Checks
+## 6) What Must Be Running
 
-- verify `logs/monitor.log` is updating
-- verify `data/health.json` timestamp changes
-- run `python tools/healthcheck.py`
+For production operation:
 
-## 6) Manual Test Commands
+- `main.py` process running
+- n8n service running
+- WhatsApp API service (your n8n downstream) running
 
-- Compile/syntax:
+If any of these are down, alerts stop.
+
+## 7) Daily Operations Check (1 minute)
+
+1. Confirm `main.py` is running.
+2. Run `python tools/healthcheck.py` and confirm `PASS`.
+3. Check `logs/monitor.log` has recent entries.
+4. Confirm n8n heartbeat webhook receives events.
+
+## 8) Manual Validation Commands
+
+- Syntax check:
   - `python -m compileall .`
-- Public IP check:
+- Public IP:
   - `python tools/check_ip.py`
-- Health status:
+- Health:
   - `python tools/healthcheck.py`
 
-Optional quick webhook smoke test:
+## 9) Recovery Playbooks
 
-- `python first_time_setup.py` (includes test alert)
+### Captcha or anti-bot block
 
-## 7) Recovery Playbooks
+Expected:
 
-### Captcha blocked
-
-Expected behavior:
-
-- monitor pauses scraping jobs
-- modem refresh step runs
-- monitor waits then resumes jobs
+- scraper pauses
+- modem refresh logic runs
+- scraper resumes after wait
 
 Action:
 
-- check `logs/monitor.log`
-- if repeated blocks continue, lower scrape frequency and verify network/IP quality
+1. Check latest errors in `logs/monitor.log`.
+2. Verify modem reconnect command works manually.
+3. Reduce aggressive scheduling only if repeated blocks continue.
 
 ### Amazon session expired
 
-Expected behavior:
+Expected:
 
-- shipping job pauses
-- Telegram urgent message if configured
-
-Action:
-
-1. Run `python first_time_setup.py`
-2. Confirm Amazon account session is valid in persistent context
-3. Restart `python main.py`
-
-### Modem IP unchanged
-
-Expected behavior:
-
-- modem job logs failure
-- `tools/healthcheck.py` may report modem errors
+- search runs fail until session is refreshed
 
 Action:
 
-1. Validate command in `config.yaml` (`modem_reconnect_command`)
-2. Run `python tools/check_ip.py` before and after manual reconnect
-3. Restart monitor
+1. Run `python first_time_setup.py`.
+2. Complete Amazon login again.
+3. Restart `python main.py`.
 
-## 8) Production Readiness Checklist
+### Modem IP did not change
 
+Expected:
+
+- error in log
+- healthcheck may fail
+
+Action:
+
+1. Verify `modem_reconnect_command` in `config.yaml`.
+2. Compare IP before/after reconnect:
+   - `python tools/check_ip.py`
+3. Restart monitor.
+
+## 10) Updating Client Machine from Your Commits (No Manual Copy)
+
+One-command update + restart:
+
+1. `powershell -ExecutionPolicy Bypass -File .\scripts\update_and_restart.ps1`
+
+Manual equivalent on client machine in project folder:
+
+1. `git pull`
+2. `.\\.venv\\Scripts\\Activate.ps1`
+3. `pip install -r requirements.txt`
+4. Restart bot (`python main.py`)
+
+This is enough for most updates.
+
+## 11) Optional Auto-Start on Reboot
+
+Use Task Scheduler to run at startup:
+
+Program/script:
+
+- `powershell.exe`
+
+Arguments:
+
+- `-ExecutionPolicy Bypass -File "<full-path>\\start_monitor.ps1"`
+
+Where `start_monitor.ps1` activates venv and starts `python main.py`.
+
+## 12) Optional Scheduled Auto-Update
+
+Install daily update task:
+
+1. `powershell -ExecutionPolicy Bypass -File .\scripts\install_update_task.ps1 -DailyAt "02:00"`
+
+This creates Task Scheduler job `AmazonMonitorUpdate` that runs:
+
+- `scripts\update_and_restart.ps1`
+
+## 13) Production Readiness Checklist
+
+- [ ] `first_time_setup.py` completed successfully
 - [ ] n8n alert webhook receives messages
 - [ ] n8n heartbeat webhook receives heartbeats
-- [ ] `first_time_setup.py` completed successfully
 - [ ] `python tools/healthcheck.py` returns PASS
-- [ ] `logs/monitor.log` has no repeating critical exceptions
+- [ ] `logs/monitor.log` updates continuously

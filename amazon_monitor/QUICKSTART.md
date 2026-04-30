@@ -9,7 +9,6 @@ Follow it exactly in order.
 
 - Watches Amazon search results for Pokemon TCG products.
 - Sends alerts through your local n8n workflow.
-- Checks shipping status in the background.
 - Keeps health status in a file so you can verify it is running.
 
 ---

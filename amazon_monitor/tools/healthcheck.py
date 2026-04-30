@@ -26,7 +26,6 @@ def main() -> int:
 
     limits = {
         "search": timedelta(minutes=10),
-        "shipping": timedelta(hours=2),
         "heartbeat": timedelta(minutes=40),
         "modem": timedelta(hours=3),
     }

@@ -11,11 +11,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 from browser_factory import init_global_rate_limiter
-from exceptions import CaptchaBlocked, ModemIPUnchanged, SessionExpired
+from exceptions import CaptchaBlocked, ModemIPUnchanged
 from filter_pipeline import filter_search_results
 from modem_rotator import reconnect_modem
 from search_scraper import scrape_search
-from shipping_checker import run_shipping_batch
 from state_engine import StateEngine
 from webhook_sender import send_alert, send_heartbeat, send_modem_trigger
 
@@ -65,7 +64,6 @@ def main() -> None:
     state_engine = StateEngine(
         db_path=config["db_path"],
         price_drop_percent=config["price_drop_percent"],
-        shipping_cache_hours=config["shipping_cache_hours"],
     )
     init_global_rate_limiter(config["max_requests_per_minute"])
     scheduler = BackgroundScheduler()
@@ -75,7 +73,6 @@ def main() -> None:
     health_file.parent.mkdir(parents=True, exist_ok=True)
     health_state: dict[str, dict[str, str | None]] = {
         "search": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
-        "shipping": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
         "heartbeat": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
         "modem": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
     }
@@ -109,7 +106,7 @@ def main() -> None:
     def handle_captcha() -> None:
         LOGGER.warning("Captcha blocked, pausing scraping jobs")
         scraping_paused["value"] = True
-        for job_id in ("search_loop", "shipping_loop"):
+        for job_id in ("search_loop",):
             scheduler.pause_job(job_id)
         try:
             if config.get("webhook_modem_trigger"):
@@ -119,7 +116,7 @@ def main() -> None:
         except Exception as exc:
             LOGGER.error("Captcha recovery modem step failed: %s", exc)
         time.sleep(120)
-        for job_id in ("search_loop", "shipping_loop"):
+        for job_id in ("search_loop",):
             if scheduler.get_job(job_id):
                 scheduler.resume_job(job_id)
         scraping_paused["value"] = False
@@ -142,30 +139,6 @@ def main() -> None:
         except Exception as exc:
             LOGGER.exception("search_loop failed: %s", exc)
             mark_job_error("search", exc)
-
-    def shipping_loop() -> None:
-        if scraping_paused["value"]:
-            return
-        mark_job_started("shipping")
-        try:
-            alerts = run_shipping_batch(
-                state_engine=state_engine,
-                batch_size=config["shipping_batch_size"],
-                auth_dir=str(Path(config.get("auth_dir", "auth")) / "amazon"),
-            )
-            for alert in alerts:
-                send_alert(alert, config)
-            mark_job_success("shipping")
-        except SessionExpired:
-            scheduler.pause_job("shipping_loop")
-            send_telegram_message(config, "URGENT: Amazon session expired during shipping checks.")
-            mark_job_error("shipping", "SessionExpired")
-        except CaptchaBlocked:
-            mark_job_error("shipping", "CaptchaBlocked")
-            handle_captcha()
-        except Exception as exc:
-            LOGGER.exception("shipping_loop failed: %s", exc)
-            mark_job_error("shipping", exc)
 
     def heartbeat_loop() -> None:
         mark_job_started("heartbeat")
@@ -206,7 +179,6 @@ def main() -> None:
         id="search_loop",
         max_instances=1,
     )
-    scheduler.add_job(shipping_loop, "interval", hours=1, id="shipping_loop", max_instances=1)
     scheduler.add_job(heartbeat_loop, "interval", minutes=30, id="heartbeat_loop", max_instances=1)
     scheduler.add_job(
         modem_refresh_loop,

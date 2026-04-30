@@ -10,8 +10,6 @@ search_poll_minutes: 4
 search_pages: 5
 max_requests_per_minute: 10
 price_drop_percent: 10
-shipping_cache_hours: 12
-shipping_batch_size: 5
 
 affiliate_tag: "yourclient-20"
 webhook_alert: "http://localhost:5678/webhook/amazon-alert"

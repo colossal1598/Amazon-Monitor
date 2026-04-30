@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-"""SQLite-backed state management for search and shipping monitoring."""
+"""SQLite-backed state management for search monitoring."""
 
 
 def utc_now() -> datetime:
@@ -27,11 +27,10 @@ def parse_dt(value: str | None) -> datetime | None:
 class StateEngine:
     """Tracks products, detects changes, and records generated alerts."""
 
-    def __init__(self, db_path: str, price_drop_percent: float, shipping_cache_hours: int) -> None:
+    def __init__(self, db_path: str, price_drop_percent: float) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.price_drop_percent = float(price_drop_percent)
-        self.shipping_cache_hours = int(shipping_cache_hours)
         self.lock = threading.Lock()
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
@@ -48,12 +47,10 @@ class StateEngine:
                     seller TEXT,
                     price REAL,
                     in_stock INTEGER,
-                    free_shipping_il INTEGER DEFAULT -1,
                     first_seen TEXT,
                     last_seen TEXT,
                     last_price_alert TEXT,
-                    last_stock_alert TEXT,
-                    shipping_checked_at TEXT
+                    last_stock_alert TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS alerts (
@@ -129,14 +126,13 @@ class StateEngine:
 
                 row = self._fetch_product(asin)
                 if row is None:
-                    free_shipping_default = -1 if seller == "amazon_com" else -1
                     self.conn.execute(
                         """
                         INSERT INTO products
-                        (asin, title, seller, price, in_stock, free_shipping_il, first_seen, last_seen)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (asin, title, seller, price, in_stock, first_seen, last_seen)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (asin, title, seller, new_price, new_stock, free_shipping_default, now, now),
+                        (asin, title, seller, new_price, new_stock, now, now),
                     )
                     alert = self._build_alert("new_product", "search", asin, title, new_price, image_url=image_url)
                     alerts.append(alert)
@@ -186,48 +182,4 @@ class StateEngine:
             self.conn.commit()
         return alerts
 
-    def mark_shipping(self, asin: str, is_free: bool) -> list[dict[str, Any]]:
-        """Update shipping status and alert when it changes to free shipping."""
-        with self.lock:
-            row = self._fetch_product(asin)
-            if row is None:
-                return []
-            old_state = int(row["free_shipping_il"])
-            new_state = 1 if is_free else 0
-            now = utc_iso()
-            self.conn.execute(
-                "UPDATE products SET free_shipping_il = ?, shipping_checked_at = ? WHERE asin = ?",
-                (new_state, now, asin),
-            )
-            alerts: list[dict[str, Any]] = []
-            if old_state == 0 and new_state == 1:
-                alert = self._build_alert(
-                    "shipping_change",
-                    "shipping",
-                    asin,
-                    row["title"],
-                    row["price"],
-                    image_url=None,
-                )
-                alerts.append(alert)
-                self._record_alert(alert)
-            self.conn.commit()
-            return alerts
-
-    def get_shipping_queue(self, limit: int) -> list[str]:
-        """Return ASINs due for shipping re-checks."""
-        threshold = utc_now() - timedelta(hours=self.shipping_cache_hours)
-        with self.lock:
-            rows = self.conn.execute(
-                """
-                SELECT asin FROM products
-                WHERE free_shipping_il = -1
-                   OR shipping_checked_at IS NULL
-                   OR shipping_checked_at < ?
-                ORDER BY COALESCE(shipping_checked_at, '1970-01-01T00:00:00+00:00') ASC
-                LIMIT ?
-                """,
-                (threshold.isoformat(), limit),
-            ).fetchall()
-        return [row["asin"] for row in rows]
 

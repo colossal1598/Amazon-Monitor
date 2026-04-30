@@ -1,6 +1,6 @@
 # Pokemon TCG Amazon Monitor
 
-Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scraping, shipping checks, modem IP rotation, and alert delivery through local n8n webhooks.
+Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scraping, modem IP rotation, and alert delivery through local n8n webhooks.
 
 ## What This Project Does
 
@@ -9,7 +9,6 @@ Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scr
   - New products
   - Back in stock
   - Price drops
-  - Shipping eligibility changes (free shipping to Israel)
 - Sends alert payloads to n8n only (no direct WhatsApp messaging in Python).
 
 ## Exact Search URLs in Use
@@ -20,11 +19,18 @@ Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scr
   - `https://www.amazon.com/s?k=pokemon+tcg&rh=p_n_is_free_shipping%3A10236242011&s=date-desc-rank&dc&ds=v1%3ATYicYkMoU8%2B3IUjmEcjbElDvodVd9crqoNxWbnoh1o8`
 
 These are configured in `config.yaml`.
+The `amazon_com` URL already filters for free-shipping listings.
+
+## Price Tracking Logic
+
+- Every ASIN found in search results is saved in SQLite.
+- On each cycle, new prices are compared against previous prices.
+- Price-drop alerts trigger only when drop percentage passes `price_drop_percent`.
+- Cooldown logic prevents duplicate price-drop alerts too frequently.
 
 ## Architecture
 
 - `search_scraper.py`: ephemeral search scraping context
-- `shipping_checker.py`: batch shipping checks using persistent auth
 - `filter_pipeline.py`: keyword + blacklist filtering
 - `state_engine.py`: SQLite state, cooldown rules, alert generation
 - `modem_rotator.py`: modem reconnect + public IP verification
@@ -118,7 +124,7 @@ Affiliate link format:
 - Captcha/Robot Check:
   - monitor pauses jobs, triggers modem step, then resumes.
 - Session expired:
-  - shipping checks may pause; rerun `first_time_setup.py`.
+  - rerun `first_time_setup.py` to refresh Amazon login/session.
 - No alerts:
   - verify n8n webhook URL and workflow activation.
 - Healthcheck failing:
