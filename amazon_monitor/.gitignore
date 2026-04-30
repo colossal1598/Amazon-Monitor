@@ -2,3 +2,5 @@
 .env
 
 docs/*
+
+amazon_monitor\config.yaml
