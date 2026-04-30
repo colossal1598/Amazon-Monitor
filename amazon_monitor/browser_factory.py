@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from playwright.sync_api import BrowserContext, sync_playwright
-from playwright_stealth import stealth_sync
+from playwright_stealth.stealth import Stealth
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -45,6 +45,7 @@ class TokenBucketRateLimiter:
 
 
 global_rate_limiter: Optional[TokenBucketRateLimiter] = None
+STEALTH = Stealth()
 
 
 def init_global_rate_limiter(max_requests_per_minute: int) -> TokenBucketRateLimiter:
@@ -57,7 +58,7 @@ def init_global_rate_limiter(max_requests_per_minute: int) -> TokenBucketRateLim
 
 
 def _stealth_page(page) -> None:
-    stealth_sync(page)
+    STEALTH.apply_stealth_sync(page)
 
 
 def create_stealth_context(
