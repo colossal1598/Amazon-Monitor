@@ -1,79 +1,60 @@
-# Deployment and Client Update Workflow
+# Deployment (Simple Version)
 
-This guide explains how your client machine can receive your code updates without manual file copying.
+This is the easiest way to update the bot on the client machine.
 
-## Recommended Model
+## How updates work
 
-Use a shared Git remote (GitHub/GitLab/private Git server):
+You edit code on your machine and push to GitHub.
+Client machine pulls latest code and restarts bot.
 
-1. You push changes from your development machine.
-2. Client machine runs `git pull`.
-3. Client machine updates dependencies (if needed).
-4. Client machine restarts the bot.
+No manual file copy is needed.
 
-## One-Time Setup on Client Machine
+## One command to update client machine
 
-1. Install Git.
-2. Clone the repository once:
-   - `git clone <repo_url>`
-3. Configure `.env` on client machine.
-4. Create and install Python environment:
-   - `python -m venv .venv`
-   - `.\\.venv\\Scripts\\Activate.ps1`
-   - `pip install -r requirements.txt`
-   - `playwright install chrome`
-
-## Update Procedure (Each Release)
-
-One-command update from project folder on client machine:
+Run this inside `amazon_monitor` on the client machine:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\update_and_restart.ps1
 ```
 
-Manual equivalent:
+That one command does everything:
 
-```powershell
-git pull
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
+1. Stops the bot
+2. Pulls latest code from GitHub
+3. Installs updated dependencies
+4. Starts the bot again
 
-Then restart bot:
+## Optional: auto-update every day
 
-```powershell
-python main.py
-```
-
-## Optional: Simple Auto-Update Script
-
-Already included in repository:
-
-- `scripts\update_and_restart.ps1`
-- `scripts\start_monitor.ps1`
-- `scripts\stop_monitor.ps1`
-- `scripts\install_update_task.ps1`
-
-Install scheduled daily auto-update:
+Run once on client machine:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install_update_task.ps1 -DailyAt "02:00"
 ```
 
-## Optional: Safer Production Pattern
+This creates a scheduled task called `AmazonMonitorUpdate`.
+It will run the update script every day at 02:00.
+
+## Scripts included
+
+- `scripts\update_and_restart.ps1` -> stop + pull + install + restart
+- `scripts\start_monitor.ps1` -> start bot
+- `scripts\stop_monitor.ps1` -> stop bot
+- `scripts\install_update_task.ps1` -> install daily auto-update task
+
+## If update fails
+
+1. Open PowerShell in `amazon_monitor`
+2. Run:
+
+```powershell
+git pull
+```
+
+3. If Git shows conflict/error, fix it first before restarting bot.
+
+## Important
 
 - Keep `.env` only on client machine.
-- Keep client-specific secrets out of Git.
-- Before major releases, back up:
-  - `data/monitor.db`
-  - `.env`
-  - `config.yaml` (if client-customized)
-
-## Practical Notes
-
-- If `requirements.txt` did not change, `pip install -r requirements.txt` is usually fast and safe.
-- If `git pull` reports conflicts, stop and resolve before restart.
-- If bot fails after update, roll back to previous commit:
-  - `git log --oneline`
-  - `git checkout <previous_commit>`
+- Do not commit client secrets to GitHub.
 
