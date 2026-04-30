@@ -34,7 +34,7 @@ Run:
 Checklist:
 
 - complete login + 2FA in opened browser
-- confirm cart page opens
+- confirm Amazon session is valid
 - confirm dummy alert reaches your n8n -> WhatsApp flow
 
 ## 4) Start and Stop
@@ -85,13 +85,13 @@ Action:
 
 Expected behavior:
 
-- cart and shipping jobs pause
+- shipping job pauses
 - Telegram urgent message if configured
 
 Action:
 
 1. Run `python first_time_setup.py`
-2. Confirm cart page loads in persistent context
+2. Confirm Amazon account session is valid in persistent context
 3. Restart `python main.py`
 
 ### Modem IP unchanged
@@ -112,6 +112,5 @@ Action:
 - [ ] n8n alert webhook receives messages
 - [ ] n8n heartbeat webhook receives heartbeats
 - [ ] `first_time_setup.py` completed successfully
-- [ ] cart contains your priority ASINs
 - [ ] `python tools/healthcheck.py` returns PASS
 - [ ] `logs/monitor.log` has no repeating critical exceptions

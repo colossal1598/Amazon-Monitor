@@ -1,11 +1,10 @@
 # Pokemon TCG Amazon Monitor
 
-Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scraping, cart priority checks, shipping checks, modem IP rotation, and alert delivery through local n8n webhooks.
+Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scraping, shipping checks, modem IP rotation, and alert delivery through local n8n webhooks.
 
 ## What This Project Does
 
 - Monitors two Amazon search URLs for new/changed Pokemon TCG items.
-- Monitors your dedicated Amazon account cart every 90 seconds for priority items.
 - Detects:
   - New products
   - Back in stock
@@ -25,7 +24,6 @@ These are configured in `config.yaml`.
 ## Architecture
 
 - `search_scraper.py`: ephemeral search scraping context
-- `cart_monitor.py`: persistent Amazon cart polling
 - `shipping_checker.py`: batch shipping checks using persistent auth
 - `filter_pipeline.py`: keyword + blacklist filtering
 - `state_engine.py`: SQLite state, cooldown rules, alert generation
@@ -76,10 +74,8 @@ It will:
 
 - Open persistent Amazon context in `auth/amazon`
 - Let you manually complete login/2FA
-- Verify cart page access
+- Verify Amazon account session access
 - Send a dummy alert to n8n webhook
-
-Then add priority items manually to that same account cart.
 
 ## Run the Monitor
 
@@ -122,7 +118,7 @@ Affiliate link format:
 - Captcha/Robot Check:
   - monitor pauses jobs, triggers modem step, then resumes.
 - Session expired:
-  - cart/shipping jobs are paused; rerun `first_time_setup.py`.
+  - shipping checks may pause; rerun `first_time_setup.py`.
 - No alerts:
   - verify n8n webhook URL and workflow activation.
 - Healthcheck failing:

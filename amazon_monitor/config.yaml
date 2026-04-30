@@ -6,7 +6,6 @@ required_keywords:
   - "pokemon"
   - "tcg"
 
-cart_poll_seconds: 90
 search_poll_minutes: 4
 search_pages: 5
 max_requests_per_minute: 10

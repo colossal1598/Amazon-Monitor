@@ -26,8 +26,8 @@ def run_setup() -> None:
         page.goto("https://www.amazon.com/ap/signin", wait_until="domcontentloaded")
         input("Complete login/2FA in opened browser, then press Enter to continue...")
         print("Please verify Israeli shipping address is default.")
-        page.goto("https://www.amazon.com/gp/cart/view.html", wait_until="domcontentloaded")
-        input("Confirm cart page loads, then press Enter to close setup browser...")
+        page.goto("https://www.amazon.com", wait_until="domcontentloaded")
+        input("Confirm logged-in Amazon homepage loads, then press Enter to close setup browser...")
     finally:
         close_context(context)
 
@@ -48,7 +48,7 @@ def run_setup() -> None:
     if confirmed != "y":
         print("Setup incomplete: verify webhook or n8n flow and rerun setup.")
         return
-    print("Setup complete. Now manually add priority ASINs to the cart and start main.py.")
+    print("Setup complete. You can now start main.py.")
 
 
 if __name__ == "__main__":

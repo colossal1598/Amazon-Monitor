@@ -25,7 +25,6 @@ def main() -> int:
     now = datetime.now(timezone.utc)
 
     limits = {
-        "cart": timedelta(minutes=3),
         "search": timedelta(minutes=10),
         "shipping": timedelta(hours=2),
         "heartbeat": timedelta(minutes=40),

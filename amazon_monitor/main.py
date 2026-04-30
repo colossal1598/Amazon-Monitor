@@ -11,7 +11,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 from browser_factory import init_global_rate_limiter
-from cart_monitor import fetch_cart
 from exceptions import CaptchaBlocked, ModemIPUnchanged, SessionExpired
 from filter_pipeline import filter_search_results
 from modem_rotator import reconnect_modem
@@ -71,12 +70,10 @@ def main() -> None:
     init_global_rate_limiter(config["max_requests_per_minute"])
     scheduler = BackgroundScheduler()
     scraping_paused = {"value": False}
-    cart_shipping_enabled = {"value": True}
     last_ip = {"value": ""}
     health_file = Path("data/health.json")
     health_file.parent.mkdir(parents=True, exist_ok=True)
     health_state: dict[str, dict[str, str | None]] = {
-        "cart": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
         "search": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
         "shipping": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
         "heartbeat": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
@@ -112,7 +109,7 @@ def main() -> None:
     def handle_captcha() -> None:
         LOGGER.warning("Captcha blocked, pausing scraping jobs")
         scraping_paused["value"] = True
-        for job_id in ("cart_loop", "search_loop", "shipping_loop"):
+        for job_id in ("search_loop", "shipping_loop"):
             scheduler.pause_job(job_id)
         try:
             if config.get("webhook_modem_trigger"):
@@ -122,32 +119,11 @@ def main() -> None:
         except Exception as exc:
             LOGGER.error("Captcha recovery modem step failed: %s", exc)
         time.sleep(120)
-        for job_id in ("cart_loop", "search_loop", "shipping_loop"):
+        for job_id in ("search_loop", "shipping_loop"):
             if scheduler.get_job(job_id):
                 scheduler.resume_job(job_id)
         scraping_paused["value"] = False
         LOGGER.info("Scraping jobs resumed")
-
-    def cart_loop() -> None:
-        if scraping_paused["value"] or not cart_shipping_enabled["value"]:
-            return
-        mark_job_started("cart")
-        try:
-            snapshots = fetch_cart(auth_dir=str(Path(config.get("auth_dir", "auth")) / "amazon"))
-            alerts = state_engine.process_cart_snapshots(snapshots)
-            for alert in alerts:
-                send_alert(alert, config)
-            mark_job_success("cart")
-        except SessionExpired:
-            cart_shipping_enabled["value"] = False
-            scheduler.pause_job("cart_loop")
-            scheduler.pause_job("shipping_loop")
-            send_telegram_message(config, "URGENT: Amazon session expired for cart/shipping monitor.")
-            LOGGER.error("Cart session expired. Cart and shipping jobs paused.")
-            mark_job_error("cart", "SessionExpired")
-        except Exception as exc:
-            LOGGER.exception("cart_loop failed: %s", exc)
-            mark_job_error("cart", exc)
 
     def search_loop() -> None:
         if scraping_paused["value"]:
@@ -168,7 +144,7 @@ def main() -> None:
             mark_job_error("search", exc)
 
     def shipping_loop() -> None:
-        if scraping_paused["value"] or not cart_shipping_enabled["value"]:
+        if scraping_paused["value"]:
             return
         mark_job_started("shipping")
         try:
@@ -181,8 +157,6 @@ def main() -> None:
                 send_alert(alert, config)
             mark_job_success("shipping")
         except SessionExpired:
-            cart_shipping_enabled["value"] = False
-            scheduler.pause_job("cart_loop")
             scheduler.pause_job("shipping_loop")
             send_telegram_message(config, "URGENT: Amazon session expired during shipping checks.")
             mark_job_error("shipping", "SessionExpired")
@@ -224,7 +198,6 @@ def main() -> None:
             LOGGER.warning("modem_refresh_loop failed: %s", exc)
             mark_job_error("modem", exc)
 
-    scheduler.add_job(cart_loop, "interval", seconds=config["cart_poll_seconds"], id="cart_loop", max_instances=1)
     scheduler.add_job(
         search_loop,
         "interval",
