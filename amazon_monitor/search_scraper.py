@@ -27,6 +27,40 @@ def _parse_price(raw_text: str) -> float | None:
     return min(values) if values else None
 
 
+def _extract_title(card) -> str:
+    selectors = (
+        "h2 a span",
+        "h2 span",
+        "a.a-link-normal.s-line-clamp-2 span",
+        "[data-cy='title-recipe'] span",
+    )
+    for selector in selectors:
+        node = card.query_selector(selector)
+        if not node:
+            continue
+        text = (node.inner_text() or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _extract_price(card, card_text: str) -> float | None:
+    # Prefer Amazon's explicit visible/full price field when present.
+    for selector in ("span.a-price span.a-offscreen", "span[data-a-color='base'] span.a-offscreen"):
+        node = card.query_selector(selector)
+        if not node:
+            continue
+        value = _parse_price((node.inner_text() or "").strip())
+        if value is not None and value >= 5:
+            return value
+
+    # Fallback to parsed card text but reject obvious noise values.
+    value = _parse_price(card_text)
+    if value is None:
+        return None
+    return value if value >= 5 else None
+
+
 def _stock_flag(text: str) -> bool:
     lowered = (text or "").lower()
     terms = ("in stock", "only", "temporarily", "available")
@@ -57,10 +91,9 @@ def scrape_search(urls_dict: dict[str, str], pages: int = 5) -> list[dict[str, A
                     asin = (card.get_attribute("data-asin") or "").strip()
                     if not asin:
                         continue
-                    title_el = card.query_selector("h2 a span")
-                    product_title = title_el.inner_text().strip() if title_el else ""
+                    product_title = _extract_title(card)
                     card_text = card.inner_text()
-                    price = _parse_price(card_text)
+                    price = _extract_price(card, card_text)
                     image_el = card.query_selector("img.s-image")
                     image_url = image_el.get_attribute("src").strip() if image_el else None
                     all_products.append(
