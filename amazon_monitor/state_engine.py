@@ -119,6 +119,9 @@ class StateEngine:
                     continue
                 title = item.get("title")
                 seller = item.get("seller")
+                amazon_sold = bool(item.get("amazon_sold", False))
+                if seller == "amazon_com" and not amazon_sold:
+                    continue
                 image_url = item.get("image_url")
                 new_price = item.get("price")
                 new_stock = 1 if item.get("in_stock") else 0

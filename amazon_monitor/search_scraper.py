@@ -64,26 +64,38 @@ def _extract_price(card, card_text: str) -> float | None:
 
 def _stock_flag(text: str) -> bool:
     lowered = (text or "").lower()
-    terms = ("in stock", "only", "temporarily", "available")
-    return any(term in lowered for term in terms)
+    out_of_stock_terms = (
+        "currently unavailable",
+        "out of stock",
+        "unavailable",
+    )
+    if any(term in lowered for term in out_of_stock_terms):
+        return False
+    in_stock_terms = (
+        "in stock",
+        "only ",
+        "left in stock",
+    )
+    return any(term in lowered for term in in_stock_terms)
 
 
 def _is_sold_by_amazon(card_text: str) -> bool:
     lowered = (card_text or "").lower()
     positive_terms = (
         "sold by amazon.com",
-        "ships from amazon.com",
-        "dispatched from amazon",
         "sold by amazon",
+        "ships from and sold by amazon.com",
+        "ships from and sold by amazon",
+        "dispatched from and sold by amazon",
     )
-    negative_terms = (
-        "sold by third-party",
-        "other sellers on amazon",
-        "ships from and sold by",
-    )
-    if any(term in lowered for term in negative_terms):
+    if any(term in lowered for term in positive_terms):
+        return True
+    # If card text contains a seller marker but not Amazon, treat as non-Amazon.
+    if "sold by " in lowered:
         return False
-    return any(term in lowered for term in positive_terms)
+    if "other sellers on amazon" in lowered:
+        return False
+    return False
 
 
 def _extract_image_url(card) -> str | None:
@@ -139,7 +151,8 @@ def scrape_search(urls_dict: dict[str, str], pages: int = 5) -> list[dict[str, A
                         continue
                     product_title = _extract_title(card)
                     card_text = card.inner_text()
-                    if seller == "amazon_com" and not _is_sold_by_amazon(card_text):
+                    amazon_sold = _is_sold_by_amazon(card_text) if seller == "amazon_com" else False
+                    if seller == "amazon_com" and not amazon_sold:
                         continue
                     price = _extract_price(card, card_text)
                     image_url = _extract_image_url(card)
@@ -150,6 +163,7 @@ def scrape_search(urls_dict: dict[str, str], pages: int = 5) -> list[dict[str, A
                             "price": price,
                             "in_stock": _stock_flag(card_text),
                             "seller": seller,
+                            "amazon_sold": amazon_sold,
                             "image_url": image_url,
                         }
                     )

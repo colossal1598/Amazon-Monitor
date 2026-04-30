@@ -9,6 +9,7 @@ Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scr
   - New products
   - Back in stock
   - Price drops
+- For `amazon_com` source, all three alert types are restricted to Amazon.com-sold listings.
 - Sends alerts directly to your local WhatsApp API server.
 
 ## Exact Search URLs in Use
@@ -20,6 +21,9 @@ Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scr
 
 These are configured in `config.yaml`.
 The `amazon_com` URL already filters for free-shipping listings.
+Alert scope is source-specific:
+- `amazon_com`: alerts are emitted only for listings explicitly sold by Amazon.com.
+- `amazon_export`: remains unrestricted by Amazon.com seller rules.
 
 ## Price Tracking Logic
 
