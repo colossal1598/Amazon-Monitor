@@ -1,4 +1,5 @@
 import logging
+import json
 import random
 import re
 import time
@@ -67,6 +68,33 @@ def _stock_flag(text: str) -> bool:
     return any(term in lowered for term in terms)
 
 
+def _extract_image_url(card) -> str | None:
+    image_el = card.query_selector("img.s-image")
+    if not image_el:
+        return None
+
+    # Best source: Amazon often provides a JSON map of URLs in data-a-dynamic-image.
+    dynamic_attr = image_el.get_attribute("data-a-dynamic-image") or ""
+    if dynamic_attr:
+        try:
+            candidates = json.loads(dynamic_attr)
+            if isinstance(candidates, dict) and candidates:
+                return max(candidates.keys(), key=len)
+        except Exception:
+            pass
+
+    # Next best: srcset can include larger variants.
+    srcset = image_el.get_attribute("srcset") or ""
+    if srcset:
+        parts = [p.strip() for p in srcset.split(",") if p.strip()]
+        urls = [p.split(" ")[0] for p in parts if p]
+        if urls:
+            return urls[-1]
+
+    src = image_el.get_attribute("src")
+    return src.strip() if src else None
+
+
 def scrape_search(urls_dict: dict[str, str], pages: int = 5) -> list[dict[str, Any]]:
     all_products: list[dict[str, Any]] = []
     for seller, url in urls_dict.items():
@@ -94,8 +122,7 @@ def scrape_search(urls_dict: dict[str, str], pages: int = 5) -> list[dict[str, A
                     product_title = _extract_title(card)
                     card_text = card.inner_text()
                     price = _extract_price(card, card_text)
-                    image_el = card.query_selector("img.s-image")
-                    image_url = image_el.get_attribute("src").strip() if image_el else None
+                    image_url = _extract_image_url(card)
                     all_products.append(
                         {
                             "asin": asin,

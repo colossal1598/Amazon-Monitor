@@ -67,12 +67,21 @@ class _SafeDict(dict):
         return ""
 
 
+def _display_price(value: Any) -> str:
+    if value is None:
+        return "לא זמין"
+    return str(value)
+
+
 def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> str:
     alert_type = str(alert_payload.get("type") or "default")
     price = alert_payload.get("price")
     old_price = alert_payload.get("old_price")
     new_price = alert_payload.get("new_price")
-    price_text = f"{old_price} -> {new_price or price}" if alert_type == "price_drop" and old_price else str(new_price or price)
+    if alert_type == "price_drop" and old_price:
+        price_text = f"{_display_price(old_price)} -> {_display_price(new_price or price)}"
+    else:
+        price_text = _display_price(new_price or price)
 
     templates = DEFAULT_MESSAGE_TEMPLATES.copy()
     user_templates = config.get("wa_message_templates")
@@ -86,8 +95,8 @@ def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> st
             "asin": alert_payload.get("asin"),
             "title": alert_payload.get("title") or "Untitled item",
             "price": price,
-            "old_price": old_price,
-            "new_price": new_price,
+            "old_price": _display_price(old_price),
+            "new_price": _display_price(new_price),
             "pct_drop": alert_payload.get("pct_drop"),
             "source": alert_payload.get("source"),
             "image_url": alert_payload.get("image_url"),
