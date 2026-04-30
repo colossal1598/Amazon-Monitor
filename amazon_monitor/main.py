@@ -109,10 +109,9 @@ def main() -> None:
         for job_id in ("search_loop",):
             scheduler.pause_job(job_id)
         try:
-            if config.get("webhook_modem_trigger"):
+            if config.get("wa_send_modem_trigger", False):
                 send_modem_trigger(config)
-            else:
-                reconnect_modem(config)
+            reconnect_modem(config)
         except Exception as exc:
             LOGGER.error("Captcha recovery modem step failed: %s", exc)
         time.sleep(120)

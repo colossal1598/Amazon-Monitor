@@ -11,7 +11,7 @@ Set up the remote machine with:
 - Google Chrome installed
 - Git installed (`git --version`)
 - Internet access stable enough for Amazon browsing
-- Local n8n running and reachable from this machine
+- Local WhatsApp API server running and reachable from this machine
 
 ## 2) One-Time Install
 
@@ -41,15 +41,16 @@ Set:
 
 Set and verify:
 
-- `webhook_alert`
-- `webhook_heartbeat`
+- `wa_api_url`
+- `wa_api_key`
+- `wa_group_id`
 - `affiliate_tag`
 - `modem_reconnect_command`
 - `modem_auto_refresh_hours`
 
 Note: search URLs are already configured for your use case, including free-shipping filter on the `amazon_com` URL.
 
-## 4) First-Time Webhook Test
+## 4) First-Time WhatsApp API Test
 
 Run:
 
@@ -58,7 +59,7 @@ Run:
 Complete:
 
 1. Run the setup script.
-2. Confirm setup test alert reaches n8n/WhatsApp.
+2. Confirm setup test alert reaches WhatsApp.
 
 ## 5) Start / Stop
 
@@ -76,8 +77,7 @@ Stop:
 For production operation:
 
 - `main.py` process running
-- n8n service running
-- WhatsApp API service (your n8n downstream) running
+- WhatsApp API service running
 
 If any of these are down, alerts stop.
 
@@ -86,7 +86,7 @@ If any of these are down, alerts stop.
 1. Confirm `main.py` is running.
 2. Run `python tools/healthcheck.py` and confirm `PASS`.
 3. Check `logs/monitor.log` has recent entries.
-4. Confirm n8n heartbeat webhook receives events.
+4. Confirm expected heartbeat alert behavior (if enabled).
 
 ## 8) Manual Validation Commands
 
@@ -169,7 +169,7 @@ This creates Task Scheduler job `AmazonMonitorUpdate` that runs:
 ## 13) Production Readiness Checklist
 
 - [ ] `first_time_setup.py` completed successfully
-- [ ] n8n alert webhook receives messages
-- [ ] n8n heartbeat webhook receives heartbeats
+- [ ] WhatsApp API receives alert messages
+- [ ] WhatsApp heartbeat alert behavior verified (if enabled)
 - [ ] `python tools/healthcheck.py` returns PASS
 - [ ] `logs/monitor.log` updates continuously

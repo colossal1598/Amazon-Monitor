@@ -12,9 +12,11 @@ max_requests_per_minute: 10
 price_drop_percent: 10
 
 affiliate_tag: "yourclient-20"
-webhook_alert: "http://localhost:5678/webhook/amazon-alert"
-webhook_heartbeat: "http://localhost:5678/webhook/monitor-heartbeat"
-webhook_modem_trigger: ""
+wa_api_url: "http://localhost:3001/send"
+wa_api_key: "change_this_to_a_long_random_secret"
+wa_group_id: "120363408155154756@g.us"
+wa_send_heartbeat: false
+wa_send_modem_trigger: false
 
 modem_auto_refresh_hours: 2
 modem_reconnect_command: "echo reconnect-modem-command"

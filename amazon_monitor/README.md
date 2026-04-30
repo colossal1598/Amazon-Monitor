@@ -1,6 +1,6 @@
 # Pokemon TCG Amazon Monitor
 
-Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scraping, modem IP rotation, and alert delivery through local n8n webhooks.
+Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scraping, modem IP rotation, and direct alert delivery to a local WhatsApp API server.
 
 ## What This Project Does
 
@@ -9,7 +9,7 @@ Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scr
   - New products
   - Back in stock
   - Price drops
-- Sends alert payloads to n8n only (no direct WhatsApp messaging in Python).
+- Sends alerts directly to your local WhatsApp API server.
 
 ## Exact Search URLs in Use
 
@@ -34,16 +34,16 @@ The `amazon_com` URL already filters for free-shipping listings.
 - `filter_pipeline.py`: keyword + blacklist filtering
 - `state_engine.py`: SQLite state, cooldown rules, alert generation
 - `modem_rotator.py`: modem reconnect + public IP verification
-- `webhook_sender.py`: alert/heartbeat webhook posting to n8n
+- `webhook_sender.py`: alert/heartbeat posting to local WhatsApp API server
 - `main.py`: APScheduler orchestration + error handling + runtime health file
-- `first_time_setup.py`: webhook smoke-test utility
+- `first_time_setup.py`: WhatsApp API smoke-test utility
 
 ## Prerequisites
 
 - Windows machine (always-on recommended)
 - Python 3.10+
 - Google Chrome installed
-- n8n running locally with working webhook workflow
+- WhatsApp API server running locally (for example `http://localhost:3001/send`)
 
 ## Installation
 
@@ -65,7 +65,7 @@ From `amazon_monitor/`:
    - optional proxy URL
 2. Edit `config.yaml`:
    - `affiliate_tag`
-   - webhook URLs (`webhook_alert`, `webhook_heartbeat`)
+   - WhatsApp API settings (`wa_api_url`, `wa_api_key`, `wa_group_id`)
    - modem reconnect command
 
 ## First-Time Setup
@@ -74,9 +74,7 @@ Run:
 
 - `python first_time_setup.py`
 
-It will:
-
-- Send a dummy alert to n8n webhook only (webhook smoke test)
+It will send a dummy WhatsApp alert as a smoke test.
 
 ## Run the Monitor
 
@@ -104,9 +102,9 @@ Exit codes:
 - `1` = stale/error state
 - `2` = missing health file
 
-## n8n Payload Expectations
+## Alert Payload Fields
 
-Alerts include:
+Alert objects include:
 
 - `type`, `asin`, `title`, `price`, `old_price`, `new_price`, `pct_drop`, `source`, `image_url`, `timestamp`, `affiliate_link`
 
@@ -121,6 +119,6 @@ Affiliate link format:
 - Session expired:
   - not applicable in search-only anonymous mode.
 - No alerts:
-  - verify n8n webhook URL and workflow activation.
+  - verify WhatsApp API URL/key/group in `config.yaml` and confirm WA server is running.
 - Healthcheck failing:
   - inspect `data/health.json` and `logs/monitor.log`.

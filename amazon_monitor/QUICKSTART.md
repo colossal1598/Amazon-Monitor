@@ -8,7 +8,7 @@ Follow it exactly in order.
 ## 1) What this bot does
 
 - Watches Amazon search results for Pokemon TCG products.
-- Sends alerts through your local n8n workflow.
+- Sends alerts directly to your local WhatsApp API server.
 - Keeps health status in a file so you can verify it is running.
 
 ---
@@ -20,7 +20,7 @@ Make sure these are already installed:
 - Windows PC (always on)
 - Python 3.10 or newer
 - Google Chrome
-- n8n running and working
+- WhatsApp API server running and authenticated
 
 Make sure you have these files in your project folder:
 
@@ -66,8 +66,9 @@ Set:
 
 Check:
 
-- `webhook_alert`
-- `webhook_heartbeat`
+- `wa_api_url`
+- `wa_api_key`
+- `wa_group_id`
 - `affiliate_tag`
 - `modem_reconnect_command`
 
@@ -75,7 +76,7 @@ Do not change the search URLs unless you were told to.
 
 ---
 
-## 5) First-time webhook test
+## 5) First-time WhatsApp API test
 
 Run:
 
@@ -86,9 +87,9 @@ python first_time_setup.py
 What you must do:
 
 1. Run setup script.
-2. Confirm test alert is received in your n8n/WhatsApp flow.
+2. Confirm test alert is received in WhatsApp.
 
-If test alert is not received, stop and fix n8n first.
+If test alert is not received, stop and fix the WhatsApp API server first.
 
 ---
 
@@ -219,8 +220,8 @@ Fix:
 
 Fix:
 
-1. Confirm n8n is running
-2. Confirm webhook URLs in `config.yaml`
+1. Confirm WhatsApp API server is running
+2. Confirm WA API settings in `config.yaml`
 3. Run `python first_time_setup.py` test again
 
 ## 12) Daily 30-second checklist for client
