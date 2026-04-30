@@ -16,7 +16,7 @@ from filter_pipeline import filter_search_results
 from modem_rotator import reconnect_modem
 from search_scraper import scrape_search
 from state_engine import StateEngine
-from webhook_sender import send_alert, send_heartbeat, send_modem_trigger
+from webhook_sender import send_alert, send_heartbeat, send_modem_trigger, send_operational_error
 
 LOGGER = logging.getLogger("monitor")
 
@@ -114,6 +114,7 @@ def main() -> None:
             reconnect_modem(config)
         except Exception as exc:
             LOGGER.error("Captcha recovery modem step failed: %s", exc)
+            send_operational_error("modem_error", str(exc), config)
         time.sleep(120)
         for job_id in ("search_loop",):
             if scheduler.get_job(job_id):
@@ -138,6 +139,7 @@ def main() -> None:
         except Exception as exc:
             LOGGER.exception("search_loop failed: %s", exc)
             mark_job_error("search", exc)
+            send_operational_error("search_error", str(exc), config)
 
     def heartbeat_loop() -> None:
         mark_job_started("heartbeat")
@@ -148,6 +150,7 @@ def main() -> None:
         except Exception as exc:
             LOGGER.warning("heartbeat failed: %s", exc)
             mark_job_error("heartbeat", exc)
+            send_operational_error("heartbeat_error", str(exc), config)
 
     def modem_refresh_loop() -> None:
         mark_job_started("modem")
@@ -166,9 +169,11 @@ def main() -> None:
         except ModemIPUnchanged as exc:
             LOGGER.error("Scheduled modem refresh failed: %s", exc)
             mark_job_error("modem", exc)
+            send_operational_error("modem_error", str(exc), config)
         except Exception as exc:
             LOGGER.warning("modem_refresh_loop failed: %s", exc)
             mark_job_error("modem", exc)
+            send_operational_error("modem_error", str(exc), config)
 
     scheduler.add_job(
         search_loop,

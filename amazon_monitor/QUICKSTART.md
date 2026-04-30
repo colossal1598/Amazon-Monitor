@@ -69,6 +69,7 @@ Check:
 - `wa_api_url`
 - `wa_api_key`
 - `wa_group_id`
+- optional `wa_client_to` (for operational alerts direct-to-client)
 - `affiliate_tag`
 - `modem_reconnect_command`
 
@@ -90,6 +91,18 @@ What you must do:
 2. Confirm test alert is received in WhatsApp.
 
 If test alert is not received, stop and fix the WhatsApp API server first.
+
+### Optional: Hebrew settings page
+
+Run:
+
+```powershell
+python tools/config_editor_backend.py
+```
+
+Open:
+
+- `http://127.0.0.1:8765`
 
 ---
 

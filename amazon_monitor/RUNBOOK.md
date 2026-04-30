@@ -44,6 +44,8 @@ Set and verify:
 - `wa_api_url`
 - `wa_api_key`
 - `wa_group_id`
+- optional `wa_client_to` (used for heartbeat/error routing when set)
+- `wa_message_templates`
 - `affiliate_tag`
 - `modem_reconnect_command`
 - `modem_auto_refresh_hours`
@@ -60,6 +62,11 @@ Complete:
 
 1. Run the setup script.
 2. Confirm setup test alert reaches WhatsApp.
+
+Optional client settings UI:
+
+1. `python tools/config_editor_backend.py`
+2. Open `http://127.0.0.1:8765`
 
 ## 5) Start / Stop
 

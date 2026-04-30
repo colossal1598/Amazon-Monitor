@@ -15,8 +15,50 @@ affiliate_tag: "yourclient-20"
 wa_api_url: "http://localhost:3001/send"
 wa_api_key: "change_this_to_a_long_random_secret"
 wa_group_id: "120363408155154756@g.us"
+wa_client_to: ""
+wa_restart_command: ""
 wa_send_heartbeat: false
 wa_send_modem_trigger: false
+wa_message_templates:
+  default: |
+    New product detected!
+    Title: {title}
+    Price: {price_text}
+    Link: {affiliate_link}
+  new_product: |
+    New product detected!
+    Title: {title}
+    Price: {price_text}
+    Link: {affiliate_link}
+  price_drop: |
+    Price drop detected!
+    Title: {title}
+    Price: {price_text}
+    Link: {affiliate_link}
+  back_in_stock: |
+    Back in stock!
+    Title: {title}
+    Price: {price_text}
+    Link: {affiliate_link}
+  setup_test: |
+    Setup test alert
+    Title: {title}
+    Price: {price_text}
+    Link: {affiliate_link}
+  heartbeat_ok: |
+    Heartbeat OK: {timestamp}
+  heartbeat_error: |
+    Heartbeat failed: {error_message}
+    Time: {timestamp}
+  search_error: |
+    Search loop error: {error_message}
+    Time: {timestamp}
+  modem_error: |
+    Modem job error: {error_message}
+    Time: {timestamp}
+  modem_trigger: |
+    Modem recovery trigger fired.
+    Time: {timestamp}
 
 modem_auto_refresh_hours: 2
 modem_reconnect_command: "echo reconnect-modem-command"

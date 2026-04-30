@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>עורך הגדרות אמזון מוניטור</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #f7f7f7; }
+    .card { background: #fff; padding: 16px; border-radius: 8px; margin-bottom: 14px; }
+    label { display: block; margin: 8px 0 4px; font-weight: 700; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: 8px; }
+    textarea { min-height: 90px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+    .chip { border: 1px solid #888; border-radius: 12px; padding: 4px 8px; cursor: pointer; background: #fafafa; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    button { padding: 10px 14px; cursor: pointer; }
+    #status { margin-top: 10px; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>עורך הגדרות לקוח</h1>
+  <p>עריכה מהירה של תבניות הודעה והגדרות בסיסיות. שמירה כותבת ישירות ל-<code>config.yaml</code>.</p>
+
+  <div class="card">
+    <h2>תבניות הודעה</h2>
+    <div class="chips" id="chips"></div>
+    <label>מוצר חדש (`new_product`)</label>
+    <textarea id="tpl_new_product"></textarea>
+    <label>ירידת מחיר (`price_drop`)</label>
+    <textarea id="tpl_price_drop"></textarea>
+    <label>חזר למלאי (`back_in_stock`)</label>
+    <textarea id="tpl_back_in_stock"></textarea>
+    <label>Heartbeat תקין (`heartbeat_ok`)</label>
+    <textarea id="tpl_heartbeat_ok"></textarea>
+    <label>שגיאת Heartbeat (`heartbeat_error`)</label>
+    <textarea id="tpl_heartbeat_error"></textarea>
+    <label>שגיאת חיפוש (`search_error`)</label>
+    <textarea id="tpl_search_error"></textarea>
+    <label>שגיאת מודם (`modem_error`)</label>
+    <textarea id="tpl_modem_error"></textarea>
+  </div>
+
+  <div class="card">
+    <h2>הגדרות בסיסיות</h2>
+    <div class="row">
+      <div>
+        <label>כתובת WA API</label>
+        <input id="wa_api_url" />
+      </div>
+      <div>
+        <label>מפתח API</label>
+        <input id="wa_api_key" />
+      </div>
+      <div>
+        <label>קבוצת וואטסאפ (`wa_group_id`)</label>
+        <input id="wa_group_id" />
+      </div>
+      <div>
+        <label>מספר לקוח (`wa_client_to`, אופציונלי)</label>
+        <input id="wa_client_to" />
+      </div>
+      <div>
+        <label>תג שותפים (`affiliate_tag`)</label>
+        <input id="affiliate_tag" />
+      </div>
+    </div>
+  </div>
+
+  <details class="card">
+    <summary><strong>הגדרות מתקדמות</strong></summary>
+    <div class="row" style="margin-top:12px;">
+      <div>
+        <label>הפעל heartbeat</label>
+        <input type="checkbox" id="wa_send_heartbeat">
+      </div>
+      <div>
+        <label>שלח התרעת modem trigger</label>
+        <input type="checkbox" id="wa_send_modem_trigger">
+      </div>
+      <div>
+        <label>מרווח חיפוש (דקות)</label>
+        <input type="number" id="search_poll_minutes">
+      </div>
+      <div>
+        <label>מספר עמודים לסריקה</label>
+        <input type="number" id="search_pages">
+      </div>
+      <div>
+        <label>אחוז ירידת מחיר</label>
+        <input type="number" id="price_drop_percent">
+      </div>
+      <div>
+        <label>פקודת הפעלה מחדש לשרת WA (אופציונלי)</label>
+        <input id="wa_restart_command" placeholder='cd C:\wa-server; node server.js'>
+      </div>
+    </div>
+  </details>
+
+  <button id="saveBtn">שמור והפעל מחדש</button>
+  <div id="status"></div>
+
+  <script>
+    const placeholders = [
+      "{title}", "{price_text}", "{old_price}", "{new_price}", "{affiliate_link}",
+      "{asin}", "{timestamp}", "{error_message}"
+    ];
+    const templateIds = [
+      "tpl_new_product", "tpl_price_drop", "tpl_back_in_stock",
+      "tpl_heartbeat_ok", "tpl_heartbeat_error", "tpl_search_error", "tpl_modem_error"
+    ];
+
+    let activeTemplate = null;
+
+    function makeChips() {
+      const wrap = document.getElementById("chips");
+      placeholders.forEach(ph => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "chip";
+        b.textContent = ph;
+        b.onclick = () => {
+          if (!activeTemplate) return;
+          const s = activeTemplate.selectionStart;
+          const e = activeTemplate.selectionEnd;
+          const text = activeTemplate.value;
+          activeTemplate.value = text.slice(0, s) + ph + text.slice(e);
+          activeTemplate.focus();
+          activeTemplate.selectionStart = activeTemplate.selectionEnd = s + ph.length;
+        };
+        wrap.appendChild(b);
+      });
+    }
+
+    function bindTemplateFocus() {
+      templateIds.forEach(id => {
+        const el = document.getElementById(id);
+        el.addEventListener("focus", () => activeTemplate = el);
+      });
+    }
+
+    function setStatus(msg, ok = true) {
+      const st = document.getElementById("status");
+      st.textContent = msg;
+      st.style.color = ok ? "green" : "red";
+    }
+
+    async function loadConfig() {
+      const res = await fetch("/api/config");
+      const data = await res.json();
+      const c = data.config || {};
+      const t = c.wa_message_templates || {};
+
+      document.getElementById("wa_api_url").value = c.wa_api_url || "";
+      document.getElementById("wa_api_key").value = c.wa_api_key || "";
+      document.getElementById("wa_group_id").value = c.wa_group_id || "";
+      document.getElementById("wa_client_to").value = c.wa_client_to || "";
+      document.getElementById("affiliate_tag").value = c.affiliate_tag || "";
+      document.getElementById("wa_send_heartbeat").checked = !!c.wa_send_heartbeat;
+      document.getElementById("wa_send_modem_trigger").checked = !!c.wa_send_modem_trigger;
+      document.getElementById("search_poll_minutes").value = c.search_poll_minutes ?? 4;
+      document.getElementById("search_pages").value = c.search_pages ?? 5;
+      document.getElementById("price_drop_percent").value = c.price_drop_percent ?? 10;
+      document.getElementById("wa_restart_command").value = c.wa_restart_command || "";
+
+      document.getElementById("tpl_new_product").value = t.new_product || "";
+      document.getElementById("tpl_price_drop").value = t.price_drop || "";
+      document.getElementById("tpl_back_in_stock").value = t.back_in_stock || "";
+      document.getElementById("tpl_heartbeat_ok").value = t.heartbeat_ok || "";
+      document.getElementById("tpl_heartbeat_error").value = t.heartbeat_error || "";
+      document.getElementById("tpl_search_error").value = t.search_error || "";
+      document.getElementById("tpl_modem_error").value = t.modem_error || "";
+    }
+
+    async function saveConfig() {
+      const confirmed = confirm("האם לשמור שינויים ולהפעיל מחדש את הבוט ושרת ה-WhatsApp? השירות יעצור ויעלה מחדש.");
+      if (!confirmed) {
+        return;
+      }
+      const payload = {
+        basic: {
+          wa_api_url: document.getElementById("wa_api_url").value,
+          wa_api_key: document.getElementById("wa_api_key").value,
+          wa_group_id: document.getElementById("wa_group_id").value,
+          wa_client_to: document.getElementById("wa_client_to").value,
+          affiliate_tag: document.getElementById("affiliate_tag").value
+        },
+        templates: {
+          new_product: document.getElementById("tpl_new_product").value,
+          price_drop: document.getElementById("tpl_price_drop").value,
+          back_in_stock: document.getElementById("tpl_back_in_stock").value,
+          heartbeat_ok: document.getElementById("tpl_heartbeat_ok").value,
+          heartbeat_error: document.getElementById("tpl_heartbeat_error").value,
+          search_error: document.getElementById("tpl_search_error").value,
+          modem_error: document.getElementById("tpl_modem_error").value
+        },
+        advanced: {
+          wa_send_heartbeat: document.getElementById("wa_send_heartbeat").checked,
+          wa_send_modem_trigger: document.getElementById("wa_send_modem_trigger").checked,
+          search_poll_minutes: Number(document.getElementById("search_poll_minutes").value),
+          search_pages: Number(document.getElementById("search_pages").value),
+          price_drop_percent: Number(document.getElementById("price_drop_percent").value),
+          wa_restart_command: document.getElementById("wa_restart_command").value
+        },
+        restart_services: true
+      };
+      const res = await fetch("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setStatus("שמירה נכשלה: " + (data.error || "unknown"), false);
+        return;
+      }
+      setStatus("נשמר בהצלחה. שירותים הופעלו מחדש.");
+    }
+
+    document.getElementById("saveBtn").addEventListener("click", saveConfig);
+    makeChips();
+    bindTemplateFocus();
+    loadConfig().catch(() => setStatus("טעינת הגדרות נכשלה", false));
+  </script>
+</body>
+</html>

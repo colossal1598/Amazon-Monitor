@@ -65,7 +65,8 @@ From `amazon_monitor/`:
    - optional proxy URL
 2. Edit `config.yaml`:
    - `affiliate_tag`
-   - WhatsApp API settings (`wa_api_url`, `wa_api_key`, `wa_group_id`)
+   - WhatsApp API settings (`wa_api_url`, `wa_api_key`, `wa_group_id`, optional `wa_client_to`)
+   - message templates (`wa_message_templates`)
    - modem reconnect command
 
 ## First-Time Setup
@@ -75,6 +76,24 @@ Run:
 - `python first_time_setup.py`
 
 It will send a dummy WhatsApp alert as a smoke test.
+
+## Hebrew Config Editor (Client Friendly)
+
+Run:
+
+- `python tools/config_editor_backend.py`
+
+Then open:
+
+- `http://127.0.0.1:8765`
+
+Page sections:
+
+- Message templates
+- Basic settings
+- Advanced settings (collapsed)
+
+The page writes changes directly to `config.yaml`.
 
 ## Run the Monitor
 
