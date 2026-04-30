@@ -36,7 +36,7 @@ The `amazon_com` URL already filters for free-shipping listings.
 - `modem_rotator.py`: modem reconnect + public IP verification
 - `webhook_sender.py`: alert/heartbeat webhook posting to n8n
 - `main.py`: APScheduler orchestration + error handling + runtime health file
-- `first_time_setup.py`: interactive Amazon session bootstrap + webhook test
+- `first_time_setup.py`: webhook smoke-test utility
 
 ## Prerequisites
 
@@ -44,7 +44,6 @@ The `amazon_com` URL already filters for free-shipping listings.
 - Python 3.10+
 - Google Chrome installed
 - n8n running locally with working webhook workflow
-- Dedicated Amazon account for bot login/session
 
 ## Installation
 
@@ -62,9 +61,8 @@ From `amazon_monitor/`:
 ## Configuration
 
 1. Edit `.env`:
-   - `AMAZON_EMAIL`
-   - `AMAZON_PASSWORD`
    - optional Telegram fallback values
+   - optional proxy URL
 2. Edit `config.yaml`:
    - `affiliate_tag`
    - webhook URLs (`webhook_alert`, `webhook_heartbeat`)
@@ -78,10 +76,7 @@ Run:
 
 It will:
 
-- Open persistent Amazon context in `auth/amazon`
-- Let you manually complete login/2FA
-- Verify Amazon account session access
-- Send a dummy alert to n8n webhook
+- Send a dummy alert to n8n webhook only (webhook smoke test)
 
 ## Run the Monitor
 
@@ -124,7 +119,7 @@ Affiliate link format:
 - Captcha/Robot Check:
   - monitor pauses jobs, triggers modem step, then resumes.
 - Session expired:
-  - rerun `first_time_setup.py` to refresh Amazon login/session.
+  - not applicable in search-only anonymous mode.
 - No alerts:
   - verify n8n webhook URL and workflow activation.
 - Healthcheck failing:

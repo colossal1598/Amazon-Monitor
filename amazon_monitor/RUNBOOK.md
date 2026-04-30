@@ -33,13 +33,9 @@ If PowerShell blocks activation:
 
 Set:
 
-- `AMAZON_EMAIL`
-- `AMAZON_PASSWORD`
-
-Optional:
-
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
+- `PROXY_URL`
 
 ### `config.yaml`
 
@@ -53,7 +49,7 @@ Set and verify:
 
 Note: search URLs are already configured for your use case, including free-shipping filter on the `amazon_com` URL.
 
-## 4) First-Time Session Bootstrap
+## 4) First-Time Webhook Test
 
 Run:
 
@@ -61,9 +57,8 @@ Run:
 
 Complete:
 
-1. Amazon login + 2FA in opened browser.
-2. Confirm logged-in session works.
-3. Confirm setup test alert reaches n8n/WhatsApp.
+1. Run the setup script.
+2. Confirm setup test alert reaches n8n/WhatsApp.
 
 ## 5) Start / Stop
 
@@ -117,18 +112,6 @@ Action:
 1. Check latest errors in `logs/monitor.log`.
 2. Verify modem reconnect command works manually.
 3. Reduce aggressive scheduling only if repeated blocks continue.
-
-### Amazon session expired
-
-Expected:
-
-- search runs fail until session is refreshed
-
-Action:
-
-1. Run `python first_time_setup.py`.
-2. Complete Amazon login again.
-3. Restart `python main.py`.
 
 ### Modem IP did not change
 

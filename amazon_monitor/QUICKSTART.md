@@ -58,13 +58,9 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 Set:
 
-- `AMAZON_EMAIL`
-- `AMAZON_PASSWORD`
-
-Optional:
-
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
+- `PROXY_URL` (optional)
 
 ### Edit `config.yaml`
 
@@ -79,7 +75,7 @@ Do not change the search URLs unless you were told to.
 
 ---
 
-## 5) First-time account setup
+## 5) First-time webhook test
 
 Run:
 
@@ -89,10 +85,8 @@ python first_time_setup.py
 
 What you must do:
 
-1. Log in to Amazon in the opened browser.
-2. Complete 2FA if requested.
-3. Confirm login success.
-4. Confirm test alert is received in your n8n/WhatsApp flow.
+1. Run setup script.
+2. Confirm test alert is received in your n8n/WhatsApp flow.
 
 If test alert is not received, stop and fix n8n first.
 
@@ -228,16 +222,6 @@ Fix:
 1. Confirm n8n is running
 2. Confirm webhook URLs in `config.yaml`
 3. Run `python first_time_setup.py` test again
-
-### Problem: Amazon session expired
-
-Fix:
-
-1. Run `python first_time_setup.py`
-2. Log in again
-3. Restart `python main.py`
-
----
 
 ## 12) Daily 30-second checklist for client
 
