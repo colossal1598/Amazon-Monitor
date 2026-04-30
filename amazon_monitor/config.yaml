@@ -5,6 +5,17 @@ search_urls:
 required_keywords:
   - "pokemon"
   - "tcg"
+required_any_keywords:
+  - "booster"
+  - "booster box"
+  - "bundle"
+  - "elite trainer box"
+  - "etb"
+  - "collection"
+  - "tin"
+  - "blister"
+  - "packs"
+  - "pack"
 
 search_poll_minutes: 4
 search_pages: 5

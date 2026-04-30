@@ -24,8 +24,10 @@ def filter_search_results(
     products: list[dict[str, Any]],
     required_keywords: list[str],
     blacklist_file: str,
+    required_any_keywords: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     req = [k.lower().strip() for k in required_keywords if k.strip()]
+    req_any = [k.lower().strip() for k in (required_any_keywords or []) if k.strip()]
     blocked_asins, blocked_patterns = _read_blacklist(blacklist_file)
     filtered: list[dict[str, Any]] = []
     for product in products:
@@ -36,6 +38,8 @@ def filter_search_results(
         if asin in blocked_asins:
             continue
         if any(not keyword or keyword not in title for keyword in req):
+            continue
+        if req_any and not any(keyword in title for keyword in req_any):
             continue
         if any(pattern.search(title) for pattern in blocked_patterns):
             continue

@@ -128,7 +128,12 @@ def main() -> None:
         mark_job_started("search")
         try:
             results = scrape_search(config["search_urls"], pages=config["search_pages"])
-            filtered = filter_search_results(results, config["required_keywords"], "blacklist.txt")
+            filtered = filter_search_results(
+                results,
+                config["required_keywords"],
+                "blacklist.txt",
+                config.get("required_any_keywords", []),
+            )
             alerts = state_engine.process_search_candidates(filtered)
             for alert in alerts:
                 send_alert(alert, config)

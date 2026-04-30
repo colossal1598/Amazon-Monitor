@@ -68,6 +68,24 @@ def _stock_flag(text: str) -> bool:
     return any(term in lowered for term in terms)
 
 
+def _is_sold_by_amazon(card_text: str) -> bool:
+    lowered = (card_text or "").lower()
+    positive_terms = (
+        "sold by amazon.com",
+        "ships from amazon.com",
+        "dispatched from amazon",
+        "sold by amazon",
+    )
+    negative_terms = (
+        "sold by third-party",
+        "other sellers on amazon",
+        "ships from and sold by",
+    )
+    if any(term in lowered for term in negative_terms):
+        return False
+    return any(term in lowered for term in positive_terms)
+
+
 def _extract_image_url(card) -> str | None:
     image_el = card.query_selector("img.s-image")
     if not image_el:
@@ -121,6 +139,8 @@ def scrape_search(urls_dict: dict[str, str], pages: int = 5) -> list[dict[str, A
                         continue
                     product_title = _extract_title(card)
                     card_text = card.inner_text()
+                    if seller == "amazon_com" and not _is_sold_by_amazon(card_text):
+                        continue
                     price = _extract_price(card, card_text)
                     image_url = _extract_image_url(card)
                     all_products.append(
