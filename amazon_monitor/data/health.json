@@ -1,0 +1,35 @@
+{
+  "updated_at": "2026-04-29T17:43:27.519589+00:00",
+  "jobs": {
+    "cart": {
+      "last_started_at": "2026-04-29T17:43:27.519589+00:00",
+      "last_success_at": "2026-04-29T17:43:27.519589+00:00",
+      "last_error_at": null,
+      "last_error_message": null
+    },
+    "search": {
+      "last_started_at": "2026-04-29T17:43:27.519589+00:00",
+      "last_success_at": "2026-04-29T17:43:27.519589+00:00",
+      "last_error_at": null,
+      "last_error_message": null
+    },
+    "shipping": {
+      "last_started_at": "2026-04-29T17:43:27.519589+00:00",
+      "last_success_at": "2026-04-29T17:43:27.519589+00:00",
+      "last_error_at": null,
+      "last_error_message": null
+    },
+    "heartbeat": {
+      "last_started_at": "2026-04-29T17:43:27.519589+00:00",
+      "last_success_at": "2026-04-29T17:43:27.519589+00:00",
+      "last_error_at": null,
+      "last_error_message": null
+    },
+    "modem": {
+      "last_started_at": "2026-04-29T17:43:27.519589+00:00",
+      "last_success_at": "2026-04-29T17:43:27.519589+00:00",
+      "last_error_at": null,
+      "last_error_message": null
+    }
+  }
+}

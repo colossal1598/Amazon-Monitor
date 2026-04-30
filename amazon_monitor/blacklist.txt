@@ -1,0 +1,3 @@
+# Add one exact ASIN per line (example: B0ABC12345)
+# Add one phrase per line to block titles containing whole-word matches
+

@@ -1,0 +1,31 @@
+search_urls:
+  amazon_export: "https://www.amazon.com/s?k=pokemon+tcg&me=A2XZ7JICGUQ1CX"
+  amazon_com: "https://www.amazon.com/s?k=pokemon+tcg&rh=p_n_is_free_shipping%3A10236242011&s=date-desc-rank&dc&ds=v1%3ATYicYkMoU8%2B3IUjmEcjbElDvodVd9crqoNxWbnoh1o8"
+
+required_keywords:
+  - "pokemon"
+  - "tcg"
+
+cart_poll_seconds: 90
+search_poll_minutes: 4
+search_pages: 5
+max_requests_per_minute: 10
+price_drop_percent: 10
+shipping_cache_hours: 12
+shipping_batch_size: 5
+
+affiliate_tag: "yourclient-20"
+webhook_alert: "http://localhost:5678/webhook/amazon-alert"
+webhook_heartbeat: "http://localhost:5678/webhook/monitor-heartbeat"
+webhook_modem_trigger: ""
+
+modem_auto_refresh_hours: 2
+modem_reconnect_command: "echo reconnect-modem-command"
+
+telegram_bot_token: ""
+telegram_chat_id: ""
+
+db_path: "data/monitor.db"
+log_dir: "logs"
+auth_dir: "auth"
+last_ip_path: "data/last_ip.txt"

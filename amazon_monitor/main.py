@@ -1,0 +1,259 @@
+import logging
+import json
+import time
+from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+import requests
+import yaml
+from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
+
+from browser_factory import init_global_rate_limiter
+from cart_monitor import fetch_cart
+from exceptions import CaptchaBlocked, ModemIPUnchanged, SessionExpired
+from filter_pipeline import filter_search_results
+from modem_rotator import reconnect_modem
+from search_scraper import scrape_search
+from shipping_checker import run_shipping_batch
+from state_engine import StateEngine
+from webhook_sender import send_alert, send_heartbeat, send_modem_trigger
+
+LOGGER = logging.getLogger("monitor")
+
+
+def load_config(path: str = "config.yaml") -> dict:
+    with open(path, "r", encoding="utf-8") as file:
+        return yaml.safe_load(file)
+
+
+def setup_logging(log_dir: str) -> None:
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(Path(log_dir) / "monitor.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8")
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.addHandler(logging.StreamHandler())
+
+
+def send_telegram_message(config: dict, text: str) -> None:
+    token = config.get("telegram_bot_token")
+    chat_id = config.get("telegram_chat_id")
+    if not token or not chat_id:
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
+    except Exception as exc:
+        LOGGER.warning("Telegram send failed: %s", exc)
+
+
+def utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def main() -> None:
+    load_dotenv()
+    config = load_config()
+    setup_logging(config.get("log_dir", "logs"))
+    Path(config.get("auth_dir", "auth")).mkdir(parents=True, exist_ok=True)
+    Path(config.get("db_path", "data/monitor.db")).parent.mkdir(parents=True, exist_ok=True)
+
+    state_engine = StateEngine(
+        db_path=config["db_path"],
+        price_drop_percent=config["price_drop_percent"],
+        shipping_cache_hours=config["shipping_cache_hours"],
+    )
+    init_global_rate_limiter(config["max_requests_per_minute"])
+    scheduler = BackgroundScheduler()
+    scraping_paused = {"value": False}
+    cart_shipping_enabled = {"value": True}
+    last_ip = {"value": ""}
+    health_file = Path("data/health.json")
+    health_file.parent.mkdir(parents=True, exist_ok=True)
+    health_state: dict[str, dict[str, str | None]] = {
+        "cart": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
+        "search": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
+        "shipping": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
+        "heartbeat": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
+        "modem": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
+    }
+
+    def write_health() -> None:
+        health_file.write_text(
+            json.dumps(
+                {
+                    "updated_at": utc_iso(),
+                    "jobs": health_state,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    def mark_job_started(job: str) -> None:
+        health_state[job]["last_started_at"] = utc_iso()
+        write_health()
+
+    def mark_job_success(job: str) -> None:
+        health_state[job]["last_success_at"] = utc_iso()
+        health_state[job]["last_error_message"] = None
+        write_health()
+
+    def mark_job_error(job: str, exc: Exception | str) -> None:
+        health_state[job]["last_error_at"] = utc_iso()
+        health_state[job]["last_error_message"] = str(exc)
+        write_health()
+
+    def handle_captcha() -> None:
+        LOGGER.warning("Captcha blocked, pausing scraping jobs")
+        scraping_paused["value"] = True
+        for job_id in ("cart_loop", "search_loop", "shipping_loop"):
+            scheduler.pause_job(job_id)
+        try:
+            if config.get("webhook_modem_trigger"):
+                send_modem_trigger(config)
+            else:
+                reconnect_modem(config)
+        except Exception as exc:
+            LOGGER.error("Captcha recovery modem step failed: %s", exc)
+        time.sleep(120)
+        for job_id in ("cart_loop", "search_loop", "shipping_loop"):
+            if scheduler.get_job(job_id):
+                scheduler.resume_job(job_id)
+        scraping_paused["value"] = False
+        LOGGER.info("Scraping jobs resumed")
+
+    def cart_loop() -> None:
+        if scraping_paused["value"] or not cart_shipping_enabled["value"]:
+            return
+        mark_job_started("cart")
+        try:
+            snapshots = fetch_cart(auth_dir=str(Path(config.get("auth_dir", "auth")) / "amazon"))
+            alerts = state_engine.process_cart_snapshots(snapshots)
+            for alert in alerts:
+                send_alert(alert, config)
+            mark_job_success("cart")
+        except SessionExpired:
+            cart_shipping_enabled["value"] = False
+            scheduler.pause_job("cart_loop")
+            scheduler.pause_job("shipping_loop")
+            send_telegram_message(config, "URGENT: Amazon session expired for cart/shipping monitor.")
+            LOGGER.error("Cart session expired. Cart and shipping jobs paused.")
+            mark_job_error("cart", "SessionExpired")
+        except Exception as exc:
+            LOGGER.exception("cart_loop failed: %s", exc)
+            mark_job_error("cart", exc)
+
+    def search_loop() -> None:
+        if scraping_paused["value"]:
+            return
+        mark_job_started("search")
+        try:
+            results = scrape_search(config["search_urls"], pages=config["search_pages"])
+            filtered = filter_search_results(results, config["required_keywords"], "blacklist.txt")
+            alerts = state_engine.process_search_candidates(filtered)
+            for alert in alerts:
+                send_alert(alert, config)
+            mark_job_success("search")
+        except CaptchaBlocked:
+            mark_job_error("search", "CaptchaBlocked")
+            handle_captcha()
+        except Exception as exc:
+            LOGGER.exception("search_loop failed: %s", exc)
+            mark_job_error("search", exc)
+
+    def shipping_loop() -> None:
+        if scraping_paused["value"] or not cart_shipping_enabled["value"]:
+            return
+        mark_job_started("shipping")
+        try:
+            alerts = run_shipping_batch(
+                state_engine=state_engine,
+                batch_size=config["shipping_batch_size"],
+                auth_dir=str(Path(config.get("auth_dir", "auth")) / "amazon"),
+            )
+            for alert in alerts:
+                send_alert(alert, config)
+            mark_job_success("shipping")
+        except SessionExpired:
+            cart_shipping_enabled["value"] = False
+            scheduler.pause_job("cart_loop")
+            scheduler.pause_job("shipping_loop")
+            send_telegram_message(config, "URGENT: Amazon session expired during shipping checks.")
+            mark_job_error("shipping", "SessionExpired")
+        except CaptchaBlocked:
+            mark_job_error("shipping", "CaptchaBlocked")
+            handle_captcha()
+        except Exception as exc:
+            LOGGER.exception("shipping_loop failed: %s", exc)
+            mark_job_error("shipping", exc)
+
+    def heartbeat_loop() -> None:
+        mark_job_started("heartbeat")
+        try:
+            send_heartbeat(config)
+            send_telegram_message(config, "Pokemon Amazon monitor heartbeat OK.")
+            mark_job_success("heartbeat")
+        except Exception as exc:
+            LOGGER.warning("heartbeat failed: %s", exc)
+            mark_job_error("heartbeat", exc)
+
+    def modem_refresh_loop() -> None:
+        mark_job_started("modem")
+        try:
+            ip_now = requests.get("https://checkip.amazonaws.com", timeout=5).text.strip()
+            if not last_ip["value"]:
+                last_ip["value"] = ip_now
+                mark_job_success("modem")
+                return
+            if ip_now == last_ip["value"]:
+                new_ip = reconnect_modem(config)
+                last_ip["value"] = new_ip
+            else:
+                last_ip["value"] = ip_now
+            mark_job_success("modem")
+        except ModemIPUnchanged as exc:
+            LOGGER.error("Scheduled modem refresh failed: %s", exc)
+            mark_job_error("modem", exc)
+        except Exception as exc:
+            LOGGER.warning("modem_refresh_loop failed: %s", exc)
+            mark_job_error("modem", exc)
+
+    scheduler.add_job(cart_loop, "interval", seconds=config["cart_poll_seconds"], id="cart_loop", max_instances=1)
+    scheduler.add_job(
+        search_loop,
+        "interval",
+        minutes=config["search_poll_minutes"],
+        jitter=60,
+        id="search_loop",
+        max_instances=1,
+    )
+    scheduler.add_job(shipping_loop, "interval", hours=1, id="shipping_loop", max_instances=1)
+    scheduler.add_job(heartbeat_loop, "interval", minutes=30, id="heartbeat_loop", max_instances=1)
+    scheduler.add_job(
+        modem_refresh_loop,
+        "interval",
+        hours=config["modem_auto_refresh_hours"],
+        id="modem_refresh_loop",
+        max_instances=1,
+    )
+
+    write_health()
+    scheduler.start()
+    LOGGER.info("Monitor started")
+    try:
+        while True:
+            time.sleep(2)
+    except KeyboardInterrupt:
+        LOGGER.info("Shutting down monitor...")
+        scheduler.shutdown(wait=False)
+
+
+if __name__ == "__main__":
+    main()
+
