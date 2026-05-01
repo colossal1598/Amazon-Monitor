@@ -8,7 +8,10 @@ def _normalize_text(value: str) -> str:
     """Lowercase and strip diacritics for accent-insensitive matching."""
     lowered = (value or "").lower().strip()
     decomposed = unicodedata.normalize("NFKD", lowered)
-    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    normalized = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    # Treat full phrase and acronym as equivalent for required keyword matching.
+    normalized = normalized.replace("trading card game", "tcg")
+    return normalized
 
 
 def _read_blacklist(blacklist_file: str) -> tuple[set[str], list[re.Pattern[str]]]:
