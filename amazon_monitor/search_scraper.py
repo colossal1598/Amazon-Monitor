@@ -46,8 +46,8 @@ def _parse_price(raw_text: str) -> float | None:
 
 def _extract_title(card) -> str:
     selectors = (
-        "h2",
         "[data-cy='title-recipe']",
+        "h2",
         "a.a-link-normal.s-line-clamp-2",
         "h2 a span",
         "h2 span",
