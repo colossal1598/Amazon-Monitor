@@ -244,6 +244,52 @@ def _looks_like_free_shipping_text(shipping_text: str) -> bool:
     return "free shipping" in norm or "free delivery" in norm
 
 
+# Product detail page: merchant/seller visible text (new ODF buybox first, then legacy nodes).
+_PDP_SELLER_TEXT_SELECTORS: tuple[str, ...] = (
+    "#sellerProfileTriggerId",
+    "a#sellerProfileTriggerId",
+    '[offer-display-feature-name="desktop-merchant-info"] a.offer-display-feature-text-message',
+    '[offer-display-feature-name="desktop-merchant-info"] a.a-link-normal',
+    "#merchant-info",
+    "#merchant-info a",
+    "#desktop_merchant_info_feature_div",
+    "#tabular-buybox [tabular-attribute-name='Sold by'] .tabular-buybox-text",
+    "#tabular-buybox [tabular-attribute-name='Ships from'] .tabular-buybox-text",
+    "#soldByThirdParty",
+    "#sellerName",
+)
+
+
+def _wait_pdp_merchant_ui(page) -> None:
+    """Best-effort wait for dynamic buybox merchant row (non-fatal on timeout)."""
+    try:
+        page.wait_for_selector(
+            "#sellerProfileTriggerId, [offer-display-feature-name='desktop-merchant-info'], #merchant-info",
+            timeout=12000,
+        )
+    except Exception:
+        pass
+
+
+def _query_pdp_seller_text(page) -> tuple[str, str | None]:
+    for selector in _PDP_SELLER_TEXT_SELECTORS:
+        node = page.query_selector(selector)
+        if not node:
+            continue
+        text = (node.inner_text() or "").strip()
+        if text:
+            return text, selector
+    return "", None
+
+
+def _merchant_debug_root(page):
+    return (
+        page.query_selector('[offer-display-feature-name="desktop-merchant-info"]')
+        or page.query_selector("#merchant-info")
+        or page.query_selector("#desktop_merchant_info_feature_div")
+    )
+
+
 def _resolve_seller_from_pdp(
     context,
     asin: str,
@@ -262,26 +308,10 @@ def _resolve_seller_from_pdp(
     html_snippet = ""
     try:
         page.goto(pdp_url, wait_until="domcontentloaded", timeout=45000)
-        selectors = (
-            "#merchant-info",
-            "#merchant-info a",
-            "#desktop_merchant_info_feature_div",
-            "#tabular-buybox [tabular-attribute-name='Sold by'] .tabular-buybox-text",
-            "#tabular-buybox [tabular-attribute-name='Ships from'] .tabular-buybox-text",
-            "#soldByThirdParty",
-            "#sellerName",
-        )
-        for selector in selectors:
-            node = page.query_selector(selector)
-            if not node:
-                continue
-            text = (node.inner_text() or "").strip()
-            if text:
-                found_text = text
-                hit_selector = selector
-                break
+        _wait_pdp_merchant_ui(page)
+        found_text, hit_selector = _query_pdp_seller_text(page)
         if debug is not None:
-            root = page.query_selector("#merchant-info") or page.query_selector("#desktop_merchant_info_feature_div")
+            root = _merchant_debug_root(page)
             if root:
                 html_snippet = (root.inner_html() or "")[:4000]
     except Exception as exc:
@@ -312,22 +342,8 @@ def _fetch_pdp_seller_blob(context, asin: str) -> str:
         title = (page.title() or "").lower()
         if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
             raise CaptchaBlocked(f"Captcha detected on PDP for {asin}")
-        for selector in (
-            "#merchant-info",
-            "#merchant-info a",
-            "#desktop_merchant_info_feature_div",
-            "#tabular-buybox [tabular-attribute-name='Sold by'] .tabular-buybox-text",
-            "#tabular-buybox [tabular-attribute-name='Ships from'] .tabular-buybox-text",
-            "#soldByThirdParty",
-            "#sellerName",
-        ):
-            node = page.query_selector(selector)
-            if not node:
-                continue
-            text = (node.inner_text() or "").strip()
-            if text:
-                found_text = text
-                break
+        _wait_pdp_merchant_ui(page)
+        found_text, _ = _query_pdp_seller_text(page)
     except CaptchaBlocked:
         raise
     except Exception as exc:

@@ -86,10 +86,15 @@ def _is_valid_price(item: dict[str, Any]) -> bool:
 def _extract_allowed_seller(seller_text: str) -> str | None:
     """Allow only retail Amazon.com or Amazon Export LLC (exclude Services/Warehouse/etc.)."""
     clean = _normalize_ascii(seller_text)
-    if "sold by" not in clean:
+    if not clean:
         return None
+    # PDP often exposes only the merchant link text (no "Sold by" prefix).
+    if "amazon export sales llc" in clean:
+        return "Amazon Export Sales LLC"
     if "amazon export llc" in clean:
         return "Amazon Export LLC"
+    if "sold by" not in clean:
+        return None
     # Substring "amazon.com" also appears in "Amazon.com Services LLC" — reject those.
     if re.search(r"amazon\s+warehouse", clean) or re.search(r"amazon\.com\s+services", clean):
         return None
