@@ -220,6 +220,7 @@ def main() -> None:
         "interval",
         minutes=config["search_poll_minutes"],
         jitter=60,
+        next_run_time=datetime.now(timezone.utc),
         id="search_loop",
         max_instances=1,
     )
