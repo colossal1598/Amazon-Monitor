@@ -11,7 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 from browser_factory import init_global_rate_limiter
-from exceptions import CaptchaBlocked, ModemIPUnchanged
+from exceptions import CaptchaBlocked, ModemIPUnchanged, NetworkAccessDenied
 from filter_pipeline import filter_search_results
 from modem_rotator import reconnect_modem
 from search_scraper import scrape_search
@@ -32,6 +32,16 @@ def resolve_export_search_url(config: dict) -> str:
         if isinstance(exp, str) and exp.strip():
             return exp.strip()
     raise ValueError("Set `search_url` or `search_urls.amazon_export` in config.yaml")
+
+
+def should_reconcile_missing_asins(config: dict, filtered_count: int) -> tuple[bool, str | None]:
+    """Guard missing-ASIN reconciliation against empty runs."""
+    if not config.get("enable_missing_asin_oos", True):
+        return False, "disabled_by_config"
+    min_results = int(config.get("min_results_for_absence_reconcile", 1))
+    if filtered_count < min_results:
+        return False, f"filtered_count_below_min:{filtered_count}<{min_results}"
+    return True, None
 
 
 def load_config(path: str = "config.yaml") -> dict:
@@ -147,13 +157,25 @@ def main() -> None:
                 "blacklist.txt",
                 config.get("required_any_keywords", []),
             )
-            alerts = state_engine.process_search_candidates(filtered)
+            reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(filtered))
+            if skipped_reason:
+                LOGGER.info(
+                    "search_reconcile_skipped reason=%s raw_count=%s filtered_count=%s",
+                    skipped_reason,
+                    len(results),
+                    len(filtered),
+                )
+            alerts = state_engine.process_search_candidates(filtered, reconcile_missing=reconcile_missing)
             for alert in alerts:
                 send_alert(alert, config)
             mark_job_success("search")
         except CaptchaBlocked:
             mark_job_error("search", "CaptchaBlocked")
             handle_captcha()
+        except NetworkAccessDenied as exc:
+            mark_job_error("search", f"NetworkAccessDenied: {exc}")
+            LOGGER.error("Network access denied — triggering modem rotation")
+            handle_captcha()  # Same recovery flow: modem rotation + pause/resume
         except Exception as exc:
             LOGGER.exception("search_loop failed: %s", exc)
             mark_job_error("search", exc)

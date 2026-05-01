@@ -7,9 +7,25 @@ from typing import Any
 
 import browser_factory
 from browser_factory import close_context, create_stealth_context
-from exceptions import CaptchaBlocked
+from exceptions import CaptchaBlocked, NetworkAccessDenied
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _is_network_error(error: Exception) -> bool:
+    """Check if error is a retryable network-level failure."""
+    err_str = str(error).lower()
+    network_patterns = [
+        "err_network_access_denied",
+        "err_network_changed",
+        "err_connection_refused",
+        "err_connection_reset",
+        "err_connection_timed_out",
+        "err_internet_disconnected",
+        "net::err_",
+        "timeout",
+    ]
+    return any(p in err_str for p in network_patterns)
 PRICE_RE = re.compile(r"\$?\s*([0-9]+(?:[.,][0-9]{1,2})?)")
 
 
@@ -106,9 +122,8 @@ def _extract_image_url(card) -> str | None:
     return src.strip() if src else None
 
 
-def scrape_search(search_url: str, pages: int = 5) -> list[dict[str, Any]]:
-    """Scrape one Amazon search results URL (export-seller flow)."""
-    seller = "amazon_export"
+def _scrape_single_attempt(search_url: str, pages: int, seller: str) -> list[dict[str, Any]]:
+    """Single scrape attempt. Raises CaptchaBlocked or NetworkAccessDenied on failure."""
     all_products: list[dict[str, Any]] = []
     context = create_stealth_context(persistent_dir=None, headless=False)
     try:
@@ -118,7 +133,12 @@ def scrape_search(search_url: str, pages: int = 5) -> list[dict[str, Any]]:
             if browser_factory.global_rate_limiter:
                 browser_factory.global_rate_limiter.acquire()
             LOGGER.info("Scraping %s page %s", seller, page_num)
-            page.goto(current_url, wait_until="domcontentloaded", timeout=45000)
+            try:
+                page.goto(current_url, wait_until="domcontentloaded", timeout=45000)
+            except Exception as e:
+                if _is_network_error(e):
+                    raise NetworkAccessDenied(f"Network error on page {page_num}: {e}", e)
+                raise
             title = (page.title() or "").lower()
             if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
                 raise CaptchaBlocked(f"Captcha detected while scraping {seller}")
@@ -159,3 +179,42 @@ def scrape_search(search_url: str, pages: int = 5) -> list[dict[str, Any]]:
     finally:
         close_context(context)
     return all_products
+
+
+def scrape_search(search_url: str, pages: int = 5, max_retries: int = 2) -> list[dict[str, Any]]:
+    """Scrape one Amazon search results URL with automatic retry on network errors.
+
+    Args:
+        search_url: The Amazon search URL to scrape.
+        pages: Maximum number of pages to scrape.
+        max_retries: Number of retry attempts for network errors (not captcha).
+
+    Raises:
+        CaptchaBlocked: If Amazon shows a captcha/robot check.
+        NetworkAccessDenied: If network errors persist after all retries.
+    """
+    seller = "amazon_export"
+    last_error: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            LOGGER.info("Scrape attempt %s/%s for %s", attempt + 1, max_retries + 1, seller)
+            return _scrape_single_attempt(search_url, pages, seller)
+        except NetworkAccessDenied as e:
+            last_error = e
+            LOGGER.warning("Network error on attempt %s: %s", attempt + 1, e)
+            if attempt < max_retries:
+                delay = random.uniform(2, 5)
+                LOGGER.info("Retrying after %.1fs...", delay)
+                time.sleep(delay)
+            else:
+                LOGGER.error("Network errors persisted after %s attempts", max_retries + 1)
+                raise
+        except CaptchaBlocked:
+            # Don't retry captcha — needs IP rotation
+            raise
+
+    # Should never reach here
+    if last_error:
+        raise last_error
+    return []

@@ -45,6 +45,8 @@ def decide_back_in_stock(old_stock: int, new_stock: int) -> AlertDecision:
     """Whether to emit `back_in_stock`.
 
     Preconditions: row already existed before this cycle; stock flags are 0/1.
+    New stock is presence-derived: if the ASIN appears in a healthy filtered run,
+    it is treated as in-stock.
 
     Emits only on transition out-of-stock (0) to in-stock (1), not on first sight
     of an ASIN (that is `new_product`).

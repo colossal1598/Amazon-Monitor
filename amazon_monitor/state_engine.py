@@ -126,19 +126,64 @@ class StateEngine:
             "timestamp": utc_iso(),
         }
 
-    def process_search_candidates(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Process scraped search candidates and emit new/stock/price alerts."""
+    def _mark_missing_asins_out_of_stock(self, seen_asins: set[str], source: str, now: str) -> int:
+        """Mark tracked ASINs absent from this healthy run as out-of-stock."""
+        if seen_asins:
+            placeholders = ",".join("?" for _ in seen_asins)
+            params: list[Any] = [now, source, *sorted(seen_asins)]
+            cursor = self.conn.execute(
+                f"""
+                UPDATE products
+                SET in_stock = 0,
+                    last_seen = ?
+                WHERE seller = ?
+                  AND in_stock != 0
+                  AND asin NOT IN ({placeholders})
+                """,
+                params,
+            )
+        else:
+            cursor = self.conn.execute(
+                """
+                UPDATE products
+                SET in_stock = 0,
+                    last_seen = ?
+                WHERE seller = ?
+                  AND in_stock != 0
+                """,
+                (now, source),
+            )
+        return cursor.rowcount
+
+    def process_search_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+        reconcile_missing: bool = False,
+        source: str = "amazon_export",
+    ) -> list[dict[str, Any]]:
+        """Process scraped search candidates and emit new/stock/price alerts.
+
+        When `reconcile_missing` is true, any tracked ASIN for the same source
+        that is absent from this successful run is marked out-of-stock.
+        """
         alerts: list[dict[str, Any]] = []
+        seen_asins: set[str] = set()
+        new_count = 0
+        back_in_stock_count = 0
+        price_drop_count = 0
         with self.lock:
             for item in candidates:
                 asin = (item.get("asin") or "").upper()
                 if not asin:
                     continue
+                seen_asins.add(asin)
                 title = item.get("title")
-                seller = item.get("seller")
+                seller = item.get("seller") or source
                 image_url = item.get("image_url")
                 new_price = _as_float(item.get("price"))
-                new_stock = 1 if item.get("in_stock") else 0
+                # Presence in a healthy, filtered run is the stock signal.
+                # Missing-ASIN reconciliation marks absent items out-of-stock.
+                new_stock = 1
                 now = utc_iso()
                 now_dt = utc_now()
 
@@ -157,6 +202,7 @@ class StateEngine:
                     alert = self._build_alert(nd.alert_type, "search", asin, title, new_price, image_url=image_url)
                     alerts.append(alert)
                     self._record_alert(alert)
+                    new_count += 1
                     continue
 
                 old_price = _as_float(row["price"])
@@ -180,6 +226,7 @@ class StateEngine:
                     alerts.append(alert)
                     self._record_alert(alert)
                     self.conn.execute("UPDATE products SET last_stock_alert = ? WHERE asin = ?", (now, asin))
+                    back_in_stock_count += 1
                 elif stock_decision.skip_reason:
                     LOGGER.info("alert_skip asin=%s alert=back_in_stock reason=%s", asin, stock_decision.skip_reason)
 
@@ -206,7 +253,21 @@ class StateEngine:
                     alerts.append(alert)
                     self._record_alert(alert)
                     self.conn.execute("UPDATE products SET last_price_alert = ? WHERE asin = ?", (now, asin))
+                    price_drop_count += 1
                 elif price_decision.skip_reason:
                     LOGGER.info("alert_skip asin=%s alert=price_drop reason=%s", asin, price_decision.skip_reason)
+            marked_oos_count = 0
+            if reconcile_missing:
+                marked_oos_count = self._mark_missing_asins_out_of_stock(seen_asins, source, utc_iso())
+            LOGGER.info(
+                "search_reconcile seen_count=%s new_count=%s marked_oos_count=%s "
+                "back_in_stock_count=%s price_drop_count=%s reconcile_missing=%s",
+                len(seen_asins),
+                new_count,
+                marked_oos_count,
+                back_in_stock_count,
+                price_drop_count,
+                reconcile_missing,
+            )
             self.conn.commit()
         return alerts

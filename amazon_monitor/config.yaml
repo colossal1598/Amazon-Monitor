@@ -21,6 +21,8 @@ search_poll_minutes: 4
 search_pages: 5
 max_requests_per_minute: 10
 price_drop_percent: 10
+enable_missing_asin_oos: true
+min_results_for_absence_reconcile: 1
 
 affiliate_tag: "yourclient-20"
 wa_api_url: "http://localhost:3001/send"

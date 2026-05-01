@@ -27,6 +27,14 @@ Example export-seller search:
 - Cooldown logic prevents duplicate price-drop alerts too frequently.
 - When an alert rule does not fire, the engine may log `alert_skip` lines (with a stable `reason=` token) so you can see why there was no WhatsApp message.
 
+## Stock Tracking Logic
+
+- Stock is based on ASIN presence in a successful filtered run.
+- If a known ASIN is present in the filtered results, it is treated as `in_stock=1`.
+- If `enable_missing_asin_oos` is true and the run has at least `min_results_for_absence_reconcile` filtered results (default: 1), any previously tracked export ASIN missing from that run is marked `in_stock=0`.
+- When a missing-marked ASIN appears again later, the `0 -> 1` transition emits one `back_in_stock` alert.
+- If a run has zero filtered results, the monitor skips missing-ASIN reconciliation for that cycle to avoid mass out-of-stock flips from empty scrape results.
+
 ## Architecture
 
 - `search_scraper.py`: ephemeral search scraping context
@@ -67,6 +75,7 @@ From `amazon_monitor/`:
    - `affiliate_tag`
    - WhatsApp API settings (`wa_api_url`, `wa_api_key`, `wa_group_id`, optional `wa_client_to`)
    - message templates (`wa_message_templates`)
+   - stock reconciliation (`enable_missing_asin_oos`, `min_results_for_absence_reconcile`)
    - modem reconnect command
 
 ## First-Time Setup
