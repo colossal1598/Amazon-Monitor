@@ -1,10 +1,15 @@
+"""SQLite-backed state management for search monitoring."""
+
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-"""SQLite-backed state management for search monitoring."""
+from alert_decisions import decide_back_in_stock, decide_new_product, decide_price_drop
+
+LOGGER = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -24,6 +29,17 @@ def parse_dt(value: str | None) -> datetime | None:
         return None
 
 
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class StateEngine:
     """Tracks products, detects changes, and records generated alerts."""
 
@@ -36,6 +52,7 @@ class StateEngine:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.init_db()
+        self._price_alert_cooldown = timedelta(hours=24)
 
     def init_db(self) -> None:
         with self.lock:
@@ -94,7 +111,7 @@ class StateEngine:
         image_url: str | None = None,
     ) -> dict[str, Any]:
         pct = None
-        if old_price and new_price and old_price > 0:
+        if old_price is not None and new_price is not None and old_price > 0:
             pct = round(((old_price - new_price) / old_price) * 100, 2)
         return {
             "type": alert_type,
@@ -119,16 +136,16 @@ class StateEngine:
                     continue
                 title = item.get("title")
                 seller = item.get("seller")
-                amazon_sold = bool(item.get("amazon_sold", False))
-                if seller == "amazon_com" and not amazon_sold:
-                    continue
                 image_url = item.get("image_url")
-                new_price = item.get("price")
+                new_price = _as_float(item.get("price"))
                 new_stock = 1 if item.get("in_stock") else 0
                 now = utc_iso()
+                now_dt = utc_now()
 
                 row = self._fetch_product(asin)
                 if row is None:
+                    nd = decide_new_product(is_first_observation=True)
+                    assert nd.emit and nd.alert_type is not None
                     self.conn.execute(
                         """
                         INSERT INTO products
@@ -137,12 +154,12 @@ class StateEngine:
                         """,
                         (asin, title, seller, new_price, new_stock, now, now),
                     )
-                    alert = self._build_alert("new_product", "search", asin, title, new_price, image_url=image_url)
+                    alert = self._build_alert(nd.alert_type, "search", asin, title, new_price, image_url=image_url)
                     alerts.append(alert)
                     self._record_alert(alert)
                     continue
 
-                old_price = row["price"]
+                old_price = _as_float(row["price"])
                 old_stock = int(row["in_stock"] or 0)
                 self.conn.execute(
                     """
@@ -157,32 +174,39 @@ class StateEngine:
                     (title, seller, new_price, new_stock, now, asin),
                 )
 
-                if old_stock == 0 and new_stock == 1:
+                stock_decision = decide_back_in_stock(old_stock, new_stock)
+                if stock_decision.emit:
                     alert = self._build_alert("back_in_stock", "search", asin, title, new_price, image_url=image_url)
                     alerts.append(alert)
                     self._record_alert(alert)
                     self.conn.execute("UPDATE products SET last_stock_alert = ? WHERE asin = ?", (now, asin))
+                elif stock_decision.skip_reason:
+                    LOGGER.info("alert_skip asin=%s alert=back_in_stock reason=%s", asin, stock_decision.skip_reason)
 
                 last_price_alert = parse_dt(row["last_price_alert"])
-                if old_price and new_price and new_price < old_price:
-                    pct_drop = ((old_price - new_price) / old_price) * 100
-                    enough_drop = pct_drop >= self.price_drop_percent
-                    cooldown_ok = not last_price_alert or utc_now() - last_price_alert > timedelta(hours=24)
-                    if enough_drop and cooldown_ok:
-                        alert = self._build_alert(
-                            "price_drop",
-                            "search",
-                            asin,
-                            title,
-                            new_price,
-                            old_price=old_price,
-                            new_price=new_price,
-                            image_url=image_url,
-                        )
-                        alerts.append(alert)
-                        self._record_alert(alert)
-                        self.conn.execute("UPDATE products SET last_price_alert = ? WHERE asin = ?", (now, asin))
+                price_decision = decide_price_drop(
+                    old_price,
+                    new_price,
+                    last_price_alert,
+                    now_dt,
+                    self.price_drop_percent,
+                    self._price_alert_cooldown,
+                )
+                if price_decision.emit:
+                    alert = self._build_alert(
+                        "price_drop",
+                        "search",
+                        asin,
+                        title,
+                        new_price,
+                        old_price=old_price,
+                        new_price=new_price,
+                        image_url=image_url,
+                    )
+                    alerts.append(alert)
+                    self._record_alert(alert)
+                    self.conn.execute("UPDATE products SET last_price_alert = ? WHERE asin = ?", (now, asin))
+                elif price_decision.skip_reason:
+                    LOGGER.info("alert_skip asin=%s alert=price_drop reason=%s", asin, price_decision.skip_reason)
             self.conn.commit()
         return alerts
-
-

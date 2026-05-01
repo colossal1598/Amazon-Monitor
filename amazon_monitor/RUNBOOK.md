@@ -50,7 +50,7 @@ Set and verify:
 - `modem_reconnect_command`
 - `modem_auto_refresh_hours`
 
-Note: search URLs are already configured for your use case, including free-shipping filter on the `amazon_com` URL.
+Note: set `search_urls.amazon_export` (or `search_url`) in `config.yaml` to your export-seller search; the monitor uses that URL only.
 
 ## 4) First-Time WhatsApp API Test
 

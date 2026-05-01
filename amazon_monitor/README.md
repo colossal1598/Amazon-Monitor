@@ -4,26 +4,20 @@ Local Python monitor for Pokemon TCG listings on Amazon, with anti-detection scr
 
 ## What This Project Does
 
-- Monitors two Amazon search URLs for new/changed Pokemon TCG items.
+- Monitors **one** Amazon search URL (export-seller flow) for new/changed Pokemon TCG items.
 - Detects:
   - New products
   - Back in stock
   - Price drops
-- For `amazon_com` source, all three alert types are restricted to Amazon.com-sold listings.
 - Sends alerts directly to your local WhatsApp API server.
 
-## Exact Search URLs in Use
+## Search URL
 
-- Export seller:
-  - `https://www.amazon.com/s?k=pokemon+tcg&me=A2XZ7JICGUQ1CX`
-- Amazon.com free-shipping flow:
-  - `https://www.amazon.com/s?k=pokemon+tcg&rh=p_n_is_free_shipping%3A10236242011&s=date-desc-rank&dc&ds=v1%3ATYicYkMoU8%2B3IUjmEcjbElDvodVd9crqoNxWbnoh1o8`
+Configure either `search_urls.amazon_export` or a single top-level `search_url` in `config.yaml`. The monitor resolves that URL in `main.resolve_export_search_url`.
 
-These are configured in `config.yaml`.
-The `amazon_com` URL already filters for free-shipping listings.
-Alert scope is source-specific:
-- `amazon_com`: alerts are emitted only for listings explicitly sold by Amazon.com.
-- `amazon_export`: remains unrestricted by Amazon.com seller rules.
+Example export-seller search:
+
+- `https://www.amazon.com/s?k=pokemon+tcg&me=A2XZ7JICGUQ1CX`
 
 ## Price Tracking Logic
 
@@ -31,12 +25,14 @@ Alert scope is source-specific:
 - On each cycle, new prices are compared against previous prices.
 - Price-drop alerts trigger only when drop percentage passes `price_drop_percent`.
 - Cooldown logic prevents duplicate price-drop alerts too frequently.
+- When an alert rule does not fire, the engine may log `alert_skip` lines (with a stable `reason=` token) so you can see why there was no WhatsApp message.
 
 ## Architecture
 
 - `search_scraper.py`: ephemeral search scraping context
 - `filter_pipeline.py`: keyword + blacklist filtering
-- `state_engine.py`: SQLite state, cooldown rules, alert generation
+- `alert_decisions.py`: pure rules for new / stock / price-drop alerts (with skip reasons)
+- `state_engine.py`: SQLite state, applies `alert_decisions`, records alerts
 - `modem_rotator.py`: modem reconnect + public IP verification
 - `webhook_sender.py`: alert/heartbeat posting to local WhatsApp API server
 - `main.py`: APScheduler orchestration + error handling + runtime health file

@@ -79,25 +79,6 @@ def _stock_flag(text: str) -> bool:
     return any(term in lowered for term in in_stock_terms)
 
 
-def _is_sold_by_amazon(card_text: str) -> bool:
-    lowered = (card_text or "").lower()
-    positive_terms = (
-        "sold by amazon.com",
-        "sold by amazon",
-        "ships from and sold by amazon.com",
-        "ships from and sold by amazon",
-        "dispatched from and sold by amazon",
-    )
-    if any(term in lowered for term in positive_terms):
-        return True
-    # If card text contains a seller marker but not Amazon, treat as non-Amazon.
-    if "sold by " in lowered:
-        return False
-    if "other sellers on amazon" in lowered:
-        return False
-    return False
-
-
 def _extract_image_url(card) -> str | None:
     image_el = card.query_selector("img.s-image")
     if not image_el:
@@ -125,60 +106,56 @@ def _extract_image_url(card) -> str | None:
     return src.strip() if src else None
 
 
-def scrape_search(urls_dict: dict[str, str], pages: int = 5) -> list[dict[str, Any]]:
+def scrape_search(search_url: str, pages: int = 5) -> list[dict[str, Any]]:
+    """Scrape one Amazon search results URL (export-seller flow)."""
+    seller = "amazon_export"
     all_products: list[dict[str, Any]] = []
-    for seller, url in urls_dict.items():
-        context = create_stealth_context(persistent_dir=None, headless=False)
-        try:
-            page = context.new_page()
-            current_url = url
-            for page_num in range(1, pages + 1):
-                if browser_factory.global_rate_limiter:
-                    browser_factory.global_rate_limiter.acquire()
-                LOGGER.info("Scraping %s page %s", seller, page_num)
-                page.goto(current_url, wait_until="domcontentloaded", timeout=45000)
-                title = (page.title() or "").lower()
-                if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
-                    raise CaptchaBlocked(f"Captcha detected while scraping {seller}")
+    context = create_stealth_context(persistent_dir=None, headless=False)
+    try:
+        page = context.new_page()
+        current_url = search_url
+        for page_num in range(1, pages + 1):
+            if browser_factory.global_rate_limiter:
+                browser_factory.global_rate_limiter.acquire()
+            LOGGER.info("Scraping %s page %s", seller, page_num)
+            page.goto(current_url, wait_until="domcontentloaded", timeout=45000)
+            title = (page.title() or "").lower()
+            if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
+                raise CaptchaBlocked(f"Captcha detected while scraping {seller}")
 
-                page.wait_for_selector("div[data-component-type='s-search-result']", timeout=25000)
-                page.mouse.wheel(0, random.randint(300, 1300))
-                time.sleep(random.uniform(0.5, 1.2))
-                cards = page.query_selector_all("div[data-component-type='s-search-result']")
-                for card in cards:
-                    asin = (card.get_attribute("data-asin") or "").strip()
-                    if not asin:
-                        continue
-                    product_title = _extract_title(card)
-                    card_text = card.inner_text()
-                    amazon_sold = _is_sold_by_amazon(card_text) if seller == "amazon_com" else False
-                    if seller == "amazon_com" and not amazon_sold:
-                        continue
-                    price = _extract_price(card, card_text)
-                    image_url = _extract_image_url(card)
-                    all_products.append(
-                        {
-                            "asin": asin,
-                            "title": product_title,
-                            "price": price,
-                            "in_stock": _stock_flag(card_text),
-                            "seller": seller,
-                            "amazon_sold": amazon_sold,
-                            "image_url": image_url,
-                        }
-                    )
+            page.wait_for_selector("div[data-component-type='s-search-result']", timeout=25000)
+            page.mouse.wheel(0, random.randint(300, 1300))
+            time.sleep(random.uniform(0.5, 1.2))
+            cards = page.query_selector_all("div[data-component-type='s-search-result']")
+            for card in cards:
+                asin = (card.get_attribute("data-asin") or "").strip()
+                if not asin:
+                    continue
+                product_title = _extract_title(card)
+                card_text = card.inner_text()
+                price = _extract_price(card, card_text)
+                image_url = _extract_image_url(card)
+                all_products.append(
+                    {
+                        "asin": asin,
+                        "title": product_title,
+                        "price": price,
+                        "in_stock": _stock_flag(card_text),
+                        "seller": seller,
+                        "image_url": image_url,
+                    }
+                )
 
-                next_btn = page.query_selector("a.s-pagination-next")
-                disabled = (next_btn.get_attribute("aria-disabled") if next_btn else "true") == "true"
-                if not next_btn or disabled:
-                    break
-                if browser_factory.global_rate_limiter:
-                    browser_factory.global_rate_limiter.acquire()
-                next_btn.click()
-                page.wait_for_load_state("domcontentloaded", timeout=30000)
-                current_url = page.url
-                time.sleep(random.uniform(6, 12))
-        finally:
-            close_context(context)
+            next_btn = page.query_selector("a.s-pagination-next")
+            disabled = (next_btn.get_attribute("aria-disabled") if next_btn else "true") == "true"
+            if not next_btn or disabled:
+                break
+            if browser_factory.global_rate_limiter:
+                browser_factory.global_rate_limiter.acquire()
+            next_btn.click()
+            page.wait_for_load_state("domcontentloaded", timeout=30000)
+            current_url = page.url
+            time.sleep(random.uniform(6, 12))
+    finally:
+        close_context(context)
     return all_products
-

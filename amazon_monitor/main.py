@@ -21,6 +21,19 @@ from webhook_sender import send_alert, send_heartbeat, send_modem_trigger, send_
 LOGGER = logging.getLogger("monitor")
 
 
+def resolve_export_search_url(config: dict) -> str:
+    """Single monitored search: `search_url` or `search_urls.amazon_export`."""
+    raw = config.get("search_url")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    urls = config.get("search_urls")
+    if isinstance(urls, dict):
+        exp = urls.get("amazon_export")
+        if isinstance(exp, str) and exp.strip():
+            return exp.strip()
+    raise ValueError("Set `search_url` or `search_urls.amazon_export` in config.yaml")
+
+
 def load_config(path: str = "config.yaml") -> dict:
     with open(path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file)
@@ -127,7 +140,7 @@ def main() -> None:
             return
         mark_job_started("search")
         try:
-            results = scrape_search(config["search_urls"], pages=config["search_pages"])
+            results = scrape_search(resolve_export_search_url(config), pages=config["search_pages"])
             filtered = filter_search_results(
                 results,
                 config["required_keywords"],

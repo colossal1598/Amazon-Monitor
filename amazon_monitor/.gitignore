@@ -3,4 +3,6 @@
 
 docs/*
 
-amazon_monitor\config.yaml
+config.yaml
+
+_archive_amazon_com_search/

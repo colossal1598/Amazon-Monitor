@@ -1,6 +1,6 @@
+# Single export-seller search (legacy dual-URL + amazon_com scrape: see _archive_amazon_com_search/).
 search_urls:
   amazon_export: "https://www.amazon.com/s?k=pokemon+tcg&me=A2XZ7JICGUQ1CX"
-  amazon_com: "https://www.amazon.com/s?k=pokemon+tcg&rh=p_n_is_free_shipping%3A10236242011&s=date-desc-rank&dc&ds=v1%3ATYicYkMoU8%2B3IUjmEcjbElDvodVd9crqoNxWbnoh1o8"
 
 required_keywords:
   - "pokemon"
