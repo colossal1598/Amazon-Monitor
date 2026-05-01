@@ -74,11 +74,20 @@ def marketplace_candidates_from_scrape(
         budget_asins = stage1_unknown_asins[:max_pdp]
     meta["pdp_scheduled"] = len(budget_asins)
     max_batch_seconds = float(config.get("max_pdp_batch_seconds", 120))
-    pdp_map: dict[str, str] = (
-        verify_sellers_batch(budget_asins, len(budget_asins), max_seconds=max_batch_seconds)
-        if budget_asins
-        else {}
-    )
+    captcha_stopped = False
+    if budget_asins:
+        pdp_map, captcha_stopped = verify_sellers_batch(
+            budget_asins, len(budget_asins), max_seconds=max_batch_seconds
+        )
+    else:
+        pdp_map = {}
+    meta["pdp_captcha_stopped"] = captcha_stopped
+    if captcha_stopped:
+        LOGGER.warning(
+            "marketplace_pdp_partial verified=%s scheduled=%s (captcha mid-batch)",
+            len(pdp_map),
+            len(budget_asins),
+        )
     meta["pdp_verification_keys"] = list(pdp_map.keys())
     meta["pdp_text_by_asin"] = dict(pdp_map)
 
@@ -166,11 +175,25 @@ def run_test_scrape(config: dict, pages_override: int | None = None) -> None:
         selector_debug.extend(debug.get("selector_debug", []))
         pdp_debug.update(debug.get("pdp_debug", {}))
 
+    (output_dir / "raw_items.json").write_text(json.dumps(raw_items, ensure_ascii=False, indent=2), encoding="utf-8")
+
     stage1_items = filter_stage1_candidates(raw_items)
     test_config = dict(config)
     test_config["pending_seller_queue_path"] = str(output_dir / "pending_seller_queue_test.json")
-    filtered_items, pipeline_meta = marketplace_candidates_from_scrape(raw_items, test_config)
-    (output_dir / "raw_items.json").write_text(json.dumps(raw_items, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        filtered_items, pipeline_meta = marketplace_candidates_from_scrape(raw_items, test_config)
+    except Exception as exc:
+        LOGGER.exception("test_scrape pipeline failed after raw scrape: %s", exc)
+        filtered_items = []
+        pipeline_meta = {
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+            "stage1_count": 0,
+            "filtered_count": 0,
+            "pdp_scheduled": 0,
+            "pending_queue_size": 0,
+            "pdp_captcha_stopped": False,
+        }
     (output_dir / "stage1_candidates.json").write_text(
         json.dumps(stage1_items, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -392,6 +415,11 @@ def main(
                 pipeline_meta.get("pdp_scheduled"),
                 pipeline_meta.get("pending_queue_size"),
             )
+            if pipeline_meta.get("pdp_captcha_stopped"):
+                LOGGER.warning(
+                    "search_pipeline pdp_captcha_stopped partial_pdp_count=%s",
+                    len(pipeline_meta.get("pdp_text_by_asin") or {}),
+                )
             reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(filtered))
             if skipped_reason:
                 LOGGER.info(

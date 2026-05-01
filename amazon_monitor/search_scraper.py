@@ -292,14 +292,19 @@ def verify_sellers_batch(
     asins: list[str],
     max_verifications: int,
     max_seconds: float | None = None,
-) -> dict[str, str]:
-    """Open sequential PDP pages for up to max_verifications ASINs; return asin -> seller blob."""
+) -> tuple[dict[str, str], bool]:
+    """Open sequential PDP pages for up to max_verifications ASINs; return asin -> seller blob.
+
+    Returns (results, captcha_stopped). On captcha mid-batch, returns partial results and True
+    instead of raising (so callers can persist diagnostics and continue safely).
+    """
     results: dict[str, str] = {}
+    captcha_stopped = False
     if max_verifications <= 0 or not asins:
-        return results
+        return results, captcha_stopped
     to_visit = [a.strip().upper() for a in asins if a and len(a.strip()) == 10][:max_verifications]
     if not to_visit:
-        return results
+        return results, captcha_stopped
     started = time.monotonic()
     context = create_stealth_context(persistent_dir=None, headless=False)
     try:
@@ -311,11 +316,21 @@ def verify_sellers_batch(
                     len(results),
                 )
                 break
-            results[asin] = _fetch_pdp_seller_blob(context, asin)
+            try:
+                results[asin] = _fetch_pdp_seller_blob(context, asin)
+            except CaptchaBlocked as exc:
+                LOGGER.warning(
+                    "verify_sellers_batch captcha stopped batch at asin=%s (verified_before=%s): %s",
+                    asin,
+                    len(results),
+                    exc,
+                )
+                captcha_stopped = True
+                break
             time.sleep(random.uniform(0.4, 1.0))
     finally:
         close_context(context)
-    return results
+    return results, captcha_stopped
 
 
 def _scrape_single_attempt(
