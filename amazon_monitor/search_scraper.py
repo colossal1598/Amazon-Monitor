@@ -3,6 +3,7 @@ import json
 import random
 import re
 import time
+from urllib.parse import urlencode, urljoin, urlparse, parse_qs, urlunparse
 from typing import Any
 
 import browser_factory
@@ -62,6 +63,17 @@ def _extract_title(card) -> str:
     return ""
 
 
+def _extract_by_selectors(card, selectors: tuple[str, ...]) -> tuple[str, str | None]:
+    for selector in selectors:
+        node = card.query_selector(selector)
+        if not node:
+            continue
+        text = (node.inner_text() or "").strip()
+        if text:
+            return text, selector
+    return "", None
+
+
 def _extract_price(card, card_text: str) -> float | None:
     # Prefer Amazon's explicit visible/full price field when present.
     for selector in ("span.a-price span.a-offscreen", "span[data-a-color='base'] span.a-offscreen"):
@@ -79,6 +91,14 @@ def _extract_price(card, card_text: str) -> float | None:
     return value if value >= 5 else None
 
 
+def _extract_price_text(card) -> tuple[str, str | None]:
+    selectors = (
+        "span.a-price span.a-offscreen",
+        "span[data-a-color='base'] span.a-offscreen",
+    )
+    return _extract_by_selectors(card, selectors)
+
+
 def _stock_flag(text: str) -> bool:
     lowered = (text or "").lower()
     out_of_stock_terms = (
@@ -94,6 +114,36 @@ def _stock_flag(text: str) -> bool:
         "left in stock",
     )
     return any(term in lowered for term in in_stock_terms)
+
+
+def _extract_availability_text(card, card_text: str) -> tuple[str, str | None]:
+    selectors = (
+        "span.a-size-base.a-color-price",
+        "span[class*='availability']",
+        "div[class*='availability'] span",
+    )
+    text, selector = _extract_by_selectors(card, selectors)
+    return (text or card_text, selector)
+
+
+def _extract_seller_text(card) -> tuple[str, str | None]:
+    selectors = (
+        "div.a-row.a-size-small span.a-size-small",
+        "span:has-text('Sold by')",
+        "span:has-text('Ships from')",
+        "[data-seller]",
+    )
+    return _extract_by_selectors(card, selectors)
+
+
+def _extract_shipping_text(card) -> tuple[str, str | None]:
+    selectors = (
+        "span:has-text('FREE Shipping')",
+        "span:has-text('FREE delivery')",
+        "span:has-text('to Israel')",
+        "span.a-color-secondary",
+    )
+    return _extract_by_selectors(card, selectors)
 
 
 def _extract_image_url(card) -> str | None:
@@ -123,17 +173,94 @@ def _extract_image_url(card) -> str | None:
     return src.strip() if src else None
 
 
-def _scrape_single_attempt(search_url: str, pages: int, seller: str) -> list[dict[str, Any]]:
+def _extract_product_url(card) -> str | None:
+    link = card.query_selector("h2 a")
+    if not link:
+        return None
+    href = (link.get_attribute("href") or "").strip()
+    if not href:
+        return None
+    return urljoin("https://www.amazon.com", href)
+
+
+def _set_page_param(search_url: str, page_num: int) -> str:
+    parsed = urlparse(search_url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    query["page"] = [str(page_num)]
+    new_query = urlencode(query, doseq=True)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+
+def _has_sold_by(text: str) -> bool:
+    return "sold by" in (text or "").lower()
+
+
+def _resolve_seller_from_pdp(
+    context,
+    asin: str,
+    seller_cache: dict[str, str],
+    debug: dict[str, Any] | None = None,
+) -> str:
+    if asin in seller_cache:
+        return seller_cache[asin]
+
+    pdp_url = f"https://www.amazon.com/dp/{asin}"
+    if browser_factory.global_rate_limiter:
+        browser_factory.global_rate_limiter.acquire()
+    page = context.new_page()
+    found_text = ""
+    hit_selector = None
+    html_snippet = ""
+    try:
+        page.goto(pdp_url, wait_until="domcontentloaded", timeout=45000)
+        selectors = ("#merchant-info", "#merchant-info a", "#soldByThirdParty", "#sellerName")
+        for selector in selectors:
+            node = page.query_selector(selector)
+            if not node:
+                continue
+            text = (node.inner_text() or "").strip()
+            if text:
+                found_text = text
+                hit_selector = selector
+                break
+        if debug is not None:
+            root = page.query_selector("#merchant-info") or page.query_selector("#desktop_merchant_info_feature_div")
+            if root:
+                html_snippet = (root.inner_html() or "")[:4000]
+    except Exception as exc:
+        LOGGER.debug("PDP seller lookup failed asin=%s err=%s", asin, exc)
+    finally:
+        page.close()
+
+    seller_cache[asin] = found_text
+    if debug is not None:
+        debug[asin] = {
+            "pdp_url": pdp_url,
+            "seller_text": found_text,
+            "seller_selector": hit_selector,
+            "merchant_html_snippet": html_snippet,
+        }
+    return found_text
+
+
+def _scrape_single_attempt(
+    search_url: str,
+    pages: int,
+    source: str,
+    collect_debug: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Single scrape attempt. Raises CaptchaBlocked or NetworkAccessDenied on failure."""
     all_products: list[dict[str, Any]] = []
+    debug_data: dict[str, Any] = {"selector_debug": [], "pdp_debug": {}}
     context = create_stealth_context(persistent_dir=None, headless=False)
+    seller_cache: dict[str, str] = {}
     try:
         page = context.new_page()
-        current_url = search_url
         for page_num in range(1, pages + 1):
             if browser_factory.global_rate_limiter:
                 browser_factory.global_rate_limiter.acquire()
-            LOGGER.info("Scraping %s page %s", seller, page_num)
+            LOGGER.info("Scraping %s page %s", source, page_num)
+            current_url = _set_page_param(search_url, page_num) if page_num > 1 else search_url
             try:
                 page.goto(current_url, wait_until="domcontentloaded", timeout=45000)
             except Exception as e:
@@ -142,7 +269,7 @@ def _scrape_single_attempt(search_url: str, pages: int, seller: str) -> list[dic
                 raise
             title = (page.title() or "").lower()
             if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
-                raise CaptchaBlocked(f"Captcha detected while scraping {seller}")
+                raise CaptchaBlocked(f"Captcha detected while scraping {source}")
 
             page.wait_for_selector("div[data-component-type='s-search-result']", timeout=25000)
             page.mouse.wheel(0, random.randint(300, 1300))
@@ -155,34 +282,72 @@ def _scrape_single_attempt(search_url: str, pages: int, seller: str) -> list[dic
                 product_title = _extract_title(card)
                 card_text = card.inner_text()
                 price = _extract_price(card, card_text)
+                price_text, price_selector = _extract_price_text(card)
                 image_url = _extract_image_url(card)
+                availability_text, availability_selector = _extract_availability_text(card, card_text)
+                seller_text, seller_selector = _extract_seller_text(card)
+                shipping_text, shipping_selector = _extract_shipping_text(card)
+                product_url = _extract_product_url(card)
+
+                if not _has_sold_by(seller_text):
+                    seller_text = _resolve_seller_from_pdp(
+                        context,
+                        asin,
+                        seller_cache,
+                        debug_data["pdp_debug"] if collect_debug else None,
+                    ) or seller_text
+
                 all_products.append(
                     {
                         "asin": asin,
                         "title": product_title,
                         "price": price,
-                        "in_stock": _stock_flag(card_text),
-                        "seller": seller,
+                        "price_text": price_text,
+                        "in_stock": _stock_flag(availability_text),
+                        "availability_text": availability_text,
+                        "seller": seller_text or source,
+                        "seller_text": seller_text,
+                        "shipping_text": shipping_text,
                         "image_url": image_url,
+                        "product_url": product_url,
+                        "source": source,
                     }
                 )
+                if collect_debug:
+                    debug_data["selector_debug"].append(
+                        {
+                            "asin": asin,
+                            "title_found": bool(product_title),
+                            "price_found": price is not None,
+                            "seller_found": bool(seller_text),
+                            "shipping_found": bool(shipping_text),
+                            "availability_found": bool(availability_text),
+                            "title_selector": "h2 a span",
+                            "price_selector": price_selector,
+                            "seller_selector": seller_selector,
+                            "shipping_selector": shipping_selector,
+                            "availability_selector": availability_selector,
+                            "card_html_snippet": (card.inner_html() or "")[:4000],
+                        }
+                    )
 
             next_btn = page.query_selector("a.s-pagination-next")
             disabled = (next_btn.get_attribute("aria-disabled") if next_btn else "true") == "true"
-            if not next_btn or disabled:
+            if page_num >= pages or not next_btn or disabled:
                 break
-            if browser_factory.global_rate_limiter:
-                browser_factory.global_rate_limiter.acquire()
-            next_btn.click()
-            page.wait_for_load_state("domcontentloaded", timeout=30000)
-            current_url = page.url
             time.sleep(random.uniform(6, 12))
     finally:
         close_context(context)
-    return all_products
+    return all_products, debug_data
 
 
-def scrape_search(search_url: str, pages: int = 5, max_retries: int = 2) -> list[dict[str, Any]]:
+def scrape_search(
+    search_url: str,
+    pages: int = 5,
+    max_retries: int = 2,
+    source: str = "main_search",
+    collect_debug: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Scrape one Amazon search results URL with automatic retry on network errors.
 
     Args:
@@ -194,13 +359,12 @@ def scrape_search(search_url: str, pages: int = 5, max_retries: int = 2) -> list
         CaptchaBlocked: If Amazon shows a captcha/robot check.
         NetworkAccessDenied: If network errors persist after all retries.
     """
-    seller = "amazon_export"
     last_error: Exception | None = None
 
     for attempt in range(max_retries + 1):
         try:
-            LOGGER.info("Scrape attempt %s/%s for %s", attempt + 1, max_retries + 1, seller)
-            return _scrape_single_attempt(search_url, pages, seller)
+            LOGGER.info("Scrape attempt %s/%s for %s", attempt + 1, max_retries + 1, source)
+            return _scrape_single_attempt(search_url, pages, source, collect_debug=collect_debug)
         except NetworkAccessDenied as e:
             last_error = e
             LOGGER.warning("Network error on attempt %s: %s", attempt + 1, e)
@@ -218,4 +382,4 @@ def scrape_search(search_url: str, pages: int = 5, max_retries: int = 2) -> list
     # Should never reach here
     if last_error:
         raise last_error
-    return []
+    return [], {"selector_debug": [], "pdp_debug": {}}

@@ -1,6 +1,7 @@
 import logging
 import json
 import time
+import argparse
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -12,7 +13,7 @@ from dotenv import load_dotenv
 
 from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, ModemIPUnchanged, NetworkAccessDenied
-from filter_pipeline import filter_search_results
+from filter_pipeline import filter_marketplace_items
 from modem_rotator import reconnect_modem
 from search_scraper import scrape_search
 from state_engine import StateEngine
@@ -21,17 +22,67 @@ from webhook_sender import send_alert, send_heartbeat, send_modem_trigger, send_
 LOGGER = logging.getLogger("monitor")
 
 
-def resolve_export_search_url(config: dict) -> str:
-    """Single monitored search: `search_url` or `search_urls.amazon_export`."""
-    raw = config.get("search_url")
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip()
-    urls = config.get("search_urls")
-    if isinstance(urls, dict):
-        exp = urls.get("amazon_export")
-        if isinstance(exp, str) and exp.strip():
-            return exp.strip()
-    raise ValueError("Set `search_url` or `search_urls.amazon_export` in config.yaml")
+def resolve_search_urls(config: dict) -> list[tuple[str, str]]:
+    """Resolve configured search URLs as (source_name, url)."""
+    urls: list[tuple[str, str]] = []
+    raw_single = config.get("search_url")
+    if isinstance(raw_single, str) and raw_single.strip():
+        urls.append(("main_search", raw_single.strip()))
+    raw_map = config.get("search_urls")
+    if isinstance(raw_map, dict):
+        for source, url in raw_map.items():
+            if isinstance(url, str) and url.strip():
+                urls.append((str(source), url.strip()))
+    dedup_by_url: dict[str, str] = {}
+    for source, url in urls:
+        dedup_by_url[url] = source
+    resolved = [(source, url) for url, source in dedup_by_url.items()]
+    if not resolved:
+        raise ValueError("Set `search_urls.main_search` (or `search_url`) in config.yaml")
+    return resolved
+
+
+def run_test_scrape(config: dict, pages_override: int | None = None) -> None:
+    pages = pages_override if pages_override is not None else int(config.get("search_pages", 1))
+    output_dir = Path("data/test_scrape")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_items: list[dict] = []
+    selector_debug: list[dict] = []
+    pdp_debug: dict[str, dict] = {}
+    for source, url in resolve_search_urls(config):
+        items, debug = scrape_search(url, pages=pages, source=source, collect_debug=True)
+        raw_items.extend(items)
+        selector_debug.extend(debug.get("selector_debug", []))
+        pdp_debug.update(debug.get("pdp_debug", {}))
+
+    filtered_items = filter_marketplace_items(raw_items)
+    (output_dir / "raw_items.json").write_text(json.dumps(raw_items, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / "filtered_items.json").write_text(
+        json.dumps(filtered_items, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (output_dir / "selector_debug.json").write_text(
+        json.dumps({"selector_debug": selector_debug, "pdp_debug": pdp_debug}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    sample_cards = "\n<hr/>\n".join(
+        entry.get("card_html_snippet", "") for entry in selector_debug[:5] if entry.get("card_html_snippet")
+    )
+    if sample_cards:
+        (output_dir / "sample_cards.html").write_text(sample_cards, encoding="utf-8")
+    sample_pdp = "\n<hr/>\n".join(
+        data.get("merchant_html_snippet", "")
+        for data in list(pdp_debug.values())[:5]
+        if isinstance(data, dict) and data.get("merchant_html_snippet")
+    )
+    if sample_pdp:
+        (output_dir / "sample_pdp.html").write_text(sample_pdp, encoding="utf-8")
+    LOGGER.info(
+        "test_scrape_complete raw=%s filtered=%s output_dir=%s",
+        len(raw_items),
+        len(filtered_items),
+        output_dir,
+    )
 
 
 def should_reconcile_missing_asins(config: dict, filtered_count: int) -> tuple[bool, str | None]:
@@ -77,7 +128,7 @@ def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def main() -> None:
+def main(test_scrape: bool = False, pages_override: int | None = None) -> None:
     load_dotenv()
     config = load_config()
     setup_logging(config.get("log_dir", "logs"))
@@ -89,6 +140,9 @@ def main() -> None:
         price_drop_percent=config["price_drop_percent"],
     )
     init_global_rate_limiter(config["max_requests_per_minute"])
+    if test_scrape:
+        run_test_scrape(config, pages_override=pages_override)
+        return
     scheduler = BackgroundScheduler()
     scraping_paused = {"value": False}
     last_ip = {"value": ""}
@@ -150,13 +204,16 @@ def main() -> None:
             return
         mark_job_started("search")
         try:
-            results = scrape_search(resolve_export_search_url(config), pages=config["search_pages"])
-            filtered = filter_search_results(
-                results,
-                config["required_keywords"],
-                "blacklist.txt",
-                config.get("required_any_keywords", []),
-            )
+            results: list[dict] = []
+            for source, url in resolve_search_urls(config):
+                source_items, _debug = scrape_search(
+                    url,
+                    pages=config["search_pages"],
+                    source=source,
+                    collect_debug=False,
+                )
+                results.extend(source_items)
+            filtered = filter_marketplace_items(results)
             reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(filtered))
             if skipped_reason:
                 LOGGER.info(
@@ -165,7 +222,11 @@ def main() -> None:
                     len(results),
                     len(filtered),
                 )
-            alerts = state_engine.process_search_candidates(filtered, reconcile_missing=reconcile_missing)
+            alerts = state_engine.process_search_candidates(
+                filtered,
+                reconcile_missing=reconcile_missing,
+                source="main_search",
+            )
             for alert in alerts:
                 send_alert(alert, config)
             mark_job_success("search")
@@ -245,5 +306,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Pokemon Amazon monitor")
+    parser.add_argument("--test-scrape", action="store_true", help="Run scrape+filter once and dump JSON outputs.")
+    parser.add_argument("--pages", type=int, default=None, help="Override page count for --test-scrape.")
+    args = parser.parse_args()
+    main(test_scrape=args.test_scrape, pages_override=args.pages)
 

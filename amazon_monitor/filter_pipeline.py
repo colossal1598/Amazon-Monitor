@@ -57,3 +57,74 @@ def filter_search_results(
         filtered.append(product)
     return filtered
 
+
+def _normalize_ascii(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", (value or "").lower().strip())
+    return decomposed.encode("ascii", "ignore").decode("ascii")
+
+
+def _has_pokemon_tcg_title(title: str) -> bool:
+    text = _normalize_ascii(title)
+    return "pokemon tcg" in text or "pokemon trading card game" in text
+
+
+def _is_valid_price(item: dict[str, Any]) -> bool:
+    price_value = item.get("price")
+    price_text = _normalize_ascii(str(item.get("price_text") or ""))
+    if price_value is None:
+        return False
+    try:
+        if float(price_value) <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if "see price" in price_text:
+        return False
+    return True
+
+
+def _extract_allowed_seller(seller_text: str) -> str | None:
+    clean = _normalize_ascii(seller_text)
+    if "sold by" not in clean:
+        return None
+    if "amazon.com" in clean:
+        return "Amazon.com"
+    if "amazon export llc" in clean:
+        return "Amazon Export LLC"
+    return None
+
+
+def _has_free_shipping_to_israel(shipping_text: str) -> bool:
+    clean = _normalize_ascii(shipping_text)
+    return "free shipping to israel" in clean or "free delivery to israel" in clean
+
+
+def filter_marketplace_items(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strictly keep Pokemon TCG listings sold by approved Amazon sellers with free shipping to Israel."""
+    filtered: list[dict[str, Any]] = []
+    for item in raw_items:
+        title = item.get("title") or ""
+        if not _has_pokemon_tcg_title(title):
+            continue
+        if not _is_valid_price(item):
+            continue
+        seller_name = _extract_allowed_seller(item.get("seller_text") or item.get("seller") or "")
+        if not seller_name:
+            continue
+        if not _has_free_shipping_to_israel(item.get("shipping_text") or ""):
+            continue
+        filtered.append(
+            {
+                "asin": (item.get("asin") or "").upper(),
+                "title": title,
+                "price": item.get("price"),
+                "in_stock": bool(item.get("in_stock")),
+                "seller": "main_search",
+                "seller_name": seller_name,
+                "image_url": item.get("image_url"),
+                "shipping_text": item.get("shipping_text"),
+                "seller_text": item.get("seller_text"),
+            }
+        )
+    return filtered
+
