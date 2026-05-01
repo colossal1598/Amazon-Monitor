@@ -1,6 +1,14 @@
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
+
+
+def _normalize_text(value: str) -> str:
+    """Lowercase and strip diacritics for accent-insensitive matching."""
+    lowered = (value or "").lower().strip()
+    decomposed = unicodedata.normalize("NFKD", lowered)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
 def _read_blacklist(blacklist_file: str) -> tuple[set[str], list[re.Pattern[str]]]:
@@ -26,13 +34,13 @@ def filter_search_results(
     blacklist_file: str,
     required_any_keywords: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    req = [k.lower().strip() for k in required_keywords if k.strip()]
-    req_any = [k.lower().strip() for k in (required_any_keywords or []) if k.strip()]
+    req = [_normalize_text(k) for k in required_keywords if k.strip()]
+    req_any = [_normalize_text(k) for k in (required_any_keywords or []) if k.strip()]
     blocked_asins, blocked_patterns = _read_blacklist(blacklist_file)
     filtered: list[dict[str, Any]] = []
     for product in products:
         asin = (product.get("asin") or "").upper()
-        title = (product.get("title") or "").lower()
+        title = _normalize_text(product.get("title") or "")
         if not asin or not title:
             continue
         if asin in blocked_asins:
