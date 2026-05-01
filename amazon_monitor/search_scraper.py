@@ -129,12 +129,45 @@ def _extract_availability_text(card, card_text: str) -> tuple[str, str | None]:
 
 def _extract_seller_text(card) -> tuple[str, str | None]:
     selectors = (
-        "div.a-row.a-size-small span.a-size-small",
         "span:has-text('Sold by')",
         "span:has-text('Ships from')",
+        "div.a-row:has-text('Sold by')",
+        "div.a-row:has-text('Ships from')",
         "[data-seller]",
     )
-    return _extract_by_selectors(card, selectors)
+    for selector in selectors:
+        node = card.query_selector(selector)
+        if not node:
+            continue
+        text = (node.inner_text() or "").strip()
+        if _looks_like_seller_blob(text):
+            return text, selector
+
+    # Fallback: some cards only expose seller text in the full card blob.
+    card_text = (card.inner_text() or "").strip()
+    if _looks_like_seller_blob(card_text):
+        m = re.search(
+            r"(sold by[^\n]{0,120}|ships from[^\n]{0,120})",
+            card_text,
+            flags=re.IGNORECASE,
+        )
+        return (m.group(1).strip() if m else card_text), "card_text_fallback"
+    return "", None
+
+
+def _looks_like_seller_blob(value: str) -> bool:
+    text = _normalize_ascii(value)
+    if not text:
+        return False
+    # Reject common rating-only captures like "4.2 out of 5 stars".
+    if "out of 5 stars" in text:
+        return False
+    return (
+        "sold by" in text
+        or "ships from" in text
+        or "amazon export llc" in text
+        or re.search(r"\bamazon\.com\b", text) is not None
+    )
 
 
 def _extract_shipping_text(card) -> tuple[str, str | None]:
@@ -229,7 +262,15 @@ def _resolve_seller_from_pdp(
     html_snippet = ""
     try:
         page.goto(pdp_url, wait_until="domcontentloaded", timeout=45000)
-        selectors = ("#merchant-info", "#merchant-info a", "#soldByThirdParty", "#sellerName")
+        selectors = (
+            "#merchant-info",
+            "#merchant-info a",
+            "#desktop_merchant_info_feature_div",
+            "#tabular-buybox [tabular-attribute-name='Sold by'] .tabular-buybox-text",
+            "#tabular-buybox [tabular-attribute-name='Ships from'] .tabular-buybox-text",
+            "#soldByThirdParty",
+            "#sellerName",
+        )
         for selector in selectors:
             node = page.query_selector(selector)
             if not node:
@@ -271,7 +312,15 @@ def _fetch_pdp_seller_blob(context, asin: str) -> str:
         title = (page.title() or "").lower()
         if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
             raise CaptchaBlocked(f"Captcha detected on PDP for {asin}")
-        for selector in ("#merchant-info", "#merchant-info a", "#soldByThirdParty", "#sellerName"):
+        for selector in (
+            "#merchant-info",
+            "#merchant-info a",
+            "#desktop_merchant_info_feature_div",
+            "#tabular-buybox [tabular-attribute-name='Sold by'] .tabular-buybox-text",
+            "#tabular-buybox [tabular-attribute-name='Ships from'] .tabular-buybox-text",
+            "#soldByThirdParty",
+            "#sellerName",
+        ):
             node = page.query_selector(selector)
             if not node:
                 continue
