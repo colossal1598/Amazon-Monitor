@@ -1,1 +1,3 @@
 amazon_monitor/config.yaml
+__pycache__/
+*.pyc
