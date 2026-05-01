@@ -46,10 +46,11 @@ def _parse_price(raw_text: str) -> float | None:
 
 def _extract_title(card) -> str:
     selectors = (
+        "h2",
+        "[data-cy='title-recipe']",
+        "a.a-link-normal.s-line-clamp-2",
         "h2 a span",
         "h2 span",
-        "a.a-link-normal.s-line-clamp-2 span",
-        "[data-cy='title-recipe'] span",
     )
     for selector in selectors:
         node = card.query_selector(selector)
