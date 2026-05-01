@@ -3,6 +3,7 @@ import json
 import random
 import re
 import time
+import unicodedata
 from urllib.parse import urlencode, urljoin, urlparse, parse_qs, urlunparse
 from typing import Any
 
@@ -195,6 +196,21 @@ def _has_sold_by(text: str) -> bool:
     return "sold by" in (text or "").lower()
 
 
+def _normalize_ascii(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", (value or "").lower().strip())
+    return decomposed.encode("ascii", "ignore").decode("ascii")
+
+
+def _looks_like_target_title(title: str) -> bool:
+    norm = _normalize_ascii(title)
+    return "pokemon tcg" in norm or "pokemon trading card game" in norm
+
+
+def _looks_like_free_shipping_text(shipping_text: str) -> bool:
+    norm = _normalize_ascii(shipping_text)
+    return "free shipping" in norm or "free delivery" in norm
+
+
 def _resolve_seller_from_pdp(
     context,
     asin: str,
@@ -243,20 +259,92 @@ def _resolve_seller_from_pdp(
     return found_text
 
 
+def _fetch_pdp_seller_blob(context, asin: str) -> str:
+    """Read merchant/seller text from product detail page (single ASIN, one tab)."""
+    pdp_url = f"https://www.amazon.com/dp/{asin}"
+    if browser_factory.global_rate_limiter:
+        browser_factory.global_rate_limiter.acquire()
+    page = context.new_page()
+    found_text = ""
+    try:
+        page.goto(pdp_url, wait_until="domcontentloaded", timeout=45000)
+        title = (page.title() or "").lower()
+        if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
+            raise CaptchaBlocked(f"Captcha detected on PDP for {asin}")
+        for selector in ("#merchant-info", "#merchant-info a", "#soldByThirdParty", "#sellerName"):
+            node = page.query_selector(selector)
+            if not node:
+                continue
+            text = (node.inner_text() or "").strip()
+            if text:
+                found_text = text
+                break
+    except CaptchaBlocked:
+        raise
+    except Exception as exc:
+        LOGGER.debug("PDP seller fetch failed asin=%s err=%s", asin, exc)
+    finally:
+        page.close()
+    return found_text
+
+
+def verify_sellers_batch(
+    asins: list[str],
+    max_verifications: int,
+    max_seconds: float | None = None,
+) -> dict[str, str]:
+    """Open sequential PDP pages for up to max_verifications ASINs; return asin -> seller blob."""
+    results: dict[str, str] = {}
+    if max_verifications <= 0 or not asins:
+        return results
+    to_visit = [a.strip().upper() for a in asins if a and len(a.strip()) == 10][:max_verifications]
+    if not to_visit:
+        return results
+    started = time.monotonic()
+    context = create_stealth_context(persistent_dir=None, headless=False)
+    try:
+        for asin in to_visit:
+            if max_seconds is not None and (time.monotonic() - started) > max_seconds:
+                LOGGER.warning(
+                    "verify_sellers_batch stopped early: budget=%ss verified=%s",
+                    max_seconds,
+                    len(results),
+                )
+                break
+            results[asin] = _fetch_pdp_seller_blob(context, asin)
+            time.sleep(random.uniform(0.4, 1.0))
+    finally:
+        close_context(context)
+    return results
+
+
 def _scrape_single_attempt(
     search_url: str,
     pages: int,
     source: str,
     collect_debug: bool = False,
+    max_cycle_seconds: int = 170,
+    max_pdp_fallbacks: int = 8,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Single scrape attempt. Raises CaptchaBlocked or NetworkAccessDenied on failure."""
     all_products: list[dict[str, Any]] = []
     debug_data: dict[str, Any] = {"selector_debug": [], "pdp_debug": {}}
     context = create_stealth_context(persistent_dir=None, headless=False)
     seller_cache: dict[str, str] = {}
+    cycle_started = time.monotonic()
+    pdp_fallback_count = 0
     try:
         page = context.new_page()
         for page_num in range(1, pages + 1):
+            elapsed = time.monotonic() - cycle_started
+            if elapsed > max_cycle_seconds:
+                LOGGER.warning(
+                    "Stopping scrape early due to cycle budget: elapsed=%.1fs limit=%ss pages_done=%s",
+                    elapsed,
+                    max_cycle_seconds,
+                    page_num - 1,
+                )
+                break
             if browser_factory.global_rate_limiter:
                 browser_factory.global_rate_limiter.acquire()
             LOGGER.info("Scraping %s page %s", source, page_num)
@@ -289,7 +377,14 @@ def _scrape_single_attempt(
                 shipping_text, shipping_selector = _extract_shipping_text(card)
                 product_url = _extract_product_url(card)
 
-                if not _has_sold_by(seller_text):
+                should_try_pdp = (
+                    not _has_sold_by(seller_text)
+                    and price is not None
+                    and _looks_like_target_title(product_title)
+                    and _looks_like_free_shipping_text(shipping_text)
+                )
+                if should_try_pdp and pdp_fallback_count < max_pdp_fallbacks:
+                    pdp_fallback_count += 1
                     seller_text = _resolve_seller_from_pdp(
                         context,
                         asin,
@@ -327,6 +422,7 @@ def _scrape_single_attempt(
                             "seller_selector": seller_selector,
                             "shipping_selector": shipping_selector,
                             "availability_selector": availability_selector,
+                            "pdp_fallback_attempted": should_try_pdp and pdp_fallback_count <= max_pdp_fallbacks,
                             "card_html_snippet": (card.inner_html() or "")[:4000],
                         }
                     )
@@ -347,6 +443,8 @@ def scrape_search(
     max_retries: int = 2,
     source: str = "main_search",
     collect_debug: bool = False,
+    max_cycle_seconds: int = 170,
+    max_pdp_fallbacks: int = 8,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Scrape one Amazon search results URL with automatic retry on network errors.
 
@@ -364,7 +462,14 @@ def scrape_search(
     for attempt in range(max_retries + 1):
         try:
             LOGGER.info("Scrape attempt %s/%s for %s", attempt + 1, max_retries + 1, source)
-            return _scrape_single_attempt(search_url, pages, source, collect_debug=collect_debug)
+            return _scrape_single_attempt(
+                search_url,
+                pages,
+                source,
+                collect_debug=collect_debug,
+                max_cycle_seconds=max_cycle_seconds,
+                max_pdp_fallbacks=max_pdp_fallbacks,
+            )
         except NetworkAccessDenied as e:
             last_error = e
             LOGGER.warning("Network error on attempt %s: %s", attempt + 1, e)

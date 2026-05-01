@@ -50,7 +50,7 @@ Set and verify:
 - `modem_reconnect_command`
 - `modem_auto_refresh_hours`
 
-Note: set `search_urls.amazon_export` (or `search_url`) in `config.yaml` to your export-seller search; the monitor uses that URL only.
+Note: set `search_urls.main_search` (or `search_url`) in `config.yaml`. The monitor is now built for Amazon.com newest-arrivals flow with seller verification on PDP.
 
 ## 4) First-Time WhatsApp API Test
 
@@ -73,7 +73,8 @@ Optional client settings UI:
 Start:
 
 1. `.\\.venv\\Scripts\\Activate.ps1`
-2. `python main.py`
+2. First activation on a fresh/empty DB: `python main.py --bootstrap` (no WhatsApp product alerts; seeds DB)
+3. Then run production monitor: `python main.py`
 
 Stop:
 
@@ -87,6 +88,12 @@ For production operation:
 - WhatsApp API service running
 
 If any of these are down, alerts stop.
+
+## 6.1) ASAP New Listings Mode
+
+- `asap_new_listings_mode: true` verifies seller on PDP for all Stage-1 unknown ASINs each cycle.
+- This minimizes delayed confirmations but increases captcha/throttling risk.
+- Keep `max_pdp_fallbacks_per_run: 0` so PDP is handled in the dedicated post-scrape batch.
 
 ## 7) Daily Operations Check (1 minute)
 
@@ -176,6 +183,7 @@ This creates Task Scheduler job `AmazonMonitorUpdate` that runs:
 ## 13) Production Readiness Checklist
 
 - [ ] `first_time_setup.py` completed successfully
+- [ ] One-time `python main.py --bootstrap` completed successfully before first production run
 - [ ] WhatsApp API receives alert messages
 - [ ] WhatsApp heartbeat alert behavior verified (if enabled)
 - [ ] `python tools/healthcheck.py` returns PASS
