@@ -2,9 +2,6 @@ import re
 import unicodedata
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qs, unquote, urlparse
-
-
 def _normalize_text(value: str) -> str:
     """Lowercase and strip diacritics for accent-insensitive matching."""
     lowered = (value or "").lower().strip()
@@ -84,24 +81,41 @@ def _is_valid_price(item: dict[str, Any]) -> bool:
     return True
 
 
+def _sold_by_snippet_only(clean: str) -> str:
+    """Text after 'sold by' up to ships/fulfilled lines — avoids FBA 'Ships from Amazon.com' counting as seller."""
+    if "sold by" not in clean:
+        return ""
+    i = clean.index("sold by")
+    chunk = clean[i : i + 320]
+    for stop in ("ships from", "ship from", "fulfilled by"):
+        j = chunk.find(stop)
+        if j > len("sold by"):
+            chunk = chunk[:j]
+    return chunk
+
+
 def _extract_allowed_seller(seller_text: str) -> str | None:
     """Allow only retail Amazon.com or Amazon Export LLC (exclude Services/Warehouse/etc.)."""
     clean = _normalize_ascii(seller_text)
     if not clean:
         return None
-    # PDP often exposes only the merchant link text (no "Sold by" prefix).
-    if "amazon export sales llc" in clean:
+    sold_snip = _sold_by_snippet_only(clean)
+    # Export: use sold-by line when present so footer/other copy cannot satisfy the check.
+    export_ctx = sold_snip if ("sold by" in clean and sold_snip) else clean
+    if "amazon export sales llc" in export_ctx:
         return "Amazon Export Sales LLC"
-    if "amazon export llc" in clean:
+    if "amazon export llc" in export_ctx:
         return "Amazon Export LLC"
     if "sold by" not in clean:
         return None
+    if not sold_snip:
+        return None
     # Substring "amazon.com" also appears in "Amazon.com Services LLC" — reject those.
-    if re.search(r"amazon\s+warehouse", clean) or re.search(r"amazon\.com\s+services", clean):
+    if re.search(r"amazon\s+warehouse", sold_snip) or re.search(r"amazon\.com\s+services", sold_snip):
         return None
-    if "services llc" in clean and "amazon.com" in clean:
+    if "services llc" in sold_snip and "amazon.com" in sold_snip:
         return None
-    if re.search(r"\bamazon\.com\b", clean):
+    if re.search(r"\bamazon\.com\b", sold_snip):
         return "Amazon.com"
     return None
 
@@ -216,19 +230,8 @@ def _allowlist_id_for_classified_dom_name(dom_name: str | None) -> str | None:
     return None
 
 
-def _extract_merchant_ids_from_search_url(search_url: str) -> set[str]:
-    parsed = urlparse(search_url)
-    qs = parse_qs(parsed.query, keep_blank_values=True)
-    found: set[str] = set()
-    for rh in qs.get("rh", []):
-        decoded = unquote(rh)
-        for m in re.finditer(r"p_6:([A-Z0-9]{13,14})", decoded, re.IGNORECASE):
-            found.add(m.group(1).upper())
-    return found
-
-
 def _merchant_tokens_for_item(item: dict[str, Any]) -> set[str]:
-    """Card-scraped ids + URL rh p_6 (facet), not page-global marketplace noise."""
+    """Per-card merchant ids only — do not merge search URL rh=p_6 (same URL for every row, not per-offer proof)."""
     tokens: set[str] = set()
     raw = item.get("merchant_id_tokens")
     if isinstance(raw, list):
@@ -238,9 +241,9 @@ def _merchant_tokens_for_item(item: dict[str, Any]) -> set[str]:
     for x in item.get("seller_anchor_merchant_ids") or []:
         if x:
             tokens.add(str(x).upper())
-    url = (item.get("search_url") or "").strip()
-    if url:
-        tokens |= _extract_merchant_ids_from_search_url(url)
+    for x in item.get("primary_offer_merchant_ids") or []:
+        if x:
+            tokens.add(str(x).upper())
     return tokens
 
 
@@ -248,8 +251,8 @@ def filter_by_allowed_merchant_ids(
     items: list[dict[str, Any]],
     allowed_merchant_ids: list[str],
 ) -> list[dict[str, Any]]:
-    """Keep rows when (1) merchant id from card anchors/HTML/URL rh matches allowlist, or
-    (2) visible seller text from DOM selectors matches allowlist via classify_seller + label map."""
+    """Keep rows when (1) primary-offer / anchor / scrubbed-card merchant ids hit the allowlist, or
+    (2) visible seller text matches (Sold-by snippet only — not FBA ships-from Amazon.com)."""
     allowed = {str(x).strip().upper() for x in allowed_merchant_ids if str(x).strip()}
     if not allowed:
         return []

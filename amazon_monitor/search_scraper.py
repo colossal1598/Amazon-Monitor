@@ -20,6 +20,11 @@ PaginationMode = Literal["auto", "fixed"]
 
 _MERCHANT_TOKEN_RE = re.compile(r"\b(A[0-9A-Z]{12,13})\b")
 
+# Embedded in every add-to-cart / analytics block as …/marketplaces/ATVPDKIKX0DER/… — not the offer seller.
+_BLOB_MERCHANT_TOKEN_DENYLIST = frozenset({"ATVPDKIKX0DER"})
+
+_MERCHANT_ID_PARAM_RE = re.compile(r"^[A-Z0-9]{13,14}$")
+
 PRICE_RE = re.compile(r"\$?\s*([0-9]+(?:[.,][0-9]{1,2})?)")
 
 
@@ -70,6 +75,11 @@ def extract_merchant_tokens_from_blob(blob: str) -> set[str]:
     return {m.group(1).upper() for m in _MERCHANT_TOKEN_RE.finditer(blob)}
 
 
+def extract_merchant_tokens_from_card_inner_html(blob: str) -> set[str]:
+    """Like extract_merchant_tokens_from_blob but drops marketplace telemetry ids (false seller hits)."""
+    return extract_merchant_tokens_from_blob(blob) - _BLOB_MERCHANT_TOKEN_DENYLIST
+
+
 def _parse_merchant_ids_from_href(href: str) -> set[str]:
     """Parse seller/me/… query params and some /sp paths — scoped to one anchor href."""
     if not href or href == "#":
@@ -94,6 +104,29 @@ def _parse_merchant_ids_from_href(href: str) -> set[str]:
             if tok.startswith("A") and len(tok) >= 13:
                 out.add(tok)
     return out
+
+
+def extract_primary_offer_merchant_ids(card) -> set[str]:
+    """Merchant id for the primary buy box (FBA uses Amazon fulfillment URLs but a third-party merchantId)."""
+    found: set[str] = set()
+    root = card.query_selector("[data-cy='add-to-cart']")
+    if not root:
+        root = card.query_selector(".puis-atcb-container")
+    if not root:
+        root = card
+    try:
+        for sel in ('input[name="merchantId"]', 'input[name="items[0.base][merchantId]"]'):
+            for inp in root.query_selector_all(sel):
+                v = (inp.get_attribute("value") or "").strip().upper()
+                if _MERCHANT_ID_PARAM_RE.match(v):
+                    found.add(v)
+        for el in root.query_selector_all("[data-csa-c-merchant-id]"):
+            v = (el.get_attribute("data-csa-c-merchant-id") or "").strip().upper()
+            if _MERCHANT_ID_PARAM_RE.match(v):
+                found.add(v)
+    except Exception as exc:
+        LOGGER.debug("primary offer merchant parse skipped: %s", exc)
+    return found
 
 
 def extract_merchant_ids_from_card_anchor_elements(card) -> set[str]:
@@ -123,10 +156,15 @@ def extract_merchant_ids_from_card_anchor_elements(card) -> set[str]:
     return found
 
 
-def collect_merchant_tokens_for_card(card_inner_html: str, anchor_merchant_ids: set[str]) -> list[str]:
-    """Merchant-like tokens from this card's HTML + seller-link hrefs only (not whole search URL)."""
-    tokens: set[str] = set(extract_merchant_tokens_from_blob(card_inner_html))
+def collect_merchant_tokens_for_card(
+    card_inner_html: str,
+    anchor_merchant_ids: set[str],
+    primary_offer_merchant_ids: set[str],
+) -> list[str]:
+    """Merchant ids from primary offer widget + seller links + card HTML (marketplace id stripped from blob)."""
+    tokens: set[str] = set(extract_merchant_tokens_from_card_inner_html(card_inner_html))
     tokens |= anchor_merchant_ids
+    tokens |= primary_offer_merchant_ids
     return sorted(tokens)
 
 
@@ -454,7 +492,12 @@ def _scrape_single_attempt(
                 product_url = _extract_product_url(card)
                 inner_html = card.inner_html() or ""
                 anchor_merchant_ids = extract_merchant_ids_from_card_anchor_elements(card)
-                merchant_id_tokens = collect_merchant_tokens_for_card(inner_html, anchor_merchant_ids)
+                primary_offer_merchant_ids = extract_primary_offer_merchant_ids(card)
+                merchant_id_tokens = collect_merchant_tokens_for_card(
+                    inner_html,
+                    anchor_merchant_ids,
+                    primary_offer_merchant_ids,
+                )
 
                 row = {
                     "asin": asin,
@@ -472,6 +515,7 @@ def _scrape_single_attempt(
                     "search_url": current_url,
                     "merchant_id_tokens": merchant_id_tokens,
                     "seller_anchor_merchant_ids": sorted(anchor_merchant_ids),
+                    "primary_offer_merchant_ids": sorted(primary_offer_merchant_ids),
                 }
                 all_products.append(row)
                 if collect_debug:
@@ -489,6 +533,7 @@ def _scrape_single_attempt(
                             "availability_selector": availability_selector,
                             "merchant_id_tokens": merchant_id_tokens,
                             "seller_anchor_merchant_ids": sorted(anchor_merchant_ids),
+                            "primary_offer_merchant_ids": sorted(primary_offer_merchant_ids),
                             "card_html_snippet": inner_html[:4000],
                         }
                     )
