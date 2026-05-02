@@ -64,22 +64,69 @@ def extract_merchant_ids_from_search_url(search_url: str) -> set[str]:
 
 
 def extract_merchant_tokens_from_blob(blob: str) -> set[str]:
-    """Find Amazon-style merchant / marketplace tokens (A + 12–13 alnum) in HTML or text."""
+    """Find Amazon-style merchant tokens (A + 12–13 alnum) in a string (typically card inner HTML)."""
     if not blob:
         return set()
     return {m.group(1).upper() for m in _MERCHANT_TOKEN_RE.finditer(blob)}
 
 
-def collect_merchant_signals_for_card(
-    card_inner_html: str,
-    search_url: str,
-    page_marketplace_id: str | None,
-) -> list[str]:
-    tokens: set[str] = set()
-    tokens |= extract_merchant_tokens_from_blob(card_inner_html)
-    tokens |= extract_merchant_ids_from_search_url(search_url)
-    if page_marketplace_id:
-        tokens.add(page_marketplace_id.upper())
+def _parse_merchant_ids_from_href(href: str) -> set[str]:
+    """Parse seller/me/… query params and some /sp paths — scoped to one anchor href."""
+    if not href or href == "#":
+        return set()
+    full = href if href.startswith("http") else f"https://www.amazon.com{href}"
+    try:
+        parsed = urlparse(full)
+    except ValueError:
+        return set()
+    out: set[str] = set()
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    for key in ("seller", "me", "merchantID", "merchantId"):
+        for raw in qs.get(key, []):
+            v = unquote(str(raw)).strip().upper()
+            if v.startswith("A") and 13 <= len(v) <= 14 and v[1:].isalnum():
+                out.add(v)
+    for m in re.finditer(r"(?:seller|me)=([A-Z0-9]{13,14})", href, re.I):
+        out.add(m.group(1).upper())
+    if "sp?" in href or "/sp/" in parsed.path.lower():
+        for m in re.finditer(r"\b(A[A-Z0-9]{12,13})\b", href.upper()):
+            tok = m.group(1)
+            if tok.startswith("A") and len(tok) >= 13:
+                out.add(tok)
+    return out
+
+
+def extract_merchant_ids_from_card_anchor_elements(card) -> set[str]:
+    """Walk seller/profile links inside this result card only (structured DOM, not page-wide regex)."""
+    found: set[str] = set()
+    try:
+        for a in card.query_selector_all("a[href]"):
+            href = a.get_attribute("href") or ""
+            if not href:
+                continue
+            hlow = href.lower()
+            if any(
+                x in hlow
+                for x in (
+                    "seller=",
+                    "seller%3d",
+                    "&me=",
+                    "%26me%3d",
+                    "/sp?",
+                    "/gp/help/seller/",
+                    "stores/page",
+                )
+            ):
+                found |= _parse_merchant_ids_from_href(href)
+    except Exception as exc:
+        LOGGER.debug("anchor merchant parse skipped: %s", exc)
+    return found
+
+
+def collect_merchant_tokens_for_card(card_inner_html: str, anchor_merchant_ids: set[str]) -> list[str]:
+    """Merchant-like tokens from this card's HTML + seller-link hrefs only (not whole search URL)."""
+    tokens: set[str] = set(extract_merchant_tokens_from_blob(card_inner_html))
+    tokens |= anchor_merchant_ids
     return sorted(tokens)
 
 
@@ -195,7 +242,26 @@ def _normalize_ascii(value: str) -> str:
     return decomposed.encode("ascii", "ignore").decode("ascii")
 
 
+# PUIS / search-card regions that usually contain Sold by / Ships from (try before :has-text).
+_SELLER_DOM_REGION_SELECTORS: tuple[str, ...] = (
+    "div[data-cy='offer-recipe']",
+    "div[data-cy='secondary-offer-recipe']",
+    "div[data-cy='delivery-recipe']",
+    "div[data-cy='seller-recipe']",
+    ".puis-min-offer-desktop-container",
+    ".puisg-col-inner .a-section.a-spacing-none.a-spacing-top-micro",
+    "div.s-delivery-recipe",
+)
+
+
 def _extract_seller_text(card) -> tuple[str, str | None]:
+    for selector in _SELLER_DOM_REGION_SELECTORS:
+        node = card.query_selector(selector)
+        if not node:
+            continue
+        text = (node.inner_text() or "").strip()
+        if _looks_like_seller_blob(text):
+            return text, selector
     selectors = (
         "span:has-text('Sold by')",
         "span:has-text('Ships from')",
@@ -372,7 +438,6 @@ def _scrape_single_attempt(
                 except OSError as exc:
                     LOGGER.warning("Failed to write raw search HTML %s: %s", out_path, exc)
 
-            mpid = page_meta_first.get("marketplaceId")
             cards = page.query_selector_all("div[data-component-type='s-search-result']")
             for card in cards:
                 asin = (card.get_attribute("data-asin") or "").strip()
@@ -388,7 +453,8 @@ def _scrape_single_attempt(
                 shipping_text, shipping_selector = _extract_shipping_text(card)
                 product_url = _extract_product_url(card)
                 inner_html = card.inner_html() or ""
-                merchant_id_tokens = collect_merchant_signals_for_card(inner_html, current_url, mpid)
+                anchor_merchant_ids = extract_merchant_ids_from_card_anchor_elements(card)
+                merchant_id_tokens = collect_merchant_tokens_for_card(inner_html, anchor_merchant_ids)
 
                 row = {
                     "asin": asin,
@@ -405,6 +471,7 @@ def _scrape_single_attempt(
                     "source": source,
                     "search_url": current_url,
                     "merchant_id_tokens": merchant_id_tokens,
+                    "seller_anchor_merchant_ids": sorted(anchor_merchant_ids),
                 }
                 all_products.append(row)
                 if collect_debug:
@@ -421,6 +488,7 @@ def _scrape_single_attempt(
                             "shipping_selector": shipping_selector,
                             "availability_selector": availability_selector,
                             "merchant_id_tokens": merchant_id_tokens,
+                            "seller_anchor_merchant_ids": sorted(anchor_merchant_ids),
                             "card_html_snippet": inner_html[:4000],
                         }
                     )

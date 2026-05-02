@@ -132,33 +132,26 @@ class StateEngine:
             "timestamp": utc_iso(),
         }
 
-    def _mark_missing_asins_out_of_stock(self, seen_asins: set[str], source: str, now: str) -> int:
-        """Mark tracked ASINs absent from this healthy run as out-of-stock."""
-        if seen_asins:
-            placeholders = ",".join("?" for _ in seen_asins)
-            params: list[Any] = [now, source, *sorted(seen_asins)]
-            cursor = self.conn.execute(
-                f"""
-                UPDATE products
-                SET in_stock = 0,
-                    last_seen = ?
-                WHERE seller = ?
-                  AND in_stock != 0
-                  AND asin NOT IN ({placeholders})
-                """,
-                params,
-            )
-        else:
-            cursor = self.conn.execute(
-                """
-                UPDATE products
-                SET in_stock = 0,
-                    last_seen = ?
-                WHERE seller = ?
-                  AND in_stock != 0
-                """,
-                (now, source),
-            )
+    def _mark_missing_asins_out_of_stock(self, seen_asins: set[str], _source: str, now: str) -> int:
+        """Mark tracked ASINs absent from this healthy run as out-of-stock.
+
+        Single-tenant DB: scope by ASIN only (seller column holds display names like
+        'Amazon.com', not a shared bucket string).
+        """
+        if not seen_asins:
+            return 0
+        placeholders = ",".join("?" for _ in seen_asins)
+        params: list[Any] = [now, *sorted(seen_asins)]
+        cursor = self.conn.execute(
+            f"""
+            UPDATE products
+            SET in_stock = 0,
+                last_seen = ?
+            WHERE in_stock != 0
+              AND asin NOT IN ({placeholders})
+            """,
+            params,
+        )
         return cursor.rowcount
 
     def process_search_candidates(
