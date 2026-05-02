@@ -200,8 +200,12 @@ def filter_by_blacklist_only(
     return out
 
 
-def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Fast pass: Pokemon TCG title + valid price + 'free delivery' on the card (per-item scraped text)."""
+def filter_scrape_jobs_stage1(
+    raw_items: list[dict[str, Any]],
+    *,
+    require_free_delivery: bool,
+) -> list[dict[str, Any]]:
+    """Pokémon TCG title + valid price; optional per-job gate on 'free delivery' in scraped card text."""
     out: list[dict[str, Any]] = []
     for item in raw_items:
         title = item.get("title") or ""
@@ -209,10 +213,15 @@ def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, 
             continue
         if not _is_valid_price(item):
             continue
-        if not _has_free_delivery_on_card(item):
+        if require_free_delivery and not _has_free_delivery_on_card(item):
             continue
         out.append(dict(item))
     return out
+
+
+def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fast pass: Pokemon TCG title + valid price + 'free delivery' on the card (per-item scraped text)."""
+    return filter_scrape_jobs_stage1(raw_items, require_free_delivery=True)
 
 
 def _seller_display_name(merchant_id: str) -> str:
@@ -390,29 +399,14 @@ def run_search_filter_pipeline(
     return filtered, meta
 
 
-def run_minimal_scrape_pipeline(
-    raw_items: list[dict[str, Any]],
-    *,
-    require_free_delivery: bool,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Rows with valid price only; optional gate: substring `free delivery` on that card's scraped lines.
-
-    Skips Pokémon title rules, keywords, blacklist, and merchant allowlist — for simple multi-URL scrapes."""
-    meta: dict[str, Any] = {
-        "pipeline": "minimal",
-        "require_free_delivery": require_free_delivery,
-        "raw_in": len(raw_items),
-    }
-    out: list[dict[str, Any]] = []
-    for item in raw_items:
+def _scrape_jobs_output_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Same loose row shape as the old minimal jobs pipeline (no merchant resolution)."""
+    rows: list[dict[str, Any]] = []
+    for item in items:
         asin = (item.get("asin") or "").strip().upper()
         if not asin:
             continue
-        if not _is_valid_price(item):
-            continue
-        if require_free_delivery and not _has_free_delivery_on_card(item):
-            continue
-        out.append(
+        rows.append(
             {
                 "asin": asin,
                 "title": item.get("title") or "",
@@ -425,6 +419,38 @@ def run_minimal_scrape_pipeline(
                 "seller_text": item.get("seller_text"),
             }
         )
-    meta["filtered_count"] = len(out)
-    return out, meta
+    return rows
+
+
+def run_scrape_jobs_filter_pipeline(
+    raw_items: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    require_free_delivery: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Same chain as run_search_filter_pipeline up through keywords + blacklist, without merchant allowlist."""
+    meta: dict[str, Any] = {
+        "pipeline": "scrape_jobs",
+        "require_free_delivery": require_free_delivery,
+        "raw_in": len(raw_items),
+    }
+    sample_url = (raw_items[0].get("search_url") or "") if raw_items else ""
+    if _url_mixes_free_shipping_and_seller_p6(sample_url):
+        LOGGER.warning(
+            "search_url combines free-shipping refine with p_6 seller; Amazon often does not honor both on the SERP. "
+            "When require_free_delivery is on, the gate uses 'free delivery' in each card's scraped text; "
+            "do not rely on p_6 in the same URL for seller truth."
+        )
+        meta["warn_incompatible_url_facets"] = "free_shipping_plus_p_6"
+    bl_file = str(config.get("blacklist_file", "blacklist.txt"))
+    stage = filter_scrape_jobs_stage1(raw_items, require_free_delivery=require_free_delivery)
+    stage = filter_by_blacklist_only(stage, bl_file)
+    req_kw = config.get("required_keywords") or []
+    req_any = config.get("required_any_keywords")
+    if req_kw or req_any:
+        stage = filter_search_results(stage, req_kw, bl_file, req_any)
+    meta["stage1_count"] = len(stage)
+    rows = _scrape_jobs_output_rows(stage)
+    meta["filtered_count"] = len(rows)
+    return rows, meta
 

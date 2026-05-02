@@ -16,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--jobs",
         action="store_true",
-        help="Run config.scrape_jobs (each: url, pages, require_free_delivery); minimal filter only.",
+        help="Run config.scrape_jobs (each: url, pages, require_free_delivery); same title/blacklist/keywords as monitor, no merchant allowlist.",
     )
     return parser.parse_args()
 

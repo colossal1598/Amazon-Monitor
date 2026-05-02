@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, NetworkAccessDenied
-from filter_pipeline import keep_asins_not_in_db, run_minimal_scrape_pipeline, run_search_filter_pipeline
+from filter_pipeline import keep_asins_not_in_db, run_scrape_jobs_filter_pipeline, run_search_filter_pipeline
 from search_scraper import PaginationMode, ScrapeMode, scrape_search
 from state_engine import StateEngine
 from webhook_sender import send_alert, send_heartbeat, send_operational_error
@@ -176,7 +176,7 @@ def run_single_test_scrape_url(config: dict, search_url: str, *, pages: int = 1)
 
 
 def run_scrape_jobs_from_config(config: dict[str, Any]) -> None:
-    """Run each entry in config.scrape_jobs: scrape N pages, then minimal filter (price + optional Israel free delivery)."""
+    """Run each entry in config.scrape_jobs: scrape N pages, then title + blacklist + keywords (+ optional free delivery); no merchant allowlist."""
     jobs = config.get("scrape_jobs")
     if not isinstance(jobs, list) or not jobs:
         LOGGER.error("config.scrape_jobs must be a non-empty list of {name, url, pages, require_free_delivery}")
@@ -227,7 +227,9 @@ def run_scrape_jobs_from_config(config: dict[str, Any]) -> None:
             scroll_delay_range=scroll_r,
             pagination_delay_range=page_r,
         )
-        filtered, meta = run_minimal_scrape_pipeline(raw, require_free_delivery=require_ship)
+        filtered, meta = run_scrape_jobs_filter_pipeline(
+            raw, config, require_free_delivery=require_ship
+        )
 
         (output_dir / f"raw_{safe}.json").write_text(
             json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
