@@ -170,6 +170,7 @@ def run_test_scrape(config: dict, pages_override: int | None = None) -> None:
             collect_debug=True,
             max_cycle_seconds=max_cycle_seconds,
             max_pdp_fallbacks=max_pdp_fallbacks,
+            html_dump_dir=output_dir,
         )
         raw_items.extend(items)
         selector_debug.extend(debug.get("selector_debug", []))

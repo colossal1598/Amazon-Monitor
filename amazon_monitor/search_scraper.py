@@ -4,6 +4,7 @@ import random
 import re
 import time
 import unicodedata
+from pathlib import Path
 from urllib.parse import urlencode, urljoin, urlparse, parse_qs, urlunparse
 from typing import Any
 
@@ -405,6 +406,7 @@ def _scrape_single_attempt(
     collect_debug: bool = False,
     max_cycle_seconds: int = 170,
     max_pdp_fallbacks: int = 8,
+    html_dump_dir: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Single scrape attempt. Raises CaptchaBlocked or NetworkAccessDenied on failure."""
     all_products: list[dict[str, Any]] = []
@@ -442,6 +444,16 @@ def _scrape_single_attempt(
             page.wait_for_selector("div[data-component-type='s-search-result']", timeout=25000)
             page.mouse.wheel(0, random.randint(300, 1300))
             time.sleep(random.uniform(0.5, 1.2))
+            if html_dump_dir is not None:
+                dump_dir = Path(html_dump_dir)
+                dump_dir.mkdir(parents=True, exist_ok=True)
+                safe_source = re.sub(r"[^\w\-]+", "_", source).strip("_")[:80] or "search"
+                out_path = dump_dir / f"{safe_source}_page{page_num}_raw.html"
+                try:
+                    out_path.write_text(page.content(), encoding="utf-8")
+                    LOGGER.info("Wrote raw search page HTML to %s", out_path)
+                except OSError as exc:
+                    LOGGER.warning("Failed to write raw search HTML %s: %s", out_path, exc)
             cards = page.query_selector_all("div[data-component-type='s-search-result']")
             for card in cards:
                 asin = (card.get_attribute("data-asin") or "").strip()
@@ -525,6 +537,7 @@ def scrape_search(
     collect_debug: bool = False,
     max_cycle_seconds: int = 170,
     max_pdp_fallbacks: int = 8,
+    html_dump_dir: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Scrape one Amazon search results URL with automatic retry on network errors.
 
@@ -549,6 +562,7 @@ def scrape_search(
                 collect_debug=collect_debug,
                 max_cycle_seconds=max_cycle_seconds,
                 max_pdp_fallbacks=max_pdp_fallbacks,
+                html_dump_dir=html_dump_dir,
             )
         except NetworkAccessDenied as e:
             last_error = e
