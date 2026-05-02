@@ -69,7 +69,7 @@ Check:
 - `wa_group_id`
 - optional `wa_client_to` (for operational alerts direct-to-client)
 - `affiliate_tag`
-- `search_urls.featured` and `search_urls.newest_arrivals`
+- `search_urls.amazon_com` and `search_urls.aes_llc`
 - `required_keywords` / `required_any_keywords` and `blacklist_file` (see `README.md`)
 
 Tune search URLs and filters for your catalog; see `README.md`.

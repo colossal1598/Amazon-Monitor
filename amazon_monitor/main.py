@@ -21,22 +21,24 @@ from webhook_sender import send_alert, send_heartbeat, send_operational_error
 LOGGER = logging.getLogger("monitor")
 
 
-def resolve_featured_and_newest_urls(config: dict[str, Any]) -> tuple[str, str, str, str]:
-    """Returns (featured_source_key, featured_url, newest_source_key, newest_url)."""
+def resolve_monitor_search_urls(config: dict[str, Any]) -> tuple[str, str, str, str]:
+    """Returns (amazon_com_source_key, amazon_com_url, aes_llc_source_key, aes_llc_url) for scrape_search source= labels."""
     raw_map = config.get("search_urls")
     if not isinstance(raw_map, dict):
-        raise ValueError("config.search_urls must be a dict with `featured` and `newest_arrivals`")
-    featured_url = (raw_map.get("featured") or raw_map.get("main_search") or "").strip()
-    newest_url = (raw_map.get("newest_arrivals") or "").strip()
-    if not featured_url:
+        raise ValueError("config.search_urls must be a dict with `amazon_com` and `aes_llc`")
+    amazon_com_url = (
+        raw_map.get("amazon_com") or raw_map.get("featured") or raw_map.get("main_search") or ""
+    ).strip()
+    aes_llc_url = (raw_map.get("aes_llc") or raw_map.get("newest_arrivals") or "").strip()
+    if not amazon_com_url:
         legacy = config.get("search_url")
         if isinstance(legacy, str) and legacy.strip():
-            featured_url = legacy.strip()
-    if not featured_url:
-        raise ValueError("Set search_urls.featured (or legacy search_url)")
-    if not newest_url:
-        raise ValueError("Set search_urls.newest_arrivals in config.yaml")
-    return "featured", featured_url, "newest_arrivals", newest_url
+            amazon_com_url = legacy.strip()
+    if not amazon_com_url:
+        raise ValueError("Set search_urls.amazon_com (or legacy featured / main_search / search_url)")
+    if not aes_llc_url:
+        raise ValueError("Set search_urls.aes_llc (or legacy newest_arrivals) in config.yaml")
+    return "amazon_com", amazon_com_url, "aes_llc", aes_llc_url
 
 
 def scrape_delay_ranges(config: dict[str, Any]) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -88,7 +90,7 @@ def main() -> None:
     )
     init_global_rate_limiter(config["max_requests_per_minute"])
 
-    f_src, f_url, n_src, n_url = resolve_featured_and_newest_urls(config)
+    amazon_com_src, amazon_com_url, aes_llc_src, aes_llc_url = resolve_monitor_search_urls(config)
     max_cycle_seconds = int(config.get("max_cycle_seconds", 170))
     max_search_pages = int(config.get("max_search_pages", 50))
     pagination_mode = str(config.get("pagination_mode", "auto")).lower()
@@ -151,9 +153,9 @@ def main() -> None:
         mark_job_started("search")
         scroll_r, page_r = scrape_delay_ranges(config)
         try:
-            f_items, _ = scrape_search(
-                f_url,
-                source=f_src,
+            amazon_com_items, _ = scrape_search(
+                amazon_com_url,
+                source=amazon_com_src,
                 scrape_mode="featured_full",
                 pagination_mode=pagination_mode,
                 fixed_pages=fixed_pages,
@@ -163,31 +165,31 @@ def main() -> None:
                 scroll_delay_range=scroll_r,
                 pagination_delay_range=page_r,
             )
-            f_filtered, f_meta = run_search_filter_pipeline(f_items, config)
+            amazon_com_filtered, amazon_com_meta = run_search_filter_pipeline(amazon_com_items, config)
             LOGGER.info(
-                "search_featured raw=%s stage1=%s filtered=%s",
-                len(f_items),
-                f_meta.get("stage1_count"),
-                len(f_filtered),
+                "search_amazon_com raw=%s stage1=%s filtered=%s",
+                len(amazon_com_items),
+                amazon_com_meta.get("stage1_count"),
+                len(amazon_com_filtered),
             )
-            reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(f_filtered))
+            reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(amazon_com_filtered))
             if skipped_reason:
                 LOGGER.info(
                     "search_reconcile_skipped reason=%s filtered_count=%s",
                     skipped_reason,
-                    len(f_filtered),
+                    len(amazon_com_filtered),
                 )
             alerts = state_engine.process_search_candidates(
-                f_filtered,
+                amazon_com_filtered,
                 reconcile_missing=reconcile_missing,
                 source="main_search",
             )
             for alert in alerts:
                 send_alert(alert, config)
 
-            n_items, _ = scrape_search(
-                n_url,
-                source=n_src,
+            aes_items, _ = scrape_search(
+                aes_llc_url,
+                source=aes_llc_src,
                 scrape_mode="newest_front",
                 pagination_mode="fixed",
                 fixed_pages=1,
@@ -197,18 +199,18 @@ def main() -> None:
                 scroll_delay_range=scroll_r,
                 pagination_delay_range=page_r,
             )
-            n_filtered, n_meta = run_search_filter_pipeline(n_items, config)
+            aes_filtered, aes_meta = run_search_filter_pipeline(aes_items, config)
             known = state_engine.list_known_asins()
-            n_only = keep_asins_not_in_db(n_filtered, known)
+            aes_only = keep_asins_not_in_db(aes_filtered, known)
             LOGGER.info(
-                "search_newest raw=%s stage1=%s filtered=%s not_in_db=%s",
-                len(n_items),
-                n_meta.get("stage1_count"),
-                len(n_filtered),
-                len(n_only),
+                "search_aes_llc raw=%s stage1=%s filtered=%s not_in_db=%s",
+                len(aes_items),
+                aes_meta.get("stage1_count"),
+                len(aes_filtered),
+                len(aes_only),
             )
             alerts_new = state_engine.process_search_candidates(
-                n_only,
+                aes_only,
                 reconcile_missing=False,
                 source="main_search",
             )
