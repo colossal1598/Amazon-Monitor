@@ -2,6 +2,8 @@ import re
 import unicodedata
 from pathlib import Path
 from typing import Any, Literal
+
+from search_scraper import extract_merchant_ids_from_search_url
 def _normalize_text(value: str) -> str:
     """Lowercase and strip diacritics for accent-insensitive matching."""
     lowered = (value or "").lower().strip()
@@ -255,8 +257,14 @@ def _allowlist_id_for_classified_dom_name(dom_name: str | None) -> str | None:
     return None
 
 
-def _merchant_tokens_for_item(item: dict[str, Any]) -> set[str]:
-    """Per-card merchant ids only — do not merge search URL rh=p_6 (same URL for every row, not per-offer proof)."""
+def _merchant_tokens_for_item(
+    item: dict[str, Any],
+    *,
+    config: dict[str, Any] | None,
+    allowed: set[str],
+) -> set[str]:
+    """Card tokens plus optional URL seller facets (emi / rh p_6) and amazon_com_serp_merchant_ids aliases."""
+    cfg = config or {}
     tokens: set[str] = set()
     raw = item.get("merchant_id_tokens")
     if isinstance(raw, list):
@@ -269,14 +277,27 @@ def _merchant_tokens_for_item(item: dict[str, Any]) -> set[str]:
     for x in item.get("primary_offer_merchant_ids") or []:
         if x:
             tokens.add(str(x).upper())
+    if cfg.get("apply_search_url_merchant_facets", True):
+        url = (item.get("search_url") or "").strip()
+        if url:
+            try:
+                tokens |= extract_merchant_ids_from_search_url(url)
+            except Exception:
+                pass
+    aliases = {str(x).strip().upper() for x in (cfg.get("amazon_com_serp_merchant_ids") or []) if str(x).strip()}
+    if aliases and "ATVPDKIKX0DER" in allowed:
+        prim = {str(x).upper() for x in (item.get("primary_offer_merchant_ids") or []) if x}
+        if prim & aliases:
+            tokens.add("ATVPDKIKX0DER")
     return tokens
 
 
 def filter_by_allowed_merchant_ids(
     items: list[dict[str, Any]],
     allowed_merchant_ids: list[str],
+    config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep rows when (1) primary-offer / anchor / scrubbed-card merchant ids hit the allowlist, or
+    """Keep rows when (1) merchant ids (card + optional URL emi/p_6 + optional amazon_com_serp_merchant_ids) hit the allowlist, or
     (2) visible seller text matches (Sold-by snippet only — not FBA ships-from Amazon.com)."""
     allowed = {str(x).strip().upper() for x in allowed_merchant_ids if str(x).strip()}
     if not allowed:
@@ -287,7 +308,7 @@ def filter_by_allowed_merchant_ids(
         asin = (item.get("asin") or "").upper()
         if not asin or asin in seen:
             continue
-        tokens = _merchant_tokens_for_item(item)
+        tokens = _merchant_tokens_for_item(item, config=config, allowed=allowed)
         hit = tokens & allowed
         if hit:
             seen.add(asin)
@@ -334,7 +355,7 @@ def run_search_filter_pipeline(
         stage1 = filter_search_results(stage1, req_kw, bl_file, req_any)
     meta["stage1_count"] = len(stage1)
     allowed = config.get("allowed_merchant_ids") or []
-    filtered = filter_by_allowed_merchant_ids(stage1, allowed)
+    filtered = filter_by_allowed_merchant_ids(stage1, allowed, config)
     meta["filtered_count"] = len(filtered)
     return filtered, meta
 

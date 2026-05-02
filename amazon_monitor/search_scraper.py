@@ -21,9 +21,6 @@ PaginationMode = Literal["auto", "fixed"]
 
 _MERCHANT_TOKEN_RE = re.compile(r"\b(A[0-9A-Z]{12,13})\b")
 
-# Embedded in every add-to-cart / analytics block as …/marketplaces/ATVPDKIKX0DER/… — not the offer seller.
-_BLOB_MERCHANT_TOKEN_DENYLIST = frozenset({"ATVPDKIKX0DER"})
-
 _MERCHANT_ID_PARAM_RE = re.compile(r"^[A-Z0-9]{13,14}$")
 
 PRICE_RE = re.compile(r"\$?\s*([0-9]+(?:[.,][0-9]{1,2})?)")
@@ -64,7 +61,7 @@ def parse_search_metadata(html: str) -> dict[str, Any]:
 
 
 def extract_merchant_ids_from_search_url(search_url: str) -> set[str]:
-    """Decode rh=… and extract p_6:… seller facet merchant IDs."""
+    """Seller intent from the search URL only: rh=p_6:… facets and emi=… (e.g. emi=ATVPDKIKX0DER for Sold by Amazon.com)."""
     parsed = urlparse(search_url)
     qs = parse_qs(parsed.query, keep_blank_values=True)
     found: set[str] = set()
@@ -72,6 +69,11 @@ def extract_merchant_ids_from_search_url(search_url: str) -> set[str]:
         decoded = unquote(rh)
         for m in re.finditer(r"p_6:([A-Z0-9]{13,14})", decoded, re.IGNORECASE):
             found.add(m.group(1).upper())
+    for raw_emi in qs.get("emi", []):
+        for piece in re.split(r"[\s,]+", unquote(str(raw_emi)).strip()):
+            p = piece.strip().upper()
+            if _MERCHANT_ID_PARAM_RE.match(p):
+                found.add(p)
     return found
 
 
@@ -82,9 +84,30 @@ def extract_merchant_tokens_from_blob(blob: str) -> set[str]:
     return {m.group(1).upper() for m in _MERCHANT_TOKEN_RE.finditer(blob)}
 
 
+def _scrub_telemetry_for_merchant_token_scan(blob: str) -> str:
+    """Remove marketplace-telemetry substrings so ATVPDKIKX0DER is not counted from /marketplaces/… URLs / JSON only."""
+    if not blob:
+        return blob
+    out = blob
+    out = re.sub(
+        r"https?://[^\"'\s<>]+/marketplaces/ATVPDKIKX0DER[^\"'\s<>]*",
+        "",
+        out,
+        flags=re.I,
+    )
+    for pat in (
+        r'"marketplaceId"\s*:\s*"ATVPDKIKX0DER"\s*,?',
+        r"'ObfuscatedMarketplaceId'\s*:\s*'ATVPDKIKX0DER'\s*,?",
+        r'"obfuscatedMarketId"\s*:\s*"ATVPDKIKX0DER"\s*,?',
+        r"ue_mid\s*=\s*'ATVPDKIKX0DER'",
+    ):
+        out = re.sub(pat, '""', out, flags=re.I)
+    return out
+
+
 def extract_merchant_tokens_from_card_inner_html(blob: str) -> set[str]:
-    """Like extract_merchant_tokens_from_blob but drops marketplace telemetry ids (false seller hits)."""
-    return extract_merchant_tokens_from_blob(blob) - _BLOB_MERCHANT_TOKEN_DENYLIST
+    """Merchant-like A-tokens from card HTML after stripping known marketplace telemetry noise."""
+    return extract_merchant_tokens_from_blob(_scrub_telemetry_for_merchant_token_scan(blob))
 
 
 def _parse_merchant_ids_from_href(href: str) -> set[str]:
@@ -405,6 +428,9 @@ def _scrape_single_attempt(
     pagination_mode: PaginationMode,
     fixed_pages: int,
     max_search_pages: int,
+    *,
+    scroll_delay_range: tuple[float, float] = (0.25, 0.65),
+    pagination_delay_range: tuple[float, float] = (2.0, 4.5),
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_products: list[dict[str, Any]] = []
     debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}}
@@ -443,7 +469,7 @@ def _scrape_single_attempt(
 
             page.wait_for_selector("div[data-component-type='s-search-result']", timeout=25000)
             page.mouse.wheel(0, random.randint(300, 1300))
-            time.sleep(random.uniform(0.5, 1.2))
+            time.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
 
             html = page.content()
             if page_num == 1:
@@ -558,7 +584,7 @@ def _scrape_single_attempt(
                 LOGGER.info("Stopping pagination: no next page (page=%s)", page_num)
                 break
             page_num += 1
-            time.sleep(random.uniform(6, 12))
+            time.sleep(random.uniform(pagination_delay_range[0], pagination_delay_range[1]))
     finally:
         close_context(context)
 
@@ -578,6 +604,8 @@ def scrape_search(
     collect_debug: bool = False,
     max_cycle_seconds: int = 170,
     html_dump_dir: str | Path | None = None,
+    scroll_delay_range: tuple[float, float] | None = None,
+    pagination_delay_range: tuple[float, float] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Scrape Amazon search results. No PDP visits.
 
@@ -585,6 +613,8 @@ def scrape_search(
       - featured_full: multi-page (auto or fixed pagination).
       - newest_front: page 1 only.
     """
+    sdr = scroll_delay_range if scroll_delay_range is not None else (0.25, 0.65)
+    pdr = pagination_delay_range if pagination_delay_range is not None else (2.0, 4.5)
     last_error: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
@@ -599,12 +629,14 @@ def scrape_search(
                 pagination_mode=pagination_mode,
                 fixed_pages=fixed_pages,
                 max_search_pages=max_search_pages,
+                scroll_delay_range=sdr,
+                pagination_delay_range=pdr,
             )
         except NetworkAccessDenied as e:
             last_error = e
             LOGGER.warning("Network error on attempt %s: %s", attempt + 1, e)
             if attempt < max_retries:
-                time.sleep(random.uniform(2, 5))
+                time.sleep(random.uniform(1.5, 3.0))
             else:
                 LOGGER.error("Network errors persisted after %s attempts", max_retries + 1)
                 raise
