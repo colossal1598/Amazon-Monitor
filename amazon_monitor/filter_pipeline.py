@@ -29,6 +29,17 @@ def _read_blacklist(blacklist_file: str) -> tuple[set[str], list[re.Pattern[str]
     return asins, patterns
 
 
+def _keyword_matches_title(title_norm: str, keyword: str, raw_title: str) -> bool:
+    if not keyword:
+        return True
+    if keyword in title_norm:
+        return True
+    # Many SV-era listings omit the letters "TCG" but are still the card game line.
+    if keyword == "tcg":
+        return _title_signals_pokemon_tcg_scope(raw_title)
+    return False
+
+
 def filter_search_results(
     products: list[dict[str, Any]],
     required_keywords: list[str],
@@ -41,12 +52,13 @@ def filter_search_results(
     filtered: list[dict[str, Any]] = []
     for product in products:
         asin = (product.get("asin") or "").upper()
-        title = _normalize_text(product.get("title") or "")
+        raw_title = product.get("title") or ""
+        title = _normalize_text(raw_title)
         if not asin or not title:
             continue
         if asin in blocked_asins:
             continue
-        if any(not keyword or keyword not in title for keyword in req):
+        if any(not _keyword_matches_title(title, keyword, raw_title) for keyword in req):
             continue
         if req_any and not any(keyword in title for keyword in req_any):
             continue
@@ -61,9 +73,22 @@ def _normalize_ascii(value: str) -> str:
     return decomposed.encode("ascii", "ignore").decode("ascii")
 
 
-def _has_pokemon_tcg_title(title: str) -> bool:
+def _title_signals_pokemon_tcg_scope(title: str) -> bool:
+    """Whether the visible title is the card-game product line (not every product with 'Pokemon' in the name)."""
     text = _normalize_ascii(title)
-    return "pokemon tcg" in text or "pokemon trading card game" in text
+    if "pokemon tcg" in text or "pokemon trading card game" in text:
+        return True
+    if "pokemon" not in text:
+        return False
+    if "tcg" in text or "trading card" in text:
+        return True
+    if "scarlet" in text and "violet" in text:
+        return True
+    return False
+
+
+def _has_pokemon_tcg_title(title: str) -> bool:
+    return _title_signals_pokemon_tcg_scope(title)
 
 
 def _is_valid_price(item: dict[str, Any]) -> bool:

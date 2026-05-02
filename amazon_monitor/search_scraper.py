@@ -1,3 +1,4 @@
+import html as html_module
 import logging
 import json
 import math
@@ -26,6 +27,12 @@ _BLOB_MERCHANT_TOKEN_DENYLIST = frozenset({"ATVPDKIKX0DER"})
 _MERCHANT_ID_PARAM_RE = re.compile(r"^[A-Z0-9]{13,14}$")
 
 PRICE_RE = re.compile(r"\$?\s*([0-9]+(?:[.,][0-9]{1,2})?)")
+# Amazon a-offscreen often uses "ILS&nbsp;126.29" / "EUR 12,99" (no leading $).
+_CURRENCY_AMOUNT_RE = re.compile(
+    r"(?:ils|eur|gbp|jpy|aud|cad|usd|try|sgd|aed|sar|pln|sek|nok|dkk|hkd|myr|nzd|chf|brl|mxn|inr)\s*"
+    r"([0-9]+(?:[.,][0-9]{1,2})?)",
+    re.IGNORECASE,
+)
 
 
 def _is_network_error(error: Exception) -> bool:
@@ -171,13 +178,16 @@ def collect_merchant_tokens_for_card(
 def _parse_price(raw_text: str) -> float | None:
     if not raw_text:
         return None
-    matches = PRICE_RE.findall(raw_text.replace(",", ""))
+    t = html_module.unescape(raw_text).replace("\xa0", " ").strip()
+    t_flat = t.replace(",", "")
+    matches = list(PRICE_RE.findall(t_flat))
+    matches += _CURRENCY_AMOUNT_RE.findall(t)
     if not matches:
         return None
     values = []
     for match in matches:
         try:
-            values.append(float(match))
+            values.append(float(match.replace(",", "")))
         except ValueError:
             continue
     return min(values) if values else None
