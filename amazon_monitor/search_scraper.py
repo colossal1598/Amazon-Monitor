@@ -1,12 +1,13 @@
 import logging
 import json
+import math
 import random
 import re
 import time
 import unicodedata
 from pathlib import Path
-from urllib.parse import urlencode, urljoin, urlparse, parse_qs, urlunparse
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 
 import browser_factory
 from browser_factory import close_context, create_stealth_context
@@ -14,9 +15,15 @@ from exceptions import CaptchaBlocked, NetworkAccessDenied
 
 LOGGER = logging.getLogger(__name__)
 
+ScrapeMode = Literal["featured_full", "newest_front"]
+PaginationMode = Literal["auto", "fixed"]
+
+_MERCHANT_TOKEN_RE = re.compile(r"\b(A[0-9A-Z]{12,13})\b")
+
+PRICE_RE = re.compile(r"\$?\s*([0-9]+(?:[.,][0-9]{1,2})?)")
+
 
 def _is_network_error(error: Exception) -> bool:
-    """Check if error is a retryable network-level failure."""
     err_str = str(error).lower()
     network_patterns = [
         "err_network_access_denied",
@@ -29,7 +36,51 @@ def _is_network_error(error: Exception) -> bool:
         "timeout",
     ]
     return any(p in err_str for p in network_patterns)
-PRICE_RE = re.compile(r"\$?\s*([0-9]+(?:[.,][0-9]{1,2})?)")
+
+
+def parse_search_metadata(html: str) -> dict[str, Any]:
+    """Parse Amazon s-metadata JSON blob for pagination and marketplace id."""
+    out: dict[str, Any] = {"totalResultCount": None, "asinOnPageCount": None, "marketplaceId": None}
+    m = re.search(r'"totalResultCount"\s*:\s*(\d+).{0,500}?"asinOnPageCount"\s*:\s*(\d+)', html, re.DOTALL)
+    if m:
+        out["totalResultCount"] = int(m.group(1))
+        out["asinOnPageCount"] = int(m.group(2))
+    m2 = re.search(r'"marketplaceId"\s*:\s*"([A-Z0-9]+)"', html)
+    if m2:
+        out["marketplaceId"] = m2.group(1).upper()
+    return out
+
+
+def extract_merchant_ids_from_search_url(search_url: str) -> set[str]:
+    """Decode rh=… and extract p_6:… seller facet merchant IDs."""
+    parsed = urlparse(search_url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    found: set[str] = set()
+    for rh in qs.get("rh", []):
+        decoded = unquote(rh)
+        for m in re.finditer(r"p_6:([A-Z0-9]{13,14})", decoded, re.IGNORECASE):
+            found.add(m.group(1).upper())
+    return found
+
+
+def extract_merchant_tokens_from_blob(blob: str) -> set[str]:
+    """Find Amazon-style merchant / marketplace tokens (A + 12–13 alnum) in HTML or text."""
+    if not blob:
+        return set()
+    return {m.group(1).upper() for m in _MERCHANT_TOKEN_RE.finditer(blob)}
+
+
+def collect_merchant_signals_for_card(
+    card_inner_html: str,
+    search_url: str,
+    page_marketplace_id: str | None,
+) -> list[str]:
+    tokens: set[str] = set()
+    tokens |= extract_merchant_tokens_from_blob(card_inner_html)
+    tokens |= extract_merchant_ids_from_search_url(search_url)
+    if page_marketplace_id:
+        tokens.add(page_marketplace_id.upper())
+    return sorted(tokens)
 
 
 def _parse_price(raw_text: str) -> float | None:
@@ -77,7 +128,6 @@ def _extract_by_selectors(card, selectors: tuple[str, ...]) -> tuple[str, str | 
 
 
 def _extract_price(card, card_text: str) -> float | None:
-    # Prefer Amazon's explicit visible/full price field when present.
     for selector in ("span.a-price span.a-offscreen", "span[data-a-color='base'] span.a-offscreen"):
         node = card.query_selector(selector)
         if not node:
@@ -85,8 +135,6 @@ def _extract_price(card, card_text: str) -> float | None:
         value = _parse_price((node.inner_text() or "").strip())
         if value is not None and value >= 5:
             return value
-
-    # Fallback to parsed card text but reject obvious noise values.
     value = _parse_price(card_text)
     if value is None:
         return None
@@ -128,6 +176,25 @@ def _extract_availability_text(card, card_text: str) -> tuple[str, str | None]:
     return (text or card_text, selector)
 
 
+def _looks_like_seller_blob(value: str) -> bool:
+    text = _normalize_ascii(value)
+    if not text:
+        return False
+    if "out of 5 stars" in text:
+        return False
+    return (
+        "sold by" in text
+        or "ships from" in text
+        or "amazon export llc" in text
+        or re.search(r"\bamazon\.com\b", text) is not None
+    )
+
+
+def _normalize_ascii(value: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", (value or "").lower().strip())
+    return decomposed.encode("ascii", "ignore").decode("ascii")
+
+
 def _extract_seller_text(card) -> tuple[str, str | None]:
     selectors = (
         "span:has-text('Sold by')",
@@ -143,8 +210,6 @@ def _extract_seller_text(card) -> tuple[str, str | None]:
         text = (node.inner_text() or "").strip()
         if _looks_like_seller_blob(text):
             return text, selector
-
-    # Fallback: some cards only expose seller text in the full card blob.
     card_text = (card.inner_text() or "").strip()
     if _looks_like_seller_blob(card_text):
         m = re.search(
@@ -154,21 +219,6 @@ def _extract_seller_text(card) -> tuple[str, str | None]:
         )
         return (m.group(1).strip() if m else card_text), "card_text_fallback"
     return "", None
-
-
-def _looks_like_seller_blob(value: str) -> bool:
-    text = _normalize_ascii(value)
-    if not text:
-        return False
-    # Reject common rating-only captures like "4.2 out of 5 stars".
-    if "out of 5 stars" in text:
-        return False
-    return (
-        "sold by" in text
-        or "ships from" in text
-        or "amazon export llc" in text
-        or re.search(r"\bamazon\.com\b", text) is not None
-    )
 
 
 def _extract_shipping_text(card) -> tuple[str, str | None]:
@@ -185,8 +235,6 @@ def _extract_image_url(card) -> str | None:
     image_el = card.query_selector("img.s-image")
     if not image_el:
         return None
-
-    # Best source: Amazon often provides a JSON map of URLs in data-a-dynamic-image.
     dynamic_attr = image_el.get_attribute("data-a-dynamic-image") or ""
     if dynamic_attr:
         try:
@@ -195,15 +243,12 @@ def _extract_image_url(card) -> str | None:
                 return max(candidates.keys(), key=len)
         except Exception:
             pass
-
-    # Next best: srcset can include larger variants.
     srcset = image_el.get_attribute("srcset") or ""
     if srcset:
         parts = [p.strip() for p in srcset.split(",") if p.strip()]
         urls = [p.split(" ")[0] for p in parts if p]
         if urls:
             return urls[-1]
-
     src = image_el.get_attribute("src")
     return src.strip() if src else None
 
@@ -226,198 +271,38 @@ def _set_page_param(search_url: str, page_num: int) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
 
-def _has_sold_by(text: str) -> bool:
-    return "sold by" in (text or "").lower()
-
-
-def _normalize_ascii(value: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", (value or "").lower().strip())
-    return decomposed.encode("ascii", "ignore").decode("ascii")
-
-
-def _looks_like_target_title(title: str) -> bool:
-    norm = _normalize_ascii(title)
-    return "pokemon tcg" in norm or "pokemon trading card game" in norm
-
-
-def _looks_like_free_shipping_text(shipping_text: str) -> bool:
-    norm = _normalize_ascii(shipping_text)
-    return "free shipping" in norm or "free delivery" in norm
-
-
-# Product detail page: merchant/seller visible text (new ODF buybox first, then legacy nodes).
-_PDP_SELLER_TEXT_SELECTORS: tuple[str, ...] = (
-    "#sellerProfileTriggerId",
-    "a#sellerProfileTriggerId",
-    '[offer-display-feature-name="desktop-merchant-info"] a.offer-display-feature-text-message',
-    '[offer-display-feature-name="desktop-merchant-info"] a.a-link-normal',
-    "#merchant-info",
-    "#merchant-info a",
-    "#desktop_merchant_info_feature_div",
-    "#tabular-buybox [tabular-attribute-name='Sold by'] .tabular-buybox-text",
-    "#tabular-buybox [tabular-attribute-name='Ships from'] .tabular-buybox-text",
-    "#soldByThirdParty",
-    "#sellerName",
-)
-
-
-def _wait_pdp_merchant_ui(page) -> None:
-    """Best-effort wait for dynamic buybox merchant row (non-fatal on timeout)."""
-    try:
-        page.wait_for_selector(
-            "#sellerProfileTriggerId, [offer-display-feature-name='desktop-merchant-info'], #merchant-info",
-            timeout=12000,
-        )
-    except Exception:
-        pass
-
-
-def _query_pdp_seller_text(page) -> tuple[str, str | None]:
-    for selector in _PDP_SELLER_TEXT_SELECTORS:
-        node = page.query_selector(selector)
-        if not node:
+def _dedupe_products_by_asin(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_asin: dict[str, dict[str, Any]] = {}
+    for p in products:
+        a = (p.get("asin") or "").strip().upper()
+        if not a:
             continue
-        text = (node.inner_text() or "").strip()
-        if text:
-            return text, selector
-    return "", None
-
-
-def _merchant_debug_root(page):
-    return (
-        page.query_selector('[offer-display-feature-name="desktop-merchant-info"]')
-        or page.query_selector("#merchant-info")
-        or page.query_selector("#desktop_merchant_info_feature_div")
-    )
-
-
-def _resolve_seller_from_pdp(
-    context,
-    asin: str,
-    seller_cache: dict[str, str],
-    debug: dict[str, Any] | None = None,
-) -> str:
-    if asin in seller_cache:
-        return seller_cache[asin]
-
-    pdp_url = f"https://www.amazon.com/dp/{asin}"
-    if browser_factory.global_rate_limiter:
-        browser_factory.global_rate_limiter.acquire()
-    page = context.new_page()
-    found_text = ""
-    hit_selector = None
-    html_snippet = ""
-    try:
-        page.goto(pdp_url, wait_until="domcontentloaded", timeout=45000)
-        _wait_pdp_merchant_ui(page)
-        found_text, hit_selector = _query_pdp_seller_text(page)
-        if debug is not None:
-            root = _merchant_debug_root(page)
-            if root:
-                html_snippet = (root.inner_html() or "")[:4000]
-    except Exception as exc:
-        LOGGER.debug("PDP seller lookup failed asin=%s err=%s", asin, exc)
-    finally:
-        page.close()
-
-    seller_cache[asin] = found_text
-    if debug is not None:
-        debug[asin] = {
-            "pdp_url": pdp_url,
-            "seller_text": found_text,
-            "seller_selector": hit_selector,
-            "merchant_html_snippet": html_snippet,
-        }
-    return found_text
-
-
-def _fetch_pdp_seller_blob(context, asin: str) -> str:
-    """Read merchant/seller text from product detail page (single ASIN, one tab)."""
-    pdp_url = f"https://www.amazon.com/dp/{asin}"
-    if browser_factory.global_rate_limiter:
-        browser_factory.global_rate_limiter.acquire()
-    page = context.new_page()
-    found_text = ""
-    try:
-        page.goto(pdp_url, wait_until="domcontentloaded", timeout=45000)
-        title = (page.title() or "").lower()
-        if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
-            raise CaptchaBlocked(f"Captcha detected on PDP for {asin}")
-        _wait_pdp_merchant_ui(page)
-        found_text, _ = _query_pdp_seller_text(page)
-    except CaptchaBlocked:
-        raise
-    except Exception as exc:
-        LOGGER.debug("PDP seller fetch failed asin=%s err=%s", asin, exc)
-    finally:
-        page.close()
-    return found_text
-
-
-def verify_sellers_batch(
-    asins: list[str],
-    max_verifications: int,
-    max_seconds: float | None = None,
-) -> tuple[dict[str, str], bool]:
-    """Open sequential PDP pages for up to max_verifications ASINs; return asin -> seller blob.
-
-    Returns (results, captcha_stopped). On captcha mid-batch, returns partial results and True
-    instead of raising (so callers can persist diagnostics and continue safely).
-    """
-    results: dict[str, str] = {}
-    captcha_stopped = False
-    if max_verifications <= 0 or not asins:
-        return results, captcha_stopped
-    to_visit = [a.strip().upper() for a in asins if a and len(a.strip()) == 10][:max_verifications]
-    if not to_visit:
-        return results, captcha_stopped
-    started = time.monotonic()
-    context = create_stealth_context(persistent_dir=None, headless=False)
-    try:
-        for asin in to_visit:
-            if max_seconds is not None and (time.monotonic() - started) > max_seconds:
-                LOGGER.warning(
-                    "verify_sellers_batch stopped early: budget=%ss verified=%s",
-                    max_seconds,
-                    len(results),
-                )
-                break
-            try:
-                results[asin] = _fetch_pdp_seller_blob(context, asin)
-            except CaptchaBlocked as exc:
-                LOGGER.warning(
-                    "verify_sellers_batch captcha stopped batch at asin=%s (verified_before=%s): %s",
-                    asin,
-                    len(results),
-                    exc,
-                )
-                captcha_stopped = True
-                break
-            time.sleep(random.uniform(0.4, 1.0))
-    finally:
-        close_context(context)
-    return results, captcha_stopped
+        by_asin[a] = p
+    return list(by_asin.values())
 
 
 def _scrape_single_attempt(
     search_url: str,
-    pages: int,
     source: str,
-    collect_debug: bool = False,
-    max_cycle_seconds: int = 170,
-    max_pdp_fallbacks: int = 8,
-    html_dump_dir: str | Path | None = None,
+    collect_debug: bool,
+    max_cycle_seconds: int,
+    html_dump_dir: str | Path | None,
+    scrape_mode: ScrapeMode,
+    pagination_mode: PaginationMode,
+    fixed_pages: int,
+    max_search_pages: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Single scrape attempt. Raises CaptchaBlocked or NetworkAccessDenied on failure."""
     all_products: list[dict[str, Any]] = []
-    debug_data: dict[str, Any] = {"selector_debug": [], "pdp_debug": {}}
+    debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}}
     context = create_stealth_context(persistent_dir=None, headless=False)
-    seller_cache: dict[str, str] = {}
     cycle_started = time.monotonic()
-    pdp_fallback_count = 0
+    total_pages_cap = 1
+    page_meta_first: dict[str, Any] = {}
+
     try:
         page = context.new_page()
-        for page_num in range(1, pages + 1):
+        page_num = 1
+        while True:
             elapsed = time.monotonic() - cycle_started
             if elapsed > max_cycle_seconds:
                 LOGGER.warning(
@@ -429,8 +314,9 @@ def _scrape_single_attempt(
                 break
             if browser_factory.global_rate_limiter:
                 browser_factory.global_rate_limiter.acquire()
-            LOGGER.info("Scraping %s page %s", source, page_num)
+
             current_url = _set_page_param(search_url, page_num) if page_num > 1 else search_url
+            LOGGER.info("Scraping %s page %s/%s", source, page_num, total_pages_cap)
             try:
                 page.goto(current_url, wait_until="domcontentloaded", timeout=45000)
             except Exception as e:
@@ -444,16 +330,49 @@ def _scrape_single_attempt(
             page.wait_for_selector("div[data-component-type='s-search-result']", timeout=25000)
             page.mouse.wheel(0, random.randint(300, 1300))
             time.sleep(random.uniform(0.5, 1.2))
+
+            html = page.content()
+            if page_num == 1:
+                page_meta_first = parse_search_metadata(html)
+                cards_probe = page.query_selector_all("div[data-component-type='s-search-result']")
+                card_count = len(cards_probe)
+                ipp = page_meta_first.get("asinOnPageCount") or card_count or 1
+                total = page_meta_first.get("totalResultCount") or card_count
+                if scrape_mode == "newest_front":
+                    total_pages_cap = 1
+                elif scrape_mode == "featured_full" and pagination_mode == "auto" and page_meta_first.get("totalResultCount"):
+                    computed = max(1, math.ceil(total / max(1, ipp)))
+                    total_pages_cap = min(max_search_pages, computed)
+                elif scrape_mode == "featured_full":
+                    total_pages_cap = min(max_search_pages, max(1, fixed_pages))
+                else:
+                    total_pages_cap = min(max_search_pages, max(1, fixed_pages))
+                debug_data["scrape_meta"] = {
+                    "total_pages_cap": total_pages_cap,
+                    "page_meta": page_meta_first,
+                    "scrape_mode": scrape_mode,
+                    "pagination_mode": pagination_mode,
+                }
+                LOGGER.info(
+                    "search_pagination source=%s mode=%s total_pages_cap=%s meta=%s",
+                    source,
+                    pagination_mode,
+                    total_pages_cap,
+                    page_meta_first,
+                )
+
             if html_dump_dir is not None:
                 dump_dir = Path(html_dump_dir)
                 dump_dir.mkdir(parents=True, exist_ok=True)
                 safe_source = re.sub(r"[^\w\-]+", "_", source).strip("_")[:80] or "search"
                 out_path = dump_dir / f"{safe_source}_page{page_num}_raw.html"
                 try:
-                    out_path.write_text(page.content(), encoding="utf-8")
+                    out_path.write_text(html, encoding="utf-8")
                     LOGGER.info("Wrote raw search page HTML to %s", out_path)
                 except OSError as exc:
                     LOGGER.warning("Failed to write raw search HTML %s: %s", out_path, exc)
+
+            mpid = page_meta_first.get("marketplaceId")
             cards = page.query_selector_all("div[data-component-type='s-search-result']")
             for card in cards:
                 asin = (card.get_attribute("data-asin") or "").strip()
@@ -468,38 +387,26 @@ def _scrape_single_attempt(
                 seller_text, seller_selector = _extract_seller_text(card)
                 shipping_text, shipping_selector = _extract_shipping_text(card)
                 product_url = _extract_product_url(card)
+                inner_html = card.inner_html() or ""
+                merchant_id_tokens = collect_merchant_signals_for_card(inner_html, current_url, mpid)
 
-                should_try_pdp = (
-                    not _has_sold_by(seller_text)
-                    and price is not None
-                    and _looks_like_target_title(product_title)
-                    and _looks_like_free_shipping_text(shipping_text)
-                )
-                if should_try_pdp and pdp_fallback_count < max_pdp_fallbacks:
-                    pdp_fallback_count += 1
-                    seller_text = _resolve_seller_from_pdp(
-                        context,
-                        asin,
-                        seller_cache,
-                        debug_data["pdp_debug"] if collect_debug else None,
-                    ) or seller_text
-
-                all_products.append(
-                    {
-                        "asin": asin,
-                        "title": product_title,
-                        "price": price,
-                        "price_text": price_text,
-                        "in_stock": _stock_flag(availability_text),
-                        "availability_text": availability_text,
-                        "seller": seller_text or source,
-                        "seller_text": seller_text,
-                        "shipping_text": shipping_text,
-                        "image_url": image_url,
-                        "product_url": product_url,
-                        "source": source,
-                    }
-                )
+                row = {
+                    "asin": asin,
+                    "title": product_title,
+                    "price": price,
+                    "price_text": price_text,
+                    "in_stock": _stock_flag(availability_text),
+                    "availability_text": availability_text,
+                    "seller": seller_text or source,
+                    "seller_text": seller_text,
+                    "shipping_text": shipping_text,
+                    "image_url": image_url,
+                    "product_url": product_url,
+                    "source": source,
+                    "search_url": current_url,
+                    "merchant_id_tokens": merchant_id_tokens,
+                }
+                all_products.append(row)
                 if collect_debug:
                     debug_data["selector_debug"].append(
                         {
@@ -509,76 +416,77 @@ def _scrape_single_attempt(
                             "seller_found": bool(seller_text),
                             "shipping_found": bool(shipping_text),
                             "availability_found": bool(availability_text),
-                            "title_selector": "h2 a span",
                             "price_selector": price_selector,
                             "seller_selector": seller_selector,
                             "shipping_selector": shipping_selector,
                             "availability_selector": availability_selector,
-                            "pdp_fallback_attempted": should_try_pdp and pdp_fallback_count <= max_pdp_fallbacks,
-                            "card_html_snippet": (card.inner_html() or "")[:4000],
+                            "merchant_id_tokens": merchant_id_tokens,
+                            "card_html_snippet": inner_html[:4000],
                         }
                     )
 
+            if page_num >= total_pages_cap:
+                break
+            if scrape_mode == "newest_front":
+                break
             next_btn = page.query_selector("a.s-pagination-next")
             disabled = (next_btn.get_attribute("aria-disabled") if next_btn else "true") == "true"
-            if page_num >= pages or not next_btn or disabled:
+            if not next_btn or disabled:
+                LOGGER.info("Stopping pagination: no next page (page=%s)", page_num)
                 break
+            page_num += 1
             time.sleep(random.uniform(6, 12))
     finally:
         close_context(context)
-    return all_products, debug_data
+
+    deduped = _dedupe_products_by_asin(all_products)
+    return deduped, debug_data
 
 
 def scrape_search(
     search_url: str,
-    pages: int = 5,
-    max_retries: int = 2,
+    *,
     source: str = "main_search",
+    scrape_mode: ScrapeMode = "featured_full",
+    pagination_mode: PaginationMode = "auto",
+    fixed_pages: int = 1,
+    max_search_pages: int = 50,
+    max_retries: int = 2,
     collect_debug: bool = False,
     max_cycle_seconds: int = 170,
-    max_pdp_fallbacks: int = 8,
     html_dump_dir: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Scrape one Amazon search results URL with automatic retry on network errors.
+    """Scrape Amazon search results. No PDP visits.
 
-    Args:
-        search_url: The Amazon search URL to scrape.
-        pages: Maximum number of pages to scrape.
-        max_retries: Number of retry attempts for network errors (not captcha).
-
-    Raises:
-        CaptchaBlocked: If Amazon shows a captcha/robot check.
-        NetworkAccessDenied: If network errors persist after all retries.
+    scrape_mode:
+      - featured_full: multi-page (auto or fixed pagination).
+      - newest_front: page 1 only.
     """
     last_error: Exception | None = None
-
     for attempt in range(max_retries + 1):
         try:
-            LOGGER.info("Scrape attempt %s/%s for %s", attempt + 1, max_retries + 1, source)
+            LOGGER.info("Scrape attempt %s/%s for %s mode=%s", attempt + 1, max_retries + 1, source, scrape_mode)
             return _scrape_single_attempt(
                 search_url,
-                pages,
                 source,
                 collect_debug=collect_debug,
                 max_cycle_seconds=max_cycle_seconds,
-                max_pdp_fallbacks=max_pdp_fallbacks,
                 html_dump_dir=html_dump_dir,
+                scrape_mode=scrape_mode,
+                pagination_mode=pagination_mode,
+                fixed_pages=fixed_pages,
+                max_search_pages=max_search_pages,
             )
         except NetworkAccessDenied as e:
             last_error = e
             LOGGER.warning("Network error on attempt %s: %s", attempt + 1, e)
             if attempt < max_retries:
-                delay = random.uniform(2, 5)
-                LOGGER.info("Retrying after %.1fs...", delay)
-                time.sleep(delay)
+                time.sleep(random.uniform(2, 5))
             else:
                 LOGGER.error("Network errors persisted after %s attempts", max_retries + 1)
                 raise
         except CaptchaBlocked:
-            # Don't retry captcha — needs IP rotation
             raise
-
-    # Should never reach here
     if last_error:
         raise last_error
-    return [], {"selector_debug": [], "pdp_debug": {}}
+    return [], {"selector_debug": [], "scrape_meta": {}}

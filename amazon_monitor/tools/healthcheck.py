@@ -27,7 +27,6 @@ def main() -> int:
     limits = {
         "search": timedelta(minutes=10),
         "heartbeat": timedelta(minutes=40),
-        "modem": timedelta(hours=3),
     }
 
     failed = []

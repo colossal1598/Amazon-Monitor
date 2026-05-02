@@ -47,10 +47,10 @@ Set and verify:
 - optional `wa_client_to` (used for heartbeat/error routing when set)
 - `wa_message_templates`
 - `affiliate_tag`
-- `modem_reconnect_command`
-- `modem_auto_refresh_hours`
+- `search_urls.featured` and `search_urls.newest_arrivals` (required)
+- `allowed_merchant_ids`, `pagination_mode`, `max_search_pages`, `max_cycle_seconds`
 
-Note: set `search_urls.main_search` (or `search_url`) in `config.yaml`. The monitor is now built for Amazon.com newest-arrivals flow with seller verification on PDP.
+Note: search-only scraping (no PDP). Featured URL uses dynamic or fixed pagination; newest URL is page 1 only for ASINs not yet in SQLite.
 
 ## 4) First-Time WhatsApp API Test
 
@@ -89,12 +89,6 @@ For production operation:
 
 If any of these are down, alerts stop.
 
-## 6.1) ASAP New Listings Mode
-
-- `asap_new_listings_mode: true` verifies seller on PDP for all Stage-1 unknown ASINs each cycle.
-- This minimizes delayed confirmations but increases captcha/throttling risk.
-- Keep `max_pdp_fallbacks_per_run: 0` so PDP is handled in the dedicated post-scrape batch.
-
 ## 7) Daily Operations Check (1 minute)
 
 1. Confirm `main.py` is running.
@@ -117,29 +111,12 @@ If any of these are down, alerts stop.
 
 Expected:
 
-- scraper pauses
-- modem refresh logic runs
-- scraper resumes after wait
+- scraper pauses ~120s then resumes (no modem rotation).
 
 Action:
 
 1. Check latest errors in `logs/monitor.log`.
-2. Verify modem reconnect command works manually.
-3. Reduce aggressive scheduling only if repeated blocks continue.
-
-### Modem IP did not change
-
-Expected:
-
-- error in log
-- healthcheck may fail
-
-Action:
-
-1. Verify `modem_reconnect_command` in `config.yaml`.
-2. Compare IP before/after reconnect:
-   - `python tools/check_ip.py`
-3. Restart monitor.
+2. Reduce `search_poll_minutes` or narrow URLs if blocks repeat.
 
 ## 10) Updating Client Machine from Your Commits (No Manual Copy)
 

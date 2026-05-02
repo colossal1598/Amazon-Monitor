@@ -71,9 +71,10 @@ Check:
 - `wa_group_id`
 - optional `wa_client_to` (for operational alerts direct-to-client)
 - `affiliate_tag`
-- `modem_reconnect_command`
+- `search_urls.featured` and `search_urls.newest_arrivals`
+- `allowed_merchant_ids`
 
-Do not change the search URLs unless you were told to.
+Tune search URLs and filters for your catalog; see `README.md`.
 
 ---
 

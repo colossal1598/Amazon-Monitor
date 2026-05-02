@@ -2,6 +2,7 @@ import re
 import unicodedata
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 def _normalize_text(value: str) -> str:
@@ -178,49 +179,60 @@ def _state_engine_row(item: dict[str, Any], seller_name: str) -> dict[str, Any]:
     }
 
 
-def state_engine_row_from_queue_record(asin: str, rec: dict[str, Any], seller_name: str) -> dict[str, Any]:
-    """Build a state-engine row from a pending-queue snapshot (PDP confirmed seller)."""
-    item: dict[str, Any] = {
-        "asin": asin,
-        "title": rec.get("title") or "",
-        "price": rec.get("price"),
-        "in_stock": True,
-        "image_url": rec.get("image_url"),
-        "shipping_text": rec.get("shipping_text") or "",
-        "seller_text": rec.get("seller_text") or "",
-    }
-    return _state_engine_row(item, seller_name)
+def _extract_merchant_ids_from_search_url(search_url: str) -> set[str]:
+    parsed = urlparse(search_url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    found: set[str] = set()
+    for rh in qs.get("rh", []):
+        decoded = unquote(rh)
+        for m in re.finditer(r"p_6:([A-Z0-9]{13,14})", decoded, re.IGNORECASE):
+            found.add(m.group(1).upper())
+    return found
 
 
-def build_confirmed_candidates(
-    stage1_rows: list[dict[str, Any]],
-    pdp_seller_text_by_asin: dict[str, str],
+def _merchant_tokens_for_item(item: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    raw = item.get("merchant_id_tokens")
+    if isinstance(raw, list):
+        tokens |= {str(x).upper() for x in raw if x}
+    elif isinstance(raw, str) and raw:
+        tokens.add(raw.upper())
+    url = (item.get("search_url") or "").strip()
+    if url:
+        tokens |= _extract_merchant_ids_from_search_url(url)
+    return tokens
+
+
+def filter_by_allowed_merchant_ids(
+    items: list[dict[str, Any]],
+    allowed_merchant_ids: list[str],
 ) -> list[dict[str, Any]]:
-    """Merge card seller_text with optional PDP merchant blob; emit only confirmed allowlist sellers."""
-    by_asin: dict[str, dict[str, Any]] = {}
-    for row in stage1_rows:
-        asin = (row.get("asin") or "").upper()
-        if asin:
-            by_asin[asin] = row
-
-    confirmed: list[dict[str, Any]] = []
+    """Keep rows whose merchant_id_tokens (and URL p_6 facets) intersect the allowlist."""
+    allowed = {str(x).strip().upper() for x in allowed_merchant_ids if str(x).strip()}
+    if not allowed:
+        return []
+    out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for asin, row in by_asin.items():
-        card_blob = row.get("seller_text") or row.get("seller") or ""
-        pdp_blob = pdp_seller_text_by_asin.get(asin, "")
-        merged = f"{card_blob}\n{pdp_blob}".strip()
-        status, seller_name = classify_seller(merged)
-        if status != "confirmed" or not seller_name:
+    for item in items:
+        asin = (item.get("asin") or "").upper()
+        if not asin or asin in seen:
             continue
-        if asin in seen:
+        tokens = _merchant_tokens_for_item(item)
+        hit = tokens & allowed
+        if not hit:
             continue
         seen.add(asin)
-        confirmed.append(_state_engine_row(row, seller_name))
-    return confirmed
+        seller_label = sorted(hit)[0]
+        out.append(_state_engine_row(item, seller_label))
+    return out
+
+
+def keep_asins_not_in_db(rows: list[dict[str, Any]], known_asins: set[str]) -> list[dict[str, Any]]:
+    return [r for r in rows if (r.get("asin") or "").upper() not in known_asins]
 
 
 def filter_marketplace_items(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Single-pass filter: same as stage1 + in-card seller only (no PDP). For tests/back-compat."""
+    """Deprecated path: stage1 + legacy text seller. Prefer filter_by_allowed_merchant_ids."""
     filtered: list[dict[str, Any]] = []
     for item in filter_stage1_candidates(raw_items):
         status, seller_name = classify_seller(item.get("seller_text") or item.get("seller") or "")
@@ -228,4 +240,24 @@ def filter_marketplace_items(raw_items: list[dict[str, Any]]) -> list[dict[str, 
             continue
         filtered.append(_state_engine_row(item, seller_name))
     return filtered
+
+
+def run_search_filter_pipeline(
+    raw_items: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Stage1 + blacklist + optional keywords + merchant allowlist -> state-engine rows."""
+    meta: dict[str, Any] = {}
+    bl_file = str(config.get("blacklist_file", "blacklist.txt"))
+    stage1 = filter_stage1_candidates(raw_items)
+    stage1 = filter_by_blacklist_only(stage1, bl_file)
+    req_kw = config.get("required_keywords") or []
+    req_any = config.get("required_any_keywords")
+    if req_kw or req_any:
+        stage1 = filter_search_results(stage1, req_kw, bl_file, req_any)
+    meta["stage1_count"] = len(stage1)
+    allowed = config.get("allowed_merchant_ids") or []
+    filtered = filter_by_allowed_merchant_ids(stage1, allowed)
+    meta["filtered_count"] = len(filtered)
+    return filtered, meta
 

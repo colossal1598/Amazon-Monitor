@@ -1,11 +1,11 @@
-import logging
-import json
-import time
 import argparse
+import json
+import logging
+import time
 from datetime import datetime, timezone
-from typing import Any
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 import requests
 import yaml
@@ -13,242 +13,102 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 from browser_factory import init_global_rate_limiter
-from exceptions import CaptchaBlocked, ModemIPUnchanged, NetworkAccessDenied
-from filter_pipeline import (
-    build_confirmed_candidates,
-    classify_seller,
-    filter_by_blacklist_only,
-    filter_search_results,
-    filter_stage1_candidates,
-    state_engine_row_from_queue_record,
-)
-from modem_rotator import reconnect_modem
-from search_scraper import scrape_search, verify_sellers_batch
-from seller_queue import load_pending_queue, prune_stale_entries, save_pending_queue
+from exceptions import CaptchaBlocked, NetworkAccessDenied
+from filter_pipeline import keep_asins_not_in_db, run_search_filter_pipeline
+from search_scraper import scrape_search
 from state_engine import StateEngine
-from webhook_sender import send_alert, send_heartbeat, send_modem_trigger, send_operational_error
+from webhook_sender import send_alert, send_heartbeat, send_operational_error
 
 LOGGER = logging.getLogger("monitor")
 
 
-def marketplace_candidates_from_scrape(
-    results: list[dict[str, Any]],
-    config: dict[str, Any],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Stage-1 filter + PDP verification + optional retry queue -> state-engine rows."""
-    meta: dict[str, Any] = {}
-    stage1 = filter_stage1_candidates(results)
-    bl_file = str(config.get("blacklist_file", "blacklist.txt"))
-    stage1 = filter_by_blacklist_only(stage1, bl_file)
-    req_kw = config.get("required_keywords") or []
-    req_any = config.get("required_any_keywords")
-    if req_kw or req_any:
-        stage1 = filter_search_results(stage1, req_kw, bl_file, req_any)
-    meta["stage1_count"] = len(stage1)
-
-    qpath = str(config.get("pending_seller_queue_path", "data/pending_seller_queue.json"))
-    ttl_days = int(config.get("pending_seller_queue_ttl_days", 14))
-    retry_queue = load_pending_queue(qpath)
-    prune_stale_entries(retry_queue, ttl_days)
-    asap_mode = bool(config.get("asap_new_listings_mode", True))
-
-    stage1_by_asin: dict[str, dict[str, Any]] = {}
-    for row in stage1:
-        asin = (row.get("asin") or "").upper()
-        if asin:
-            stage1_by_asin[asin] = row
-
-    stage1_unknown_asins: list[str] = []
-    for row in stage1:
-        asin = (row.get("asin") or "").upper()
-        if not asin:
-            continue
-        st, _ = classify_seller(row.get("seller_text") or row.get("seller") or "")
-        if st == "unknown":
-            stage1_unknown_asins.append(asin)
-
-    if asap_mode:
-        budget_asins = stage1_unknown_asins
-    else:
-        max_pdp = int(config.get("max_pdp_verifications_per_run", 12))
-        budget_asins = stage1_unknown_asins[:max_pdp]
-    meta["pdp_scheduled"] = len(budget_asins)
-    max_batch_seconds = float(config.get("max_pdp_batch_seconds", 120))
-    captcha_stopped = False
-    if budget_asins:
-        pdp_map, captcha_stopped = verify_sellers_batch(
-            budget_asins, len(budget_asins), max_seconds=max_batch_seconds
-        )
-    else:
-        pdp_map = {}
-    meta["pdp_captcha_stopped"] = captcha_stopped
-    if captcha_stopped:
-        LOGGER.warning(
-            "marketplace_pdp_partial verified=%s scheduled=%s (captcha mid-batch)",
-            len(pdp_map),
-            len(budget_asins),
-        )
-    meta["pdp_verification_keys"] = list(pdp_map.keys())
-    meta["pdp_text_by_asin"] = dict(pdp_map)
-
-    filtered = build_confirmed_candidates(list(stage1_by_asin.values()), pdp_map)
-
-    # Retry queue is now only for transient leftovers (timeouts/budget cuts), not seller backlog by design.
-    now_iso = utc_iso()
-    for asin in list(retry_queue.keys()):
-        if asin not in stage1_by_asin:
-            retry_queue.pop(asin, None)
-
-    for asin, row in stage1_by_asin.items():
-        if asin in pdp_map:
-            retry_queue.pop(asin, None)
-            continue
-        status_card, _ = classify_seller(row.get("seller_text") or row.get("seller") or "")
-        if status_card != "unknown":
-            retry_queue.pop(asin, None)
-            continue
-        prev = retry_queue.get(asin, {})
-        attempts = int(prev.get("attempts", 0))
-        retry_queue[asin] = {
-            "asin": asin,
-            "title": row.get("title"),
-            "price": row.get("price"),
-            "price_text": row.get("price_text"),
-            "image_url": row.get("image_url"),
-            "shipping_text": row.get("shipping_text"),
-            "seller_text": row.get("seller_text"),
-            "first_seen": prev.get("first_seen") or now_iso,
-            "last_seen": now_iso,
-            "attempts": attempts,
-        }
-    # Bump attempts for records we intended to verify but were not visited due batch timeout.
-    for asin in budget_asins:
-        if asin not in pdp_map and asin in retry_queue:
-            retry_queue[asin]["attempts"] = int(retry_queue[asin].get("attempts", 0)) + 1
-
-    save_pending_queue(qpath, retry_queue)
-    meta["pending_queue_size"] = len(retry_queue)
-    meta["filtered_count"] = len(filtered)
-    return filtered, meta
-
-
-def resolve_search_urls(config: dict) -> list[tuple[str, str]]:
-    """Resolve configured search URLs as (source_name, url)."""
-    urls: list[tuple[str, str]] = []
-    raw_single = config.get("search_url")
-    if isinstance(raw_single, str) and raw_single.strip():
-        urls.append(("main_search", raw_single.strip()))
+def resolve_featured_and_newest_urls(config: dict[str, Any]) -> tuple[str, str, str, str]:
+    """Returns (featured_source_key, featured_url, newest_source_key, newest_url)."""
     raw_map = config.get("search_urls")
-    if isinstance(raw_map, dict):
-        for source, url in raw_map.items():
-            if isinstance(url, str) and url.strip():
-                urls.append((str(source), url.strip()))
-    dedup_by_url: dict[str, str] = {}
-    for source, url in urls:
-        dedup_by_url[url] = source
-    resolved = [(source, url) for url, source in dedup_by_url.items()]
-    if not resolved:
-        raise ValueError("Set `search_urls.main_search` (or `search_url`) in config.yaml")
-    return resolved
+    if not isinstance(raw_map, dict):
+        raise ValueError("config.search_urls must be a dict with `featured` and `newest_arrivals`")
+    featured_url = (raw_map.get("featured") or raw_map.get("main_search") or "").strip()
+    newest_url = (raw_map.get("newest_arrivals") or "").strip()
+    if not featured_url:
+        legacy = config.get("search_url")
+        if isinstance(legacy, str) and legacy.strip():
+            featured_url = legacy.strip()
+    if not featured_url:
+        raise ValueError("Set search_urls.featured (or legacy search_url)")
+    if not newest_url:
+        raise ValueError("Set search_urls.newest_arrivals in config.yaml")
+    return "featured", featured_url, "newest_arrivals", newest_url
 
 
 def run_test_scrape(config: dict, pages_override: int | None = None) -> None:
-    pages = pages_override if pages_override is not None else int(config.get("search_pages", 1))
     max_cycle_seconds = int(config.get("max_cycle_seconds", 170))
-    max_pdp_fallbacks = int(config.get("max_pdp_fallbacks_per_run", 8))
+    max_search_pages = int(config.get("max_search_pages", 50))
+    pagination_mode = str(config.get("pagination_mode", "auto")).lower()
+    if pagination_mode not in ("auto", "fixed"):
+        pagination_mode = "auto"
+    fixed_pages = int(pages_override if pages_override is not None else config.get("search_pages", 2))
     output_dir = Path("data/test_scrape")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_items: list[dict] = []
-    selector_debug: list[dict] = []
-    pdp_debug: dict[str, dict] = {}
-    for source, url in resolve_search_urls(config):
-        items, debug = scrape_search(
-            url,
-            pages=pages,
-            source=source,
-            collect_debug=True,
-            max_cycle_seconds=max_cycle_seconds,
-            max_pdp_fallbacks=max_pdp_fallbacks,
-            html_dump_dir=output_dir,
-        )
-        raw_items.extend(items)
-        selector_debug.extend(debug.get("selector_debug", []))
-        pdp_debug.update(debug.get("pdp_debug", {}))
+    _, f_url, n_src, n_url = resolve_featured_and_newest_urls(config)
 
-    (output_dir / "raw_items.json").write_text(json.dumps(raw_items, ensure_ascii=False, indent=2), encoding="utf-8")
+    raw_featured, dbg_f = scrape_search(
+        f_url,
+        source="featured",
+        scrape_mode="featured_full",
+        pagination_mode=pagination_mode,
+        fixed_pages=fixed_pages,
+        max_search_pages=max_search_pages,
+        collect_debug=True,
+        max_cycle_seconds=max_cycle_seconds,
+        html_dump_dir=output_dir,
+    )
+    raw_newest, dbg_n = scrape_search(
+        n_url,
+        source=n_src,
+        scrape_mode="newest_front",
+        pagination_mode="fixed",
+        fixed_pages=1,
+        max_search_pages=1,
+        collect_debug=True,
+        max_cycle_seconds=max_cycle_seconds,
+        html_dump_dir=output_dir,
+    )
 
-    stage1_items = filter_stage1_candidates(raw_items)
-    test_config = dict(config)
-    test_config["pending_seller_queue_path"] = str(output_dir / "pending_seller_queue_test.json")
-    try:
-        filtered_items, pipeline_meta = marketplace_candidates_from_scrape(raw_items, test_config)
-    except Exception as exc:
-        LOGGER.exception("test_scrape pipeline failed after raw scrape: %s", exc)
-        filtered_items = []
-        pipeline_meta = {
-            "error": str(exc),
-            "error_type": type(exc).__name__,
-            "stage1_count": 0,
-            "filtered_count": 0,
-            "pdp_scheduled": 0,
-            "pending_queue_size": 0,
-            "pdp_captcha_stopped": False,
-        }
-    (output_dir / "stage1_candidates.json").write_text(
-        json.dumps(stage1_items, ensure_ascii=False, indent=2), encoding="utf-8"
+    (output_dir / "raw_featured.json").write_text(
+        json.dumps(raw_featured, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    (output_dir / "filtered_items.json").write_text(
-        json.dumps(filtered_items, ensure_ascii=False, indent=2), encoding="utf-8"
+    (output_dir / "raw_newest.json").write_text(
+        json.dumps(raw_newest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    pending_test = output_dir / "pending_seller_queue_test.json"
-    if pending_test.exists():
-        (output_dir / "pending_seller_queue_snapshot.json").write_text(
-            pending_test.read_text(encoding="utf-8"), encoding="utf-8"
-        )
-    meta_for_dump = {k: v for k, v in pipeline_meta.items() if k != "pdp_text_by_asin"}
-    (output_dir / "pdp_verification_results.json").write_text(
-        json.dumps(
-            {
-                "scheduled_asins": pipeline_meta.get("pdp_verification_keys", []),
-                "pdp_text_by_asin": pipeline_meta.get("pdp_text_by_asin", {}),
-                "meta": meta_for_dump,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+
+    ff, meta_f = run_search_filter_pipeline(raw_featured, config)
+    nf, meta_n = run_search_filter_pipeline(raw_newest, config)
+    known_simulated = {r["asin"] for r in ff}
+    nf_new_only = keep_asins_not_in_db(nf, known_simulated)
+
+    (output_dir / "filtered_featured.json").write_text(json.dumps(ff, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / "filtered_newest.json").write_text(json.dumps(nf, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / "filtered_newest_not_in_featured.json").write_text(
+        json.dumps(nf_new_only, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    (output_dir / "confirmed_for_state.json").write_text(
-        json.dumps(filtered_items, ensure_ascii=False, indent=2), encoding="utf-8"
+    (output_dir / "pipeline_meta.json").write_text(
+        json.dumps({"featured": meta_f, "newest": meta_n}, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     (output_dir / "selector_debug.json").write_text(
-        json.dumps({"selector_debug": selector_debug, "pdp_debug": pdp_debug}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+        json.dumps({"featured": dbg_f, "newest": dbg_n}, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    sample_cards = "\n<hr/>\n".join(
-        entry.get("card_html_snippet", "") for entry in selector_debug[:5] if entry.get("card_html_snippet")
-    )
-    if sample_cards:
-        (output_dir / "sample_cards.html").write_text(sample_cards, encoding="utf-8")
-    sample_pdp = "\n<hr/>\n".join(
-        data.get("merchant_html_snippet", "")
-        for data in list(pdp_debug.values())[:5]
-        if isinstance(data, dict) and data.get("merchant_html_snippet")
-    )
-    if sample_pdp:
-        (output_dir / "sample_pdp.html").write_text(sample_pdp, encoding="utf-8")
     LOGGER.info(
-        "test_scrape_complete raw=%s stage1=%s filtered=%s output_dir=%s",
-        len(raw_items),
-        len(stage1_items),
-        len(filtered_items),
-        output_dir,
+        "test_scrape_complete featured_raw=%s newest_raw=%s featured_filtered=%s newest_filtered=%s newest_new_only=%s",
+        len(raw_featured),
+        len(raw_newest),
+        len(ff),
+        len(nf),
+        len(nf_new_only),
     )
 
 
 def should_reconcile_missing_asins(config: dict, filtered_count: int) -> tuple[bool, str | None]:
-    """Guard missing-ASIN reconciliation against empty runs."""
     if not config.get("enable_missing_asin_oos", True):
         return False, "disabled_by_config"
     min_results = int(config.get("min_results_for_absence_reconcile", 1))
@@ -309,39 +169,59 @@ def main(
     if test_scrape:
         run_test_scrape(config, pages_override=pages_override)
         return
+
+    f_src, f_url, n_src, n_url = resolve_featured_and_newest_urls(config)
+    max_cycle_seconds = int(config.get("max_cycle_seconds", 170))
+    max_search_pages = int(config.get("max_search_pages", 50))
+    pagination_mode = str(config.get("pagination_mode", "auto")).lower()
+    if pagination_mode not in ("auto", "fixed"):
+        pagination_mode = "auto"
+    fixed_pages = int(config.get("search_pages", 2))
+
     if bootstrap:
-        results: list[dict[str, Any]] = []
-        max_cycle_seconds = int(config.get("max_cycle_seconds", 170))
-        max_pdp_fallbacks = int(config.get("max_pdp_fallbacks_per_run", 0))
-        for source, url in resolve_search_urls(config):
-            source_items, _debug = scrape_search(
-                url,
-                pages=config["search_pages"],
-                source=source,
-                collect_debug=False,
-                max_cycle_seconds=max_cycle_seconds,
-                max_pdp_fallbacks=max_pdp_fallbacks,
-            )
-            results.extend(source_items)
-        filtered, pipeline_meta = marketplace_candidates_from_scrape(results, config)
-        state_engine.seed_candidates_without_alerts(filtered, source="main_search")
+        f_items, _ = scrape_search(
+            f_url,
+            source=f_src,
+            scrape_mode="featured_full",
+            pagination_mode=pagination_mode,
+            fixed_pages=fixed_pages,
+            max_search_pages=max_search_pages,
+            collect_debug=False,
+            max_cycle_seconds=max_cycle_seconds,
+        )
+        f_filtered, f_meta = run_search_filter_pipeline(f_items, config)
+        state_engine.seed_candidates_without_alerts(f_filtered, source="main_search")
+        known = state_engine.list_known_asins()
+        n_items, _ = scrape_search(
+            n_url,
+            source=n_src,
+            scrape_mode="newest_front",
+            pagination_mode="fixed",
+            fixed_pages=1,
+            max_search_pages=1,
+            collect_debug=False,
+            max_cycle_seconds=max_cycle_seconds,
+        )
+        n_filtered, n_meta = run_search_filter_pipeline(n_items, config)
+        n_only = keep_asins_not_in_db(n_filtered, known)
+        state_engine.seed_candidates_without_alerts(n_only, source="main_search")
         LOGGER.info(
-            "bootstrap_complete raw=%s stage1=%s filtered=%s pending_queue=%s",
-            len(results),
-            pipeline_meta.get("stage1_count"),
-            len(filtered),
-            pipeline_meta.get("pending_queue_size"),
+            "bootstrap_complete featured_raw=%s newest_raw=%s featured_state_rows=%s newest_state_rows=%s newest_new_only=%s",
+            len(f_items),
+            len(n_items),
+            len(f_filtered),
+            len(n_filtered),
+            len(n_only),
         )
         return
+
     scheduler = BackgroundScheduler()
     scraping_paused = {"value": False}
-    last_ip = {"value": ""}
     health_file = Path("data/health.json")
     health_file.parent.mkdir(parents=True, exist_ok=True)
     health_state: dict[str, dict[str, str | None]] = {
         "search": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
         "heartbeat": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
-        "modem": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
     }
 
     def write_health() -> None:
@@ -370,80 +250,94 @@ def main(
         health_state[job]["last_error_message"] = str(exc)
         write_health()
 
-    def handle_captcha() -> None:
-        LOGGER.warning("Captcha blocked, pausing scraping jobs")
+    def handle_captcha_or_network_pause() -> None:
+        LOGGER.warning("Captcha or network recovery: pausing search job 120s (no modem rotation)")
         scraping_paused["value"] = True
         for job_id in ("search_loop",):
-            scheduler.pause_job(job_id)
-        try:
-            if config.get("wa_send_modem_trigger", False):
-                send_modem_trigger(config)
-            reconnect_modem(config)
-        except Exception as exc:
-            LOGGER.error("Captcha recovery modem step failed: %s", exc)
-            send_operational_error("modem_error", str(exc), config)
+            if scheduler.get_job(job_id):
+                scheduler.pause_job(job_id)
         time.sleep(120)
         for job_id in ("search_loop",):
             if scheduler.get_job(job_id):
                 scheduler.resume_job(job_id)
         scraping_paused["value"] = False
-        LOGGER.info("Scraping jobs resumed")
+        LOGGER.info("Search job resumed")
 
     def search_loop() -> None:
         if scraping_paused["value"]:
             return
         mark_job_started("search")
         try:
-            results: list[dict] = []
-            max_cycle_seconds = int(config.get("max_cycle_seconds", 170))
-            max_pdp_fallbacks = int(config.get("max_pdp_fallbacks_per_run", 8))
-            for source, url in resolve_search_urls(config):
-                source_items, _debug = scrape_search(
-                    url,
-                    pages=config["search_pages"],
-                    source=source,
-                    collect_debug=False,
-                    max_cycle_seconds=max_cycle_seconds,
-                    max_pdp_fallbacks=max_pdp_fallbacks,
-                )
-                results.extend(source_items)
-            filtered, pipeline_meta = marketplace_candidates_from_scrape(results, config)
-            LOGGER.info(
-                "search_pipeline raw=%s stage1=%s filtered=%s pdp_scheduled=%s pending_queue=%s",
-                len(results),
-                pipeline_meta.get("stage1_count"),
-                len(filtered),
-                pipeline_meta.get("pdp_scheduled"),
-                pipeline_meta.get("pending_queue_size"),
+            f_items, _ = scrape_search(
+                f_url,
+                source=f_src,
+                scrape_mode="featured_full",
+                pagination_mode=pagination_mode,
+                fixed_pages=fixed_pages,
+                max_search_pages=max_search_pages,
+                collect_debug=False,
+                max_cycle_seconds=max_cycle_seconds,
             )
-            if pipeline_meta.get("pdp_captcha_stopped"):
-                LOGGER.warning(
-                    "search_pipeline pdp_captcha_stopped partial_pdp_count=%s",
-                    len(pipeline_meta.get("pdp_text_by_asin") or {}),
-                )
-            reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(filtered))
+            f_filtered, f_meta = run_search_filter_pipeline(f_items, config)
+            LOGGER.info(
+                "search_featured raw=%s stage1=%s filtered=%s",
+                len(f_items),
+                f_meta.get("stage1_count"),
+                len(f_filtered),
+            )
+            reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(f_filtered))
             if skipped_reason:
                 LOGGER.info(
-                    "search_reconcile_skipped reason=%s raw_count=%s filtered_count=%s",
+                    "search_reconcile_skipped reason=%s filtered_count=%s",
                     skipped_reason,
-                    len(results),
-                    len(filtered),
+                    len(f_filtered),
                 )
             alerts = state_engine.process_search_candidates(
-                filtered,
+                f_filtered,
                 reconcile_missing=reconcile_missing,
                 source="main_search",
             )
             for alert in alerts:
                 send_alert(alert, config)
+
+            n_items, _ = scrape_search(
+                n_url,
+                source=n_src,
+                scrape_mode="newest_front",
+                pagination_mode="fixed",
+                fixed_pages=1,
+                max_search_pages=1,
+                collect_debug=False,
+                max_cycle_seconds=max_cycle_seconds,
+            )
+            n_filtered, n_meta = run_search_filter_pipeline(n_items, config)
+            known = state_engine.list_known_asins()
+            n_only = keep_asins_not_in_db(n_filtered, known)
+            LOGGER.info(
+                "search_newest raw=%s stage1=%s filtered=%s not_in_db=%s",
+                len(n_items),
+                n_meta.get("stage1_count"),
+                len(n_filtered),
+                len(n_only),
+            )
+            alerts_new = state_engine.process_search_candidates(
+                n_only,
+                reconcile_missing=False,
+                source="main_search",
+            )
+            for alert in alerts_new:
+                send_alert(alert, config)
+
             mark_job_success("search")
         except CaptchaBlocked:
             mark_job_error("search", "CaptchaBlocked")
-            handle_captcha()
+            send_operational_error("search_error", "CaptchaBlocked: scraping paused then resumed", config)
+            handle_captcha_or_network_pause()
         except NetworkAccessDenied as exc:
             mark_job_error("search", f"NetworkAccessDenied: {exc}")
-            LOGGER.error("Network access denied — triggering modem rotation")
-            handle_captcha()  # Same recovery flow: modem rotation + pause/resume
+            LOGGER.error("Network access denied: %s", exc)
+            send_operational_error("search_error", str(exc), config)
+            handle_captcha_or_network_pause()
         except Exception as exc:
             LOGGER.exception("search_loop failed: %s", exc)
             mark_job_error("search", exc)
@@ -460,29 +354,6 @@ def main(
             mark_job_error("heartbeat", exc)
             send_operational_error("heartbeat_error", str(exc), config)
 
-    def modem_refresh_loop() -> None:
-        mark_job_started("modem")
-        try:
-            ip_now = requests.get("https://checkip.amazonaws.com", timeout=5).text.strip()
-            if not last_ip["value"]:
-                last_ip["value"] = ip_now
-                mark_job_success("modem")
-                return
-            if ip_now == last_ip["value"]:
-                new_ip = reconnect_modem(config)
-                last_ip["value"] = new_ip
-            else:
-                last_ip["value"] = ip_now
-            mark_job_success("modem")
-        except ModemIPUnchanged as exc:
-            LOGGER.error("Scheduled modem refresh failed: %s", exc)
-            mark_job_error("modem", exc)
-            send_operational_error("modem_error", str(exc), config)
-        except Exception as exc:
-            LOGGER.warning("modem_refresh_loop failed: %s", exc)
-            mark_job_error("modem", exc)
-            send_operational_error("modem_error", str(exc), config)
-
     scheduler.add_job(
         search_loop,
         "interval",
@@ -493,13 +364,6 @@ def main(
         max_instances=1,
     )
     scheduler.add_job(heartbeat_loop, "interval", minutes=30, id="heartbeat_loop", max_instances=1)
-    scheduler.add_job(
-        modem_refresh_loop,
-        "interval",
-        hours=config["modem_auto_refresh_hours"],
-        id="modem_refresh_loop",
-        max_instances=1,
-    )
 
     write_health()
     scheduler.start()
@@ -516,7 +380,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pokemon Amazon monitor")
     parser.add_argument("--test-scrape", action="store_true", help="Run scrape+filter once and dump JSON outputs.")
     parser.add_argument("--bootstrap", action="store_true", help="Seed DB once without sending WhatsApp alerts.")
-    parser.add_argument("--pages", type=int, default=None, help="Override page count for --test-scrape.")
+    parser.add_argument("--pages", type=int, default=None, help="Override fixed page count for featured in --test-scrape.")
     args = parser.parse_args()
     main(test_scrape=args.test_scrape, pages_override=args.pages, bootstrap=args.bootstrap)
-

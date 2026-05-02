@@ -153,12 +153,8 @@ def send_heartbeat(config: dict[str, Any]) -> None:
 
 
 def send_modem_trigger(config: dict[str, Any]) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-    payload = {
-        "to": _pick_recipient(config, operational=True),
-        "message": _format_message({"type": "modem_trigger", "timestamp": now}, config),
-    }
-    _post_wa(config, payload)
+    """No-op: modem rotation was removed from the monitor."""
+    LOGGER.debug("send_modem_trigger ignored (modem flow removed)")
 
 
 def send_operational_error(event_type: str, error_message: str, config: dict[str, Any]) -> None:

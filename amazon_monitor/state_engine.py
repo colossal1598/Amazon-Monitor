@@ -86,6 +86,12 @@ class StateEngine:
     def _fetch_product(self, asin: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM products WHERE asin = ?", (asin,)).fetchone()
 
+    def list_known_asins(self) -> set[str]:
+        """All ASINs currently in the products table (uppercase)."""
+        with self.lock:
+            rows = self.conn.execute("SELECT asin FROM products").fetchall()
+        return {str(r[0]).upper() for r in rows if r and r[0]}
+
     def _record_alert(self, alert: dict[str, Any]) -> None:
         self.conn.execute(
             "INSERT INTO alerts (asin, alert_type, source, old_price, new_price, sent_at) VALUES (?, ?, ?, ?, ?, ?)",
