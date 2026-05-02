@@ -14,7 +14,8 @@ Edit `config.yaml`:
 
 - `search_urls.featured` — main SERP URL (filters/sort embedded in the link).
 - `search_urls.newest_arrivals` — same query sorted by newest (e.g. `s=date-desc-rank`).
-- `allowed_merchant_ids` — tokens such as `ATVPDKIKX0DER` (marketplace) and `A2XZ7JICGUQ1CX` (seller facet); matched from card HTML, URL `rh` `p_6:` facets, and page `marketplaceId` when present.
+- **Do not rely on combining** free-shipping refines (`p_n_is_free_shipping` in `rh`) **with** seller refines (`p_6` / `emi`) in one Amazon search URL—Amazon often does not honor both; discovery vs seller truth are split: Israel free delivery is enforced in `filter_pipeline` stage1 from card text, sellers via `allowed_merchant_ids` and per-card merchant tokens (plus optional URL facets—see `config.yaml` comments).
+- `allowed_merchant_ids` — e.g. `A2XZ7JICGUQ1CX` (Amazon Export), `ATVPDKIKX0DER` (Amazon.com slot); matched from card/primary-offer data, optional `emi` / `rh` `p_6` when `apply_search_url_merchant_facets` is on, and optional `amazon_com_serp_merchant_ids`.
 - `pagination_mode`: `auto` (derive page count from `totalResultCount` / `asinOnPageCount`) or `fixed` (use `search_pages`).
 - `max_search_pages`, `max_cycle_seconds`, `search_pages`, `required_keywords`, `blacklist_file`, WhatsApp fields, `db_path`, etc.
 

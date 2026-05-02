@@ -61,7 +61,10 @@ def parse_search_metadata(html: str) -> dict[str, Any]:
 
 
 def extract_merchant_ids_from_search_url(search_url: str) -> set[str]:
-    """Seller intent from the search URL only: rh=p_6:… facets and emi=… (e.g. emi=ATVPDKIKX0DER for Sold by Amazon.com)."""
+    """Decode seller-related query params from the search URL (rh=p_6:…, emi=…).
+
+    Amazon does not reliably combine multiple rh refines (e.g. free shipping + p_6 seller); tokens here reflect the URL
+    string only—per-card merchant data and pipeline rules still decide what passes."""
     parsed = urlparse(search_url)
     qs = parse_qs(parsed.query, keep_blank_values=True)
     found: set[str] = set()

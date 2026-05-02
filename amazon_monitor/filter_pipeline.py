@@ -1,9 +1,15 @@
+import logging
 import re
 import unicodedata
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import unquote
 
 from search_scraper import extract_merchant_ids_from_search_url
+
+LOGGER = logging.getLogger(__name__)
+
+
 def _normalize_text(value: str) -> str:
     """Lowercase and strip diacritics for accent-insensitive matching."""
     lowered = (value or "").lower().strip()
@@ -257,13 +263,27 @@ def _allowlist_id_for_classified_dom_name(dom_name: str | None) -> str | None:
     return None
 
 
+def _url_mixes_free_shipping_and_seller_p6(search_url: str) -> bool:
+    """Amazon often ignores or mangles seller (p_6) when combined with free-shipping refines in one rh=."""
+    if not search_url:
+        return False
+    low = search_url.lower()
+    if "p_n_is_free_shipping" not in low:
+        return False
+    decoded = unquote(low)
+    return bool(re.search(r"\bp_6\s*:", decoded))
+
+
 def _merchant_tokens_for_item(
     item: dict[str, Any],
     *,
     config: dict[str, Any] | None,
     allowed: set[str],
 ) -> set[str]:
-    """Card tokens plus optional URL seller facets (emi / rh p_6) and amazon_com_serp_merchant_ids aliases."""
+    """Card tokens plus optional URL seller hints (emi / rh p_6) and amazon_com_serp_merchant_ids aliases.
+
+    Note: rh= can list p_6 next to other refines, but Amazon does not reliably apply seller + free shipping together;
+    URL tokens are best-effort; per-card extraction and classify_seller still gate rows."""
     cfg = config or {}
     tokens: set[str] = set()
     raw = item.get("merchant_id_tokens")
@@ -346,6 +366,13 @@ def run_search_filter_pipeline(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Stage1 + blacklist + optional keywords + merchant allowlist -> state-engine rows."""
     meta: dict[str, Any] = {}
+    sample_url = (raw_items[0].get("search_url") or "") if raw_items else ""
+    if _url_mixes_free_shipping_and_seller_p6(sample_url):
+        LOGGER.warning(
+            "search_url combines free-shipping refine with p_6 seller; Amazon often does not honor both on the SERP. "
+            "Israel free delivery is enforced in stage1 from each card; do not rely on p_6 in the same URL for seller truth."
+        )
+        meta["warn_incompatible_url_facets"] = "free_shipping_plus_p_6"
     bl_file = str(config.get("blacklist_file", "blacklist.txt"))
     stage1 = filter_stage1_candidates(raw_items)
     stage1 = filter_by_blacklist_only(stage1, bl_file)
