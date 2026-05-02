@@ -33,9 +33,7 @@ If PowerShell blocks activation:
 
 Set:
 
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `PROXY_URL`
+- `PROXY_URL` (optional)
 
 ### `config.yaml`
 
@@ -48,7 +46,7 @@ Set and verify:
 - `wa_message_templates`
 - `affiliate_tag`
 - `search_urls.featured` and `search_urls.newest_arrivals` (required)
-- `allowed_merchant_ids`, `pagination_mode`, `max_search_pages`, `max_cycle_seconds`
+- `pagination_mode`, `max_search_pages`, `max_cycle_seconds`, `required_keywords`, `blacklist_file`
 
 Note: search-only scraping (no PDP). Featured URL uses dynamic or fixed pagination; newest URL is page 1 only for ASINs not yet in SQLite.
 
@@ -73,8 +71,7 @@ Optional client settings UI:
 Start:
 
 1. `.\\.venv\\Scripts\\Activate.ps1`
-2. First activation on a fresh/empty DB: `python main.py --bootstrap` (no WhatsApp product alerts; seeds DB)
-3. Then run production monitor: `python main.py`
+2. `python main.py` (on a fresh DB you may get many “new product” alerts until the catalog is seeded—tune filters/poll interval as needed)
 
 Stop:
 
@@ -160,7 +157,6 @@ This creates Task Scheduler job `AmazonMonitorUpdate` that runs:
 ## 13) Production Readiness Checklist
 
 - [ ] `first_time_setup.py` completed successfully
-- [ ] One-time `python main.py --bootstrap` completed successfully before first production run
 - [ ] WhatsApp API receives alert messages
 - [ ] WhatsApp heartbeat alert behavior verified (if enabled)
 - [ ] `python tools/healthcheck.py` returns PASS

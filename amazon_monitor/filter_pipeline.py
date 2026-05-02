@@ -2,10 +2,8 @@ import logging
 import re
 import unicodedata
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import unquote
-
-from search_scraper import extract_merchant_ids_from_search_url
 
 LOGGER = logging.getLogger(__name__)
 
@@ -15,7 +13,6 @@ def _normalize_text(value: str) -> str:
     lowered = (value or "").lower().strip()
     decomposed = unicodedata.normalize("NFKD", lowered)
     normalized = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    # Treat full phrase and acronym as equivalent for required keyword matching.
     normalized = normalized.replace("trading card game", "tcg")
     return normalized
 
@@ -42,7 +39,6 @@ def _keyword_matches_title(title_norm: str, keyword: str, raw_title: str) -> boo
         return True
     if keyword in title_norm:
         return True
-    # Many SV-era listings omit the letters "TCG" but are still the card game line.
     if keyword == "tcg":
         return _title_signals_pokemon_tcg_scope(raw_title)
     return False
@@ -114,45 +110,6 @@ def _is_valid_price(item: dict[str, Any]) -> bool:
     return True
 
 
-def _sold_by_snippet_only(clean: str) -> str:
-    """Text after 'sold by' up to ships/fulfilled lines — avoids FBA 'Ships from Amazon.com' counting as seller."""
-    if "sold by" not in clean:
-        return ""
-    i = clean.index("sold by")
-    chunk = clean[i : i + 320]
-    for stop in ("ships from", "ship from", "fulfilled by"):
-        j = chunk.find(stop)
-        if j > len("sold by"):
-            chunk = chunk[:j]
-    return chunk
-
-
-def _extract_allowed_seller(seller_text: str) -> str | None:
-    """Allow only retail Amazon.com or Amazon Export LLC (exclude Services/Warehouse/etc.)."""
-    clean = _normalize_ascii(seller_text)
-    if not clean:
-        return None
-    sold_snip = _sold_by_snippet_only(clean)
-    # Export: use sold-by line when present so footer/other copy cannot satisfy the check.
-    export_ctx = sold_snip if ("sold by" in clean and sold_snip) else clean
-    if "amazon export sales llc" in export_ctx:
-        return "Amazon Export Sales LLC"
-    if "amazon export llc" in export_ctx:
-        return "Amazon Export LLC"
-    if "sold by" not in clean:
-        return None
-    if not sold_snip:
-        return None
-    # Substring "amazon.com" also appears in "Amazon.com Services LLC" — reject those.
-    if re.search(r"amazon\s+warehouse", sold_snip) or re.search(r"amazon\.com\s+services", sold_snip):
-        return None
-    if "services llc" in sold_snip and "amazon.com" in sold_snip:
-        return None
-    if re.search(r"\bamazon\.com\b", sold_snip):
-        return "Amazon.com"
-    return None
-
-
 def _card_blob_for_delivery_line(item: dict[str, Any]) -> str:
     """Per-card fields from the SERP scrape that can contain the FREE delivery line."""
     parts = [
@@ -167,17 +124,6 @@ def _has_free_delivery_on_card(item: dict[str, Any]) -> bool:
     """True when this result card's scraped text includes 'free delivery' (e.g. FREE delivery Tue, …)."""
     clean = _normalize_ascii(_card_blob_for_delivery_line(item))
     return "free delivery" in clean
-
-
-def classify_seller(seller_blob: str) -> tuple[Literal["confirmed", "rejected", "unknown"], str | None]:
-    """Classify seller text: allowed Amazon sellers, explicit third-party, or unknown."""
-    clean = _normalize_ascii(seller_blob)
-    allowed = _extract_allowed_seller(seller_blob)
-    if allowed:
-        return "confirmed", allowed
-    if "sold by" in clean:
-        return "rejected", None
-    return "unknown", None
 
 
 def filter_by_blacklist_only(
@@ -200,12 +146,8 @@ def filter_by_blacklist_only(
     return out
 
 
-def filter_scrape_jobs_stage1(
-    raw_items: list[dict[str, Any]],
-    *,
-    require_free_delivery: bool,
-) -> list[dict[str, Any]]:
-    """Pokémon TCG title + valid price; optional per-job gate on 'free delivery' in scraped card text."""
+def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pokémon TCG title + valid price + 'free delivery' on the card (per-item scraped text)."""
     out: list[dict[str, Any]] = []
     for item in raw_items:
         title = item.get("title") or ""
@@ -213,66 +155,10 @@ def filter_scrape_jobs_stage1(
             continue
         if not _is_valid_price(item):
             continue
-        if require_free_delivery and not _has_free_delivery_on_card(item):
+        if not _has_free_delivery_on_card(item):
             continue
         out.append(dict(item))
     return out
-
-
-def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Fast pass: Pokemon TCG title + valid price + 'free delivery' on the card (per-item scraped text)."""
-    return filter_scrape_jobs_stage1(raw_items, require_free_delivery=True)
-
-
-def _seller_display_name(merchant_id: str) -> str:
-    """Human-readable seller for DB / alerts (not a fake 'main_search' bucket)."""
-    mid = (merchant_id or "").strip().upper()
-    if mid == "A2XZ7JICGUQ1CX":
-        return "Amazon Export Sales LLC"
-    if mid == "ATVPDKIKX0DER":
-        return "Amazon.com"
-    return merchant_id or "Unknown"
-
-
-def _pick_primary_merchant_id(hit: set[str]) -> str:
-    """When multiple allowlist tokens match, prefer seller facet over marketplace id."""
-    if "A2XZ7JICGUQ1CX" in hit:
-        return "A2XZ7JICGUQ1CX"
-    if "ATVPDKIKX0DER" in hit:
-        return "ATVPDKIKX0DER"
-    return sorted(hit)[0]
-
-
-def _state_engine_row(
-    item: dict[str, Any],
-    merchant_id: str = "",
-    *,
-    display_override: str | None = None,
-) -> dict[str, Any]:
-    display = display_override if display_override else _seller_display_name(merchant_id)
-    return {
-        "asin": (item.get("asin") or "").upper(),
-        "title": item.get("title") or "",
-        "price": item.get("price"),
-        "in_stock": bool(item.get("in_stock")),
-        "seller": display,
-        "seller_name": display,
-        "image_url": item.get("image_url"),
-        "shipping_text": item.get("shipping_text"),
-        "seller_text": item.get("seller_text"),
-    }
-
-
-def _allowlist_id_for_classified_dom_name(dom_name: str | None) -> str | None:
-    """Map visible 'Sold by …' label to the merchant id slot in allowed_merchant_ids."""
-    if not dom_name:
-        return None
-    n = _normalize_ascii(dom_name)
-    if "export sales" in n or "amazon export llc" in n:
-        return "A2XZ7JICGUQ1CX"
-    if re.search(r"\bamazon\.com\b", n) and "services" not in n and "warehouse" not in n:
-        return "ATVPDKIKX0DER"
-    return None
 
 
 def _url_mixes_free_shipping_and_seller_p6(search_url: str) -> bool:
@@ -286,121 +172,37 @@ def _url_mixes_free_shipping_and_seller_p6(search_url: str) -> bool:
     return bool(re.search(r"\bp_6\s*:", decoded))
 
 
-def _merchant_tokens_for_item(
-    item: dict[str, Any],
-    *,
-    config: dict[str, Any] | None,
-    allowed: set[str],
-) -> set[str]:
-    """Card tokens plus optional URL seller hints (emi / rh p_6) and amazon_com_serp_merchant_ids aliases.
-
-    Note: rh= can list p_6 next to other refines, but Amazon does not reliably apply seller + free shipping together;
-    URL tokens are best-effort; per-card extraction and classify_seller still gate rows."""
-    cfg = config or {}
-    tokens: set[str] = set()
-    raw = item.get("merchant_id_tokens")
-    if isinstance(raw, list):
-        tokens |= {str(x).upper() for x in raw if x}
-    elif isinstance(raw, str) and raw:
-        tokens.add(raw.upper())
-    for x in item.get("seller_anchor_merchant_ids") or []:
-        if x:
-            tokens.add(str(x).upper())
-    for x in item.get("primary_offer_merchant_ids") or []:
-        if x:
-            tokens.add(str(x).upper())
-    if cfg.get("apply_search_url_merchant_facets", True):
-        url = (item.get("search_url") or "").strip()
-        if url:
-            try:
-                tokens |= extract_merchant_ids_from_search_url(url)
-            except Exception:
-                pass
-    aliases = {str(x).strip().upper() for x in (cfg.get("amazon_com_serp_merchant_ids") or []) if str(x).strip()}
-    if aliases and "ATVPDKIKX0DER" in allowed:
-        prim = {str(x).upper() for x in (item.get("primary_offer_merchant_ids") or []) if x}
-        if prim & aliases:
-            tokens.add("ATVPDKIKX0DER")
-    return tokens
-
-
-def filter_by_allowed_merchant_ids(
-    items: list[dict[str, Any]],
-    allowed_merchant_ids: list[str],
-    config: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    """Keep rows when (1) merchant ids (card + optional URL emi/p_6 + optional amazon_com_serp_merchant_ids) hit the allowlist, or
-    (2) visible seller text matches (Sold-by snippet only — not FBA ships-from Amazon.com)."""
-    allowed = {str(x).strip().upper() for x in allowed_merchant_ids if str(x).strip()}
-    if not allowed:
-        return []
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in items:
-        asin = (item.get("asin") or "").upper()
-        if not asin or asin in seen:
-            continue
-        tokens = _merchant_tokens_for_item(item, config=config, allowed=allowed)
-        hit = tokens & allowed
-        if hit:
-            seen.add(asin)
-            primary_merchant = _pick_primary_merchant_id(hit)
-            out.append(_state_engine_row(item, primary_merchant))
-            continue
-        st, dom_name = classify_seller(item.get("seller_text") or item.get("seller") or "")
-        if st != "confirmed" or not dom_name:
-            continue
-        need_id = _allowlist_id_for_classified_dom_name(dom_name)
-        if need_id and need_id in allowed:
-            seen.add(asin)
-            out.append(_state_engine_row(item, "", display_override=dom_name))
-    return out
-
-
-def keep_asins_not_in_db(rows: list[dict[str, Any]], known_asins: set[str]) -> list[dict[str, Any]]:
-    return [r for r in rows if (r.get("asin") or "").upper() not in known_asins]
-
-
-def filter_marketplace_items(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deprecated path: stage1 + legacy text seller. Prefer filter_by_allowed_merchant_ids."""
-    filtered: list[dict[str, Any]] = []
-    for item in filter_stage1_candidates(raw_items):
-        status, seller_name = classify_seller(item.get("seller_text") or item.get("seller") or "")
-        if status != "confirmed" or not seller_name:
-            continue
-        filtered.append(_state_engine_row(item, seller_name))
-    return filtered
-
-
-def run_search_filter_pipeline(
+def _maybe_warn_incompatible_url_facets(
     raw_items: list[dict[str, Any]],
-    config: dict[str, Any],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Stage1 + blacklist + optional keywords + merchant allowlist -> state-engine rows."""
-    meta: dict[str, Any] = {}
+    meta: dict[str, Any],
+) -> None:
+    """If the search URL mixes free-shipping with p_6 seller, log once and set meta."""
     sample_url = (raw_items[0].get("search_url") or "") if raw_items else ""
-    if _url_mixes_free_shipping_and_seller_p6(sample_url):
-        LOGGER.warning(
-            "search_url combines free-shipping refine with p_6 seller; Amazon often does not honor both on the SERP. "
-            "Stage1 requires 'free delivery' in each card's scraped text; do not rely on p_6 in the same URL for seller truth."
-        )
-        meta["warn_incompatible_url_facets"] = "free_shipping_plus_p_6"
+    if not _url_mixes_free_shipping_and_seller_p6(sample_url):
+        return
+    LOGGER.warning(
+        "search_url combines free-shipping refine with p_6 seller; Amazon often does not honor both on the SERP. "
+        "Stage1 requires 'free delivery' in each card's scraped text; do not rely on p_6 in the same URL for seller truth."
+    )
+    meta["warn_incompatible_url_facets"] = "free_shipping_plus_p_6"
+
+
+def _apply_blacklist_and_config_keywords(
+    candidates: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """After stage1: blacklist.txt then optional required_keywords / required_any_keywords."""
     bl_file = str(config.get("blacklist_file", "blacklist.txt"))
-    stage1 = filter_stage1_candidates(raw_items)
-    stage1 = filter_by_blacklist_only(stage1, bl_file)
+    stage = filter_by_blacklist_only(candidates, bl_file)
     req_kw = config.get("required_keywords") or []
     req_any = config.get("required_any_keywords")
     if req_kw or req_any:
-        stage1 = filter_search_results(stage1, req_kw, bl_file, req_any)
-    meta["stage1_count"] = len(stage1)
-    allowed = config.get("allowed_merchant_ids") or []
-    filtered = filter_by_allowed_merchant_ids(stage1, allowed, config)
-    meta["filtered_count"] = len(filtered)
-    return filtered, meta
+        stage = filter_search_results(stage, req_kw, bl_file, req_any)
+    return stage
 
 
-def _scrape_jobs_output_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Same loose row shape as the old minimal jobs pipeline (no merchant resolution)."""
+def _rows_for_state_engine(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize to state-engine row shape (no merchant resolution)."""
     rows: list[dict[str, Any]] = []
     for item in items:
         asin = (item.get("asin") or "").strip().upper()
@@ -422,35 +224,20 @@ def _scrape_jobs_output_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]
     return rows
 
 
-def run_scrape_jobs_filter_pipeline(
+def run_search_filter_pipeline(
     raw_items: list[dict[str, Any]],
     config: dict[str, Any],
-    *,
-    require_free_delivery: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Same chain as run_search_filter_pipeline up through keywords + blacklist, without merchant allowlist."""
-    meta: dict[str, Any] = {
-        "pipeline": "scrape_jobs",
-        "require_free_delivery": require_free_delivery,
-        "raw_in": len(raw_items),
-    }
-    sample_url = (raw_items[0].get("search_url") or "") if raw_items else ""
-    if _url_mixes_free_shipping_and_seller_p6(sample_url):
-        LOGGER.warning(
-            "search_url combines free-shipping refine with p_6 seller; Amazon often does not honor both on the SERP. "
-            "When require_free_delivery is on, the gate uses 'free delivery' in each card's scraped text; "
-            "do not rely on p_6 in the same URL for seller truth."
-        )
-        meta["warn_incompatible_url_facets"] = "free_shipping_plus_p_6"
-    bl_file = str(config.get("blacklist_file", "blacklist.txt"))
-    stage = filter_scrape_jobs_stage1(raw_items, require_free_delivery=require_free_delivery)
-    stage = filter_by_blacklist_only(stage, bl_file)
-    req_kw = config.get("required_keywords") or []
-    req_any = config.get("required_any_keywords")
-    if req_kw or req_any:
-        stage = filter_search_results(stage, req_kw, bl_file, req_any)
-    meta["stage1_count"] = len(stage)
-    rows = _scrape_jobs_output_rows(stage)
-    meta["filtered_count"] = len(rows)
-    return rows, meta
+    """Stage1 (Pokémon TCG + price + free delivery on card) + blacklist + keywords -> state-engine rows."""
+    meta: dict[str, Any] = {"pipeline": "search"}
+    _maybe_warn_incompatible_url_facets(raw_items, meta)
+    stage1 = filter_stage1_candidates(raw_items)
+    stage1 = _apply_blacklist_and_config_keywords(stage1, config)
+    meta["stage1_count"] = len(stage1)
+    filtered = _rows_for_state_engine(stage1)
+    meta["filtered_count"] = len(filtered)
+    return filtered, meta
 
+
+def keep_asins_not_in_db(rows: list[dict[str, Any]], known_asins: set[str]) -> list[dict[str, Any]]:
+    return [r for r in rows if (r.get("asin") or "").upper() not in known_asins]
