@@ -14,7 +14,7 @@ Edit `config.yaml`:
 
 - `search_urls.featured` — main SERP URL (filters/sort embedded in the link).
 - `search_urls.newest_arrivals` — same query sorted by newest (e.g. `s=date-desc-rank`).
-- **Do not rely on combining** free-shipping refines (`p_n_is_free_shipping` in `rh`) **with** seller refines (`p_6` / `emi`) in one Amazon search URL—Amazon often does not honor both; discovery vs seller truth are split: Israel free delivery is enforced in `filter_pipeline` stage1 from card text, sellers via `allowed_merchant_ids` and per-card merchant tokens (plus optional URL facets—see `config.yaml` comments).
+- **Do not rely on combining** free-shipping refines (`p_n_is_free_shipping` in `rh`) **with** seller refines (`p_6` / `emi`) in one Amazon search URL—Amazon often does not honor both; discovery vs seller truth are split: stage1 requires the substring **`free delivery`** in each result card’s scraped text (`shipping_text` / `seller_text` / `availability_text`), sellers via `allowed_merchant_ids` and per-card merchant tokens (plus optional URL facets—see `config.yaml` comments).
 - `allowed_merchant_ids` — e.g. `A2XZ7JICGUQ1CX` (Amazon Export), `ATVPDKIKX0DER` (Amazon.com slot); matched from card/primary-offer data, optional `emi` / `rh` `p_6` when `apply_search_url_merchant_facets` is on, and optional `amazon_com_serp_merchant_ids`.
 - `pagination_mode`: `auto` (derive page count from `totalResultCount` / `asinOnPageCount`) or `fixed` (use `search_pages`).
 - `max_search_pages`, `max_cycle_seconds`, `search_pages`, `required_keywords`, `blacklist_file`, WhatsApp fields, `db_path`, etc.
@@ -28,7 +28,7 @@ Legacy `search_url` / `search_urls.main_search` are still accepted as the **feat
 ## Architecture
 
 - `search_scraper.py` — Playwright search only; metadata pagination; merchant token extraction per card.
-- `filter_pipeline.py` — stage1 (Pokemon TCG + Israel free shipping + price), blacklist/keywords, `allowed_merchant_ids`.
+- `filter_pipeline.py` — stage1 (Pokemon TCG + **free delivery** on card + price), blacklist/keywords, `allowed_merchant_ids`.
 - `state_engine.py` — SQLite + alerts; `list_known_asins()` for the newest pass.
 - `webhook_sender.py` — WhatsApp API posts.
 - `main.py` — APScheduler: featured scrape → process → newest scrape → new ASINs only → process.

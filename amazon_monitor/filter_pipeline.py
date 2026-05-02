@@ -153,17 +153,20 @@ def _extract_allowed_seller(seller_text: str) -> str | None:
     return None
 
 
-_FREE_SHIP_TO_ISRAEL_RE = re.compile(
-    r"free\s+(shipping|delivery).*?to\s+israel",
-    re.IGNORECASE,
-)
+def _card_blob_for_delivery_line(item: dict[str, Any]) -> str:
+    """Per-card fields from the SERP scrape that can contain the FREE delivery line."""
+    parts = [
+        str(item.get("shipping_text") or ""),
+        str(item.get("seller_text") or ""),
+        str(item.get("availability_text") or ""),
+    ]
+    return "\n".join(p for p in parts if p.strip())
 
 
-def _has_free_shipping_to_israel(shipping_text: str) -> bool:
-    clean = _normalize_ascii(shipping_text)
-    if "free shipping to israel" in clean or "free delivery to israel" in clean:
-        return True
-    return bool(_FREE_SHIP_TO_ISRAEL_RE.search(clean))
+def _has_free_delivery_on_card(item: dict[str, Any]) -> bool:
+    """True when this result card's scraped text includes 'free delivery' (e.g. FREE delivery Tue, …)."""
+    clean = _normalize_ascii(_card_blob_for_delivery_line(item))
+    return "free delivery" in clean
 
 
 def classify_seller(seller_blob: str) -> tuple[Literal["confirmed", "rejected", "unknown"], str | None]:
@@ -198,7 +201,7 @@ def filter_by_blacklist_only(
 
 
 def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Fast pass: Pokemon TCG title + valid price + free shipping/delivery to Israel (regex)."""
+    """Fast pass: Pokemon TCG title + valid price + 'free delivery' on the card (per-item scraped text)."""
     out: list[dict[str, Any]] = []
     for item in raw_items:
         title = item.get("title") or ""
@@ -206,7 +209,7 @@ def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, 
             continue
         if not _is_valid_price(item):
             continue
-        if not _has_free_shipping_to_israel(item.get("shipping_text") or ""):
+        if not _has_free_delivery_on_card(item):
             continue
         out.append(dict(item))
     return out
@@ -370,7 +373,7 @@ def run_search_filter_pipeline(
     if _url_mixes_free_shipping_and_seller_p6(sample_url):
         LOGGER.warning(
             "search_url combines free-shipping refine with p_6 seller; Amazon often does not honor both on the SERP. "
-            "Israel free delivery is enforced in stage1 from each card; do not rely on p_6 in the same URL for seller truth."
+            "Stage1 requires 'free delivery' in each card's scraped text; do not rely on p_6 in the same URL for seller truth."
         )
         meta["warn_incompatible_url_facets"] = "free_shipping_plus_p_6"
     bl_file = str(config.get("blacklist_file", "blacklist.txt"))
@@ -385,4 +388,43 @@ def run_search_filter_pipeline(
     filtered = filter_by_allowed_merchant_ids(stage1, allowed, config)
     meta["filtered_count"] = len(filtered)
     return filtered, meta
+
+
+def run_minimal_scrape_pipeline(
+    raw_items: list[dict[str, Any]],
+    *,
+    require_free_delivery: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Rows with valid price only; optional gate: substring `free delivery` on that card's scraped lines.
+
+    Skips Pokémon title rules, keywords, blacklist, and merchant allowlist — for simple multi-URL scrapes."""
+    meta: dict[str, Any] = {
+        "pipeline": "minimal",
+        "require_free_delivery": require_free_delivery,
+        "raw_in": len(raw_items),
+    }
+    out: list[dict[str, Any]] = []
+    for item in raw_items:
+        asin = (item.get("asin") or "").strip().upper()
+        if not asin:
+            continue
+        if not _is_valid_price(item):
+            continue
+        if require_free_delivery and not _has_free_delivery_on_card(item):
+            continue
+        out.append(
+            {
+                "asin": asin,
+                "title": item.get("title") or "",
+                "price": item.get("price"),
+                "in_stock": bool(item.get("in_stock")),
+                "seller": "search",
+                "seller_name": "search",
+                "image_url": item.get("image_url"),
+                "shipping_text": item.get("shipping_text"),
+                "seller_text": item.get("seller_text"),
+            }
+        )
+    meta["filtered_count"] = len(out)
+    return out, meta
 

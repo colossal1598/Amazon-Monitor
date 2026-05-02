@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
@@ -14,7 +15,7 @@ from dotenv import load_dotenv
 
 from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, NetworkAccessDenied
-from filter_pipeline import keep_asins_not_in_db, run_search_filter_pipeline
+from filter_pipeline import keep_asins_not_in_db, run_minimal_scrape_pipeline, run_search_filter_pipeline
 from search_scraper import PaginationMode, ScrapeMode, scrape_search
 from state_engine import StateEngine
 from webhook_sender import send_alert, send_heartbeat, send_operational_error
@@ -172,6 +173,81 @@ def run_single_test_scrape_url(config: dict, search_url: str, *, pages: int = 1)
         len(filtered),
         output_dir.resolve(),
     )
+
+
+def run_scrape_jobs_from_config(config: dict[str, Any]) -> None:
+    """Run each entry in config.scrape_jobs: scrape N pages, then minimal filter (price + optional Israel free delivery)."""
+    jobs = config.get("scrape_jobs")
+    if not isinstance(jobs, list) or not jobs:
+        LOGGER.error("config.scrape_jobs must be a non-empty list of {name, url, pages, require_free_delivery}")
+        return
+    output_dir = Path("data/test_scrape")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scroll_r, page_r = scrape_delay_ranges(config)
+    max_cycle_seconds = int(config.get("max_cycle_seconds", 170))
+    max_search_pages = int(config.get("max_search_pages", 50))
+
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        name = str(job.get("name") or "job").strip() or "job"
+        url = (job.get("url") or "").strip()
+        pages = max(1, int(job.get("pages") or 1))
+        require_ship = bool(
+            job.get("require_free_delivery", job.get("require_free_delivery_to_israel", False))
+        )
+        if not url:
+            LOGGER.warning("scrape_jobs: skip %r — missing url", name)
+            continue
+        safe = re.sub(r"[^\w\-]+", "_", name).strip("_")[:80] or "job"
+        source = f"job_{safe}"
+
+        if pages == 1:
+            scrape_mode: ScrapeMode = "newest_front"
+            pagination_mode: PaginationMode = "fixed"
+            fixed_pages = 1
+            cap = 1
+        else:
+            scrape_mode = "featured_full"
+            pagination_mode = "fixed"
+            fixed_pages = pages
+            cap = min(max_search_pages, pages)
+
+        LOGGER.info("scrape_job start name=%s pages=%s require_free_delivery=%s", name, pages, require_ship)
+        raw, dbg = scrape_search(
+            url,
+            source=source,
+            scrape_mode=scrape_mode,
+            pagination_mode=pagination_mode,
+            fixed_pages=fixed_pages,
+            max_search_pages=cap,
+            collect_debug=True,
+            max_cycle_seconds=max_cycle_seconds,
+            html_dump_dir=output_dir,
+            scroll_delay_range=scroll_r,
+            pagination_delay_range=page_r,
+        )
+        filtered, meta = run_minimal_scrape_pipeline(raw, require_free_delivery=require_ship)
+
+        (output_dir / f"raw_{safe}.json").write_text(
+            json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        (output_dir / f"filtered_{safe}.json").write_text(
+            json.dumps(filtered, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        (output_dir / f"pipeline_meta_{safe}.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        (output_dir / f"selector_debug_{safe}.json").write_text(
+            json.dumps(dbg, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        LOGGER.info(
+            "scrape_job done name=%s raw=%s filtered=%s files=raw_%s.json …",
+            name,
+            len(raw),
+            len(filtered),
+            safe,
+        )
 
 
 def should_reconcile_missing_asins(config: dict, filtered_count: int) -> tuple[bool, str | None]:
