@@ -28,30 +28,35 @@ DEFAULT_MESSAGE_TEMPLATES = {
         "New product detected!\n"
         "Title: {title}\n"
         "Price: {price_text}\n"
+        "{shipping}\n"
         "Link: {affiliate_link}"
     ),
     "new_product": (
         "New product detected!\n"
         "Title: {title}\n"
         "Price: {price_text}\n"
+        "{shipping}\n"
         "Link: {affiliate_link}"
     ),
     "price_drop": (
         "Price drop detected!\n"
         "Title: {title}\n"
         "Price: {price_text}\n"
+        "{shipping}\n"
         "Link: {affiliate_link}"
     ),
     "back_in_stock": (
         "Back in stock!\n"
         "Title: {title}\n"
         "Price: {price_text}\n"
+        "{shipping}\n"
         "Link: {affiliate_link}"
     ),
     "setup_test": (
         "Setup test alert\n"
         "Title: {title}\n"
         "Price: {price_text}\n"
+        "{shipping}\n"
         "Link: {affiliate_link}"
     ),
     "heartbeat_ok": "Heartbeat OK: {timestamp}",
@@ -104,6 +109,7 @@ def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> st
             "timestamp": alert_payload.get("timestamp"),
             "price_text": price_text,
             "error_message": alert_payload.get("error_message"),
+            "shipping": (alert_payload.get("shipping") or "").strip(),
         }
     )
     return template.format_map(values)
@@ -130,6 +136,7 @@ def send_alert(alert_dict: dict[str, Any], config: dict[str, Any]) -> None:
         "image_url": alert_dict.get("image_url"),
         "affiliate_link": f"https://www.amazon.com/dp/{asin}?tag={tag}" if asin else None,
         "timestamp": alert_dict.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+        "shipping": alert_dict.get("shipping"),
     }
     wa_payload = {
         "to": _pick_recipient(config, operational=False),

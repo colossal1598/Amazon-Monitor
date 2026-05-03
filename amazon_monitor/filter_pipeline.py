@@ -111,7 +111,7 @@ def _is_valid_price(item: dict[str, Any]) -> bool:
 
 
 def _card_blob_for_delivery_line(item: dict[str, Any]) -> str:
-    """Per-card fields from the SERP scrape that can contain the FREE delivery line."""
+    """Per-card fields from the SERP scrape (incl. UDM delivery-block via shipping_text)."""
     parts = [
         str(item.get("shipping_text") or ""),
         str(item.get("seller_text") or ""),
@@ -120,10 +120,42 @@ def _card_blob_for_delivery_line(item: dict[str, Any]) -> str:
     return "\n".join(p for p in parts if p.strip())
 
 
-def _has_free_delivery_on_card(item: dict[str, Any]) -> bool:
-    """True when this result card's scraped text includes 'free delivery' (e.g. FREE delivery Tue, …)."""
-    clean = _normalize_ascii(_card_blob_for_delivery_line(item))
-    return "free delivery" in clean
+def _shipping_line_looks_free(line: str, clean_blob: str) -> bool:
+    """English or common Hebrew free-shipping cues (no currency parsing)."""
+    c = _normalize_ascii(line)
+    if "free delivery" in c or "free shipping" in c:
+        return True
+    if "free delivery" in clean_blob or "free shipping" in clean_blob:
+        return True
+    if "חינם" in line:
+        return True
+    return False
+
+
+def _has_shipping_qualifier_on_card(item: dict[str, Any]) -> bool:
+    """True when the card exposes a shipping/delivery line: UDM `shipping_text`, or free phrasing in blob."""
+    blob = _card_blob_for_delivery_line(item)
+    clean = _normalize_ascii(blob)
+    ship = str(item.get("shipping_text") or "").strip()
+    if _shipping_line_looks_free(ship, clean):
+        return True
+    if ship:
+        return True
+    if "delivery" in clean or "shipping" in clean:
+        return True
+    return False
+
+
+def shipping_display_hebrew(shipping_text: str | None) -> str:
+    """Single WhatsApp line: free -> 'משלוח חינם'; else one-line Amazon text + ' משלוח' (verbatim, any locale/currency)."""
+    raw = (shipping_text or "").strip()
+    line = " ".join(raw.split())
+    blob_clean = _normalize_ascii(raw)
+    if _shipping_line_looks_free(line, blob_clean):
+        return "משלוח חינם"
+    if not line:
+        return "משלוח"
+    return f"{line} משלוח"
 
 
 def filter_by_blacklist_only(
@@ -147,7 +179,7 @@ def filter_by_blacklist_only(
 
 
 def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Pokémon TCG title + valid price + 'free delivery' on the card (per-item scraped text)."""
+    """Pokémon TCG title + valid price + any scraped shipping/delivery signal on the card."""
     out: list[dict[str, Any]] = []
     for item in raw_items:
         title = item.get("title") or ""
@@ -155,7 +187,7 @@ def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, 
             continue
         if not _is_valid_price(item):
             continue
-        if not _has_free_delivery_on_card(item):
+        if not _has_shipping_qualifier_on_card(item):
             continue
         out.append(dict(item))
     return out
@@ -182,7 +214,7 @@ def _maybe_warn_incompatible_url_facets(
         return
     LOGGER.warning(
         "search_url combines free-shipping refine with p_6 seller; Amazon often does not honor both on the SERP. "
-        "Stage1 requires 'free delivery' in each card's scraped text; do not rely on p_6 in the same URL for seller truth."
+        "Stage1 requires a delivery/shipping line on the card (non-empty shipping_text or delivery/shipping in blob); do not rely on p_6 in the same URL for seller truth."
     )
     meta["warn_incompatible_url_facets"] = "free_shipping_plus_p_6"
 
@@ -228,7 +260,7 @@ def run_search_filter_pipeline(
     raw_items: list[dict[str, Any]],
     config: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Stage1 (Pokémon TCG + price + free delivery on card) + blacklist + keywords -> state-engine rows."""
+    """Stage1 (Pokémon TCG + price + shipping/delivery line on card) + blacklist + keywords -> state-engine rows."""
     meta: dict[str, Any] = {"pipeline": "search"}
     _maybe_warn_incompatible_url_facets(raw_items, meta)
     stage1 = filter_stage1_candidates(raw_items)

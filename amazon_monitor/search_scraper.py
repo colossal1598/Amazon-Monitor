@@ -183,6 +183,22 @@ _SELLER_DOM_REGION_SELECTORS: tuple[str, ...] = (
 )
 
 
+def _extract_delivery_block_primary(card) -> tuple[str, str | None]:
+    """Amazon UDM delivery row: data-cy=delivery-block, primary line often in udm-primary-delivery-message."""
+    block = card.query_selector('div[data-cy="delivery-block"]')
+    if not block:
+        return "", None
+    primary = block.query_selector(".udm-primary-delivery-message")
+    if primary:
+        text = (primary.inner_text() or "").strip()
+        if text:
+            return text, 'div[data-cy="delivery-block"] .udm-primary-delivery-message'
+    text = (block.inner_text() or "").strip()
+    if text:
+        return text, 'div[data-cy="delivery-block"]'
+    return "", None
+
+
 def _extract_seller_text(card) -> tuple[str, str | None]:
     for selector in _SELLER_DOM_REGION_SELECTORS:
         node = card.query_selector(selector)
@@ -216,7 +232,7 @@ def _extract_seller_text(card) -> tuple[str, str | None]:
     return "", None
 
 
-def _extract_shipping_text(card) -> tuple[str, str | None]:
+def _extract_shipping_text_legacy(card) -> tuple[str, str | None]:
     selectors = (
         "span:has-text('FREE Shipping')",
         "span:has-text('FREE delivery')",
@@ -224,6 +240,14 @@ def _extract_shipping_text(card) -> tuple[str, str | None]:
         "span.a-color-secondary",
     )
     return _extract_by_selectors(card, selectors)
+
+
+def _extract_shipping_text(card) -> tuple[str, str | None]:
+    """Prefer SERP delivery-block (matches PDP-style UDM); fall back to legacy span hints."""
+    text, sel = _extract_delivery_block_primary(card)
+    if text:
+        return text, sel
+    return _extract_shipping_text_legacy(card)
 
 
 def _extract_image_url(card) -> str | None:

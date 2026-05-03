@@ -14,7 +14,8 @@ Edit `config.yaml`:
 
 - `search_urls.amazon_com` — Amazon.com slot SERP URL (filters/sort embedded in the link).
 - `search_urls.aes_llc` — Amazon Export Sales LLC seller-scoped URL.
-- **Do not rely on combining** free-shipping refines (`p_n_is_free_shipping` in `rh`) **with** seller refines (`p_6` / `emi`) in one Amazon search URL—Amazon often does not honor both; stage1 requires the substring **`free delivery`** in each result card’s scraped text (`shipping_text` / `seller_text` / `availability_text`).
+- **Do not rely on combining** free-shipping refines (`p_n_is_free_shipping` in `rh`) **with** seller refines (`p_6` / `emi`) in one Amazon search URL—Amazon often does not honor both. Stage1 only needs a **visible shipping/delivery line** on the card: non-empty **`shipping_text`** (from `div[data-cy="delivery-block"]` / `.udm-primary-delivery-message` when present), or **`delivery` / `shipping`** in the scraped blob, or **free** phrasing (`free delivery` / `free shipping`, or **חינם** on the line). No currency parsing.
+- **WhatsApp templates** — `{shipping}` is **`משלוח חינם`** when the line looks free (English free phrases or **חינם**), otherwise the **scraped delivery line as one line** plus **` משלוח`** (whatever Amazon showed: ILS, $, Hebrew, etc.). Put `{shipping}` on its own line.
 - `pagination_mode`: `auto` (derive page count from `totalResultCount` / `asinOnPageCount`) or `fixed` (use `search_pages`).
 - `max_search_pages`, `max_cycle_seconds`, `search_pages`, `required_keywords`, `required_any_keywords`, `blacklist_file`, WhatsApp fields, `db_path`, etc.
 
@@ -27,7 +28,7 @@ Legacy keys `search_urls.featured` / `search_urls.newest_arrivals` / `search_url
 ## Architecture
 
 - `search_scraper.py` — Playwright search only; metadata pagination.
-- `filter_pipeline.py` — stage1 (Pokemon TCG + **free delivery** on card + price), blacklist, optional keyword lists → rows for the state engine.
+- `filter_pipeline.py` — stage1 (Pokemon TCG + **shipping/delivery line present on card** + price), blacklist, optional keyword lists → rows for the state engine.
 - `state_engine.py` — SQLite + alerts; `list_known_asins()` for the AES LLC pass.
 - `webhook_sender.py` — WhatsApp API posts.
 - `main.py` — APScheduler: Amazon.com scrape → process → AES LLC scrape → new ASINs only → process.
@@ -51,4 +52,4 @@ python main.py
 ## Troubleshooting
 
 - **Captcha** — search job pauses ~120s and resumes; no modem rotation. Check logs and consider running less often or from a stable residential IP.
-- **No alerts** — verify WA API settings, `search_urls`, and filter lists (`required_keywords`, blacklist).
+- **No alerts** — verify WA API settings, `search_urls`, and filter lists (`required_keywords`, blacklist). If hits exist on Amazon but not in logs, check stage1: the SERP should populate **`shipping_text`** (delivery block) or otherwise contain **delivery/shipping** text on the card scrape.

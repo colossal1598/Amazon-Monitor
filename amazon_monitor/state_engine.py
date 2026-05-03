@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from alert_decisions import decide_back_in_stock, decide_new_product, decide_price_drop
+from filter_pipeline import shipping_display_hebrew
 
 LOGGER = logging.getLogger(__name__)
 
@@ -115,6 +116,7 @@ class StateEngine:
         old_price: float | None = None,
         new_price: float | None = None,
         image_url: str | None = None,
+        shipping: str = "",
     ) -> dict[str, Any]:
         pct = None
         if old_price is not None and new_price is not None and old_price > 0:
@@ -130,6 +132,7 @@ class StateEngine:
             "source": source,
             "image_url": image_url,
             "timestamp": utc_iso(),
+            "shipping": shipping,
         }
 
     def _mark_missing_asins_out_of_stock(self, seen_asins: set[str], _source: str, now: str) -> int:
@@ -180,6 +183,7 @@ class StateEngine:
                 seller = item.get("seller") or source
                 image_url = item.get("image_url")
                 new_price = _as_float(item.get("price"))
+                ship_line = shipping_display_hebrew(item.get("shipping_text"))
                 # Presence in a healthy, filtered run is the stock signal.
                 # Missing-ASIN reconciliation marks absent items out-of-stock.
                 new_stock = 1
@@ -198,7 +202,15 @@ class StateEngine:
                         """,
                         (asin, title, seller, new_price, new_stock, now, now),
                     )
-                    alert = self._build_alert(nd.alert_type, "search", asin, title, new_price, image_url=image_url)
+                    alert = self._build_alert(
+                        nd.alert_type,
+                        "search",
+                        asin,
+                        title,
+                        new_price,
+                        image_url=image_url,
+                        shipping=ship_line,
+                    )
                     alerts.append(alert)
                     self._record_alert(alert)
                     new_count += 1
@@ -221,7 +233,15 @@ class StateEngine:
 
                 stock_decision = decide_back_in_stock(old_stock, new_stock)
                 if stock_decision.emit:
-                    alert = self._build_alert("back_in_stock", "search", asin, title, new_price, image_url=image_url)
+                    alert = self._build_alert(
+                        "back_in_stock",
+                        "search",
+                        asin,
+                        title,
+                        new_price,
+                        image_url=image_url,
+                        shipping=ship_line,
+                    )
                     alerts.append(alert)
                     self._record_alert(alert)
                     self.conn.execute("UPDATE products SET last_stock_alert = ? WHERE asin = ?", (now, asin))
@@ -248,6 +268,7 @@ class StateEngine:
                         old_price=old_price,
                         new_price=new_price,
                         image_url=image_url,
+                        shipping=ship_line,
                     )
                     alerts.append(alert)
                     self._record_alert(alert)
