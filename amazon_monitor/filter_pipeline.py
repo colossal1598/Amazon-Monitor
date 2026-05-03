@@ -329,13 +329,15 @@ def run_search_filter_pipeline(
     reject_counts, reject_rows = stage1_reject_report(raw_items)
     meta["stage1_reject_counts"] = reject_counts
     meta["stage1_rejects"] = reject_rows
-    if reject_counts:
-        LOGGER.info(
-            "search_stage1_reject_summary raw=%s passed=%s counts=%s",
-            len(raw_items),
-            len(raw_items) - sum(reject_counts.values()),
-            reject_counts,
-        )
+    n_gate_rejects = sum(reject_counts.values())
+    n_pass_gates = len(raw_items) - n_gate_rejects
+    meta["stage1_pass_title_price_shipping"] = n_pass_gates
+    LOGGER.info(
+        "search_stage1_gate_summary raw=%s pass_title_price_shipping=%s gate_reject_counts=%s",
+        len(raw_items),
+        n_pass_gates,
+        reject_counts or {},
+    )
     if config.get("log_stage1_rejects_detail", True) and reject_rows:
         for row in reject_rows:
             LOGGER.info(
@@ -344,9 +346,17 @@ def run_search_filter_pipeline(
                 row["reason"],
                 (row.get("title") or "")[:160],
             )
-    stage1 = filter_stage1_candidates(raw_items)
-    stage1 = _apply_blacklist_and_config_keywords(stage1, config)
+    stage1_core = filter_stage1_candidates(raw_items)
+    meta["stage1_core_count"] = len(stage1_core)
+    stage1 = _apply_blacklist_and_config_keywords(stage1_core, config)
+    meta["stage1_blacklist_kw_dropped"] = len(stage1_core) - len(stage1)
     meta["stage1_count"] = len(stage1)
+    LOGGER.info(
+        "search_pipeline stage1_core=%s after_blacklist_keywords=%s dropped_by_blacklist_or_kw=%s",
+        len(stage1_core),
+        len(stage1),
+        meta["stage1_blacklist_kw_dropped"],
+    )
     filtered = _rows_for_state_engine(stage1)
     meta["filtered_count"] = len(filtered)
     return filtered, meta
