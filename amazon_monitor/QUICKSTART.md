@@ -70,7 +70,7 @@ Check:
 - optional `wa_client_to` (for operational alerts direct-to-client)
 - `affiliate_tag`
 - `search_urls.amazon_com` and `search_urls.aes_llc`
-- `required_keywords` / `required_any_keywords` and `blacklist_file` (see `README.md`)
+- `required_keywords` and optional YAML `whitelist` / `blacklist` ASIN lists (see `README.md`)
 
 Tune search URLs and filters for your catalog; see `README.md`.
 

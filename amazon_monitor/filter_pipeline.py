@@ -1,11 +1,12 @@
 import logging
 import re
 import unicodedata
-from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
 LOGGER = logging.getLogger(__name__)
+
+_ASIN_LINE = re.compile(r"^[A-Z0-9]{10}$")
 
 
 def _normalize_text(value: str) -> str:
@@ -15,23 +16,6 @@ def _normalize_text(value: str) -> str:
     normalized = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     normalized = normalized.replace("trading card game", "tcg")
     return normalized
-
-
-def _read_blacklist(blacklist_file: str) -> tuple[set[str], list[re.Pattern[str]]]:
-    asins: set[str] = set()
-    patterns: list[re.Pattern[str]] = []
-    path = Path(blacklist_file)
-    if not path.exists():
-        return asins, patterns
-    for line in path.read_text(encoding="utf-8").splitlines():
-        raw = line.strip()
-        if not raw or raw.startswith("#"):
-            continue
-        if re.fullmatch(r"[A-Z0-9]{10}", raw.upper()):
-            asins.add(raw.upper())
-        else:
-            patterns.append(re.compile(rf"\b{re.escape(raw.lower())}\b"))
-    return asins, patterns
 
 
 def _keyword_matches_title(title_norm: str, keyword: str, raw_title: str) -> bool:
@@ -44,32 +28,17 @@ def _keyword_matches_title(title_norm: str, keyword: str, raw_title: str) -> boo
     return False
 
 
-def filter_search_results(
-    products: list[dict[str, Any]],
-    required_keywords: list[str],
-    blacklist_file: str,
-    required_any_keywords: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    req = [_normalize_text(k) for k in required_keywords if k.strip()]
-    req_any = [_normalize_text(k) for k in (required_any_keywords or []) if k.strip()]
-    blocked_asins, blocked_patterns = _read_blacklist(blacklist_file)
-    filtered: list[dict[str, Any]] = []
-    for product in products:
-        asin = (product.get("asin") or "").upper()
-        raw_title = product.get("title") or ""
-        title = _normalize_text(raw_title)
-        if not asin or not title:
-            continue
-        if asin in blocked_asins:
-            continue
-        if any(not _keyword_matches_title(title, keyword, raw_title) for keyword in req):
-            continue
-        if req_any and not any(keyword in title for keyword in req_any):
-            continue
-        if any(pattern.search(title) for pattern in blocked_patterns):
-            continue
-        filtered.append(product)
-    return filtered
+def _config_asin_set(config: dict[str, Any], key: str) -> set[str]:
+    """Normalize config whitelist/blacklist entries to uppercase 10-char ASINs."""
+    raw = config.get(key)
+    if not isinstance(raw, list):
+        return set()
+    out: set[str] = set()
+    for x in raw:
+        s = str(x).strip().upper().replace("-", "")
+        if _ASIN_LINE.match(s):
+            out.add(s)
+    return out
 
 
 def _normalize_ascii(value: str) -> str:
@@ -195,23 +164,20 @@ def shipping_display_hebrew(shipping_text: str | None) -> str:
     return f"משלוח: {_paid_delivery_price_tail(line)}"
 
 
-def filter_by_blacklist_only(
-    products: list[dict[str, Any]],
-    blacklist_file: str,
+def _merge_whitelist_raw(
+    raw_items: list[dict[str, Any]],
+    stage1_core: list[dict[str, Any]],
+    whitelist_set: set[str],
 ) -> list[dict[str, Any]]:
-    """Drop ASIN/title matches from blacklist.txt (same ASIN + title patterns as filter_search_results)."""
-    blocked_asins, blocked_patterns = _read_blacklist(blacklist_file)
-    out: list[dict[str, Any]] = []
-    for product in products:
-        asin = (product.get("asin") or "").upper()
-        title = _normalize_text(product.get("title") or "")
-        if not asin:
+    """Append raw SERP rows for whitelisted ASINs that Stage 1 did not keep (bypass Stage 1)."""
+    core_asins = {(p.get("asin") or "").strip().upper() for p in stage1_core if (p.get("asin") or "").strip()}
+    out = [dict(p) for p in stage1_core]
+    for item in raw_items:
+        a = (item.get("asin") or "").strip().upper()
+        if not a or a not in whitelist_set or a in core_asins:
             continue
-        if asin in blocked_asins:
-            continue
-        if any(pattern.search(title) for pattern in blocked_patterns):
-            continue
-        out.append(product)
+        out.append(dict(item))
+        core_asins.add(a)
     return out
 
 
@@ -282,23 +248,21 @@ def _maybe_warn_incompatible_url_facets(
     meta["warn_incompatible_url_facets"] = "free_shipping_plus_p_6"
 
 
-def _apply_blacklist_and_config_keywords(
+def _apply_required_keywords_and_yaml_blacklist(
     candidates: list[dict[str, Any]],
     config: dict[str, Any],
+    yaml_blacklist: set[str],
+    whitelist: set[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """After stage1 core: blacklist.txt then optional required_keywords / required_any_keywords.
+    """YAML blacklist ASINs drop first (wins over whitelist); whitelist skips required_keywords.
 
-    Returns (kept_products, drop_rows) where each drop_row has asin, reason, detail, title_snip.
+    Returns (kept_products, drop_rows) with asin, reason, detail, title_snip per drop.
     """
-    bl_file = str(config.get("blacklist_file", "blacklist.txt"))
-    blocked_asins, blocked_patterns = _read_blacklist(bl_file)
     req_kw_raw = config.get("required_keywords") or []
-    req_any_raw = config.get("required_any_keywords") or []
     req_norm = [_normalize_text(k) for k in req_kw_raw if str(k).strip()]
-    req_any_norm = [_normalize_text(k) for k in req_any_raw if str(k).strip()]
 
     drops: list[dict[str, Any]] = []
-    after_bl: list[dict[str, Any]] = []
+    final: list[dict[str, Any]] = []
 
     for product in candidates:
         asin = (product.get("asin") or "").strip().upper()
@@ -311,32 +275,19 @@ def _apply_blacklist_and_config_keywords(
         if not title:
             drops.append({"asin": asin, "reason": "missing_title", "detail": "", "title_snip": title_snip})
             continue
-        if asin in blocked_asins:
-            drops.append({"asin": asin, "reason": "blacklist_asin", "detail": bl_file, "title_snip": title_snip})
-            continue
-        matched_pat: str | None = None
-        for p in blocked_patterns:
-            if p.search(title):
-                matched_pat = p.pattern
-                break
-        if matched_pat is not None:
+        if asin in yaml_blacklist:
             drops.append(
                 {
                     "asin": asin,
-                    "reason": "blacklist_title_pattern",
-                    "detail": matched_pat[:180],
+                    "reason": "yaml_blacklist_asin",
+                    "detail": "",
                     "title_snip": title_snip,
                 }
             )
             continue
-        after_bl.append(product)
-
-    final: list[dict[str, Any]] = []
-    for product in after_bl:
-        asin = (product.get("asin") or "").strip().upper()
-        raw_title = product.get("title") or ""
-        title = _normalize_text(raw_title)
-        title_snip = (raw_title or "")[:140]
+        if asin in whitelist:
+            final.append(product)
+            continue
         failed_kw: str | None = None
         for kw in req_norm:
             if not _keyword_matches_title(title, kw, raw_title):
@@ -348,16 +299,6 @@ def _apply_blacklist_and_config_keywords(
                     "asin": asin,
                     "reason": "required_keyword_missing",
                     "detail": failed_kw,
-                    "title_snip": title_snip,
-                }
-            )
-            continue
-        if req_any_norm and not any(k in title for k in req_any_norm):
-            drops.append(
-                {
-                    "asin": asin,
-                    "reason": "required_any_keyword_missing",
-                    "detail": ",".join(req_any_norm),
                     "title_snip": title_snip,
                 }
             )
@@ -394,8 +335,12 @@ def run_search_filter_pipeline(
     raw_items: list[dict[str, Any]],
     config: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Stage1 (Pokémon TCG + price + shipping/delivery line on card) + blacklist + keywords -> state-engine rows."""
+    """Stage1 gates + whitelist merge + YAML blacklist + required_keywords -> state-engine rows."""
     meta: dict[str, Any] = {"pipeline": "search"}
+    whitelist_set = _config_asin_set(config, "whitelist")
+    blacklist_set = _config_asin_set(config, "blacklist")
+    meta["whitelist_count"] = len(whitelist_set)
+    meta["yaml_blacklist_count"] = len(blacklist_set)
     _maybe_warn_incompatible_url_facets(raw_items, meta)
     reject_counts, reject_rows = stage1_reject_report(raw_items)
     meta["stage1_reject_counts"] = reject_counts
@@ -403,8 +348,10 @@ def run_search_filter_pipeline(
     meta["stage1_pass_title_price_shipping"] = len(raw_items) - sum(reject_counts.values())
     stage1_core = filter_stage1_candidates(raw_items)
     meta["stage1_core_count"] = len(stage1_core)
-    stage1, bl_kw_drops = _apply_blacklist_and_config_keywords(stage1_core, config)
-    meta["stage1_blacklist_kw_dropped"] = len(stage1_core) - len(stage1)
+    merged = _merge_whitelist_raw(raw_items, stage1_core, whitelist_set)
+    meta["stage1_after_whitelist_merge"] = len(merged)
+    stage1, bl_kw_drops = _apply_required_keywords_and_yaml_blacklist(merged, config, blacklist_set, whitelist_set)
+    meta["stage1_blacklist_kw_dropped"] = len(merged) - len(stage1)
     meta["blacklist_kw_drops"] = bl_kw_drops
     meta["stage1_count"] = len(stage1)
     if bl_kw_drops:

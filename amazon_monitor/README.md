@@ -1,6 +1,6 @@
 # Pokemon TCG Amazon Monitor
 
-Local Python monitor for Pokemon TCG listings on Amazon.com: Playwright search scraping (no product-detail pages), dual search URLs, SQLite state, title/blacklist/keyword filters, and alerts via a local WhatsApp API.
+Local Python monitor for Pokemon TCG listings on Amazon.com: Playwright search scraping (no product-detail pages), dual search URLs, SQLite state, title/keyword filters plus optional YAML ASIN whitelist/blacklist, and alerts via a local WhatsApp API.
 
 ## What This Project Does
 
@@ -17,7 +17,7 @@ Edit `config.yaml`:
 - **Do not rely on combining** free-shipping refines (`p_n_is_free_shipping` in `rh`) **with** seller refines (`p_6` / `emi`) in one Amazon search URL—Amazon often does not honor both. Stage1 only needs a **visible shipping/delivery line** on the card: non-empty **`shipping_text`** (from `div[data-cy="delivery-block"]` / `.udm-primary-delivery-message` when present), or **`delivery` / `shipping`** in the scraped blob, or **free** phrasing (`free delivery` / `free shipping`, or **חינם** on the line). No currency parsing.
 - **WhatsApp templates** — `{shipping}` is built in code (`filter_pipeline.shipping_display_hebrew`): **`משלוח חינם`** when free, else **`משלוח: 54₪`**-style (amount + ₪ when the line has **₪** or **ILS** + digits; otherwise **`משלוח:`** + the full scraped line). Edit that function to change wording or `$` handling.
 - `pagination_mode`: `auto` (derive page count from `totalResultCount` / `asinOnPageCount`) or `fixed` (use `search_pages`).
-- `max_search_pages`, `max_cycle_seconds`, `search_pages`, `required_keywords`, `required_any_keywords`, `blacklist_file`, WhatsApp fields, `db_path`, etc.
+- `max_search_pages`, `max_cycle_seconds`, `search_pages`, `required_keywords`, `whitelist` / `blacklist` (ASIN lists in YAML), WhatsApp fields, `db_path`, etc.
 
 Legacy keys `search_urls.featured` / `search_urls.newest_arrivals` / `search_urls.main_search` and top-level `search_url` are still read as fallbacks for the Amazon.com URL only; prefer `amazon_com` and `aes_llc`.
 
@@ -28,7 +28,7 @@ Legacy keys `search_urls.featured` / `search_urls.newest_arrivals` / `search_url
 ## Architecture
 
 - `search_scraper.py` — Playwright search only; metadata pagination.
-- `filter_pipeline.py` — stage1 (Pokemon TCG + **shipping/delivery line present on card** + price), blacklist, optional keyword lists → rows for the state engine.
+- `filter_pipeline.py` — stage1 (Pokemon TCG + **shipping/delivery line present on card** + price), optional YAML **whitelist** / **blacklist** ASINs, `required_keywords` for non-whitelist rows → rows for the state engine.
 - `state_engine.py` — SQLite + alerts; `list_known_asins()` for the AES LLC pass.
 - `webhook_sender.py` — WhatsApp API posts.
 - `main.py` — APScheduler: Amazon.com scrape → process → AES LLC scrape → new ASINs only → process.
@@ -52,4 +52,4 @@ python main.py
 ## Troubleshooting
 
 - **Captcha** — search job pauses ~120s and resumes; no modem rotation. Check logs and consider running less often or from a stable residential IP.
-- **No alerts** — verify WA API settings, `search_urls`, and filter lists (`required_keywords`, blacklist). If hits exist on Amazon but not in logs, check stage1: the SERP should populate **`shipping_text`** (delivery block) or otherwise contain **delivery/shipping** text on the card scrape.
+- **No alerts** — verify WA API settings, `search_urls`, and filter lists (`required_keywords`, YAML `whitelist` / `blacklist`). If hits exist on Amazon but not in logs, check stage1: the SERP should populate **`shipping_text`** (delivery block) or otherwise contain **delivery/shipping** text on the card scrape.

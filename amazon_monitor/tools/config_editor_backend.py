@@ -81,8 +81,10 @@ def apply_config_payload(cfg: dict, payload: dict) -> None:
     if isinstance(keywords, dict):
         if keywords.get("required") is not None:
             cfg["required_keywords"] = _normalize_string_list(keywords.get("required"))
-        if keywords.get("required_any") is not None:
-            cfg["required_any_keywords"] = _normalize_string_list(keywords.get("required_any"))
+        if keywords.get("whitelist") is not None:
+            cfg["whitelist"] = _normalize_string_list(keywords.get("whitelist"))
+        if keywords.get("blacklist") is not None:
+            cfg["blacklist"] = _normalize_string_list(keywords.get("blacklist"))
 
     scraping = payload.get("scraping")
     if isinstance(scraping, dict):
@@ -111,8 +113,6 @@ def apply_config_payload(cfg: dict, payload: dict) -> None:
 
     paths = payload.get("paths")
     if isinstance(paths, dict):
-        if paths.get("blacklist_file") is not None:
-            cfg["blacklist_file"] = str(paths.get("blacklist_file", "")).strip()
         if paths.get("db_path") is not None:
             cfg["db_path"] = str(paths.get("db_path", "")).strip()
         if paths.get("log_dir") is not None:
@@ -145,6 +145,9 @@ def apply_config_payload(cfg: dict, payload: dict) -> None:
     advanced = payload.get("advanced")
     if isinstance(advanced, dict) and advanced.get("wa_restart_command") is not None:
         cfg["wa_restart_command"] = str(advanced.get("wa_restart_command", "")).strip()
+
+    cfg.pop("required_any_keywords", None)
+    cfg.pop("blacklist_file", None)
 
 
 def restart_services(cfg: dict) -> None:

@@ -46,7 +46,7 @@ Set and verify:
 - `wa_message_templates`
 - `affiliate_tag`
 - `search_urls.amazon_com` and `search_urls.aes_llc` (required; legacy `featured` / `newest_arrivals` still supported)
-- `pagination_mode`, `max_search_pages`, `max_cycle_seconds`, `required_keywords`, `blacklist_file`
+- `pagination_mode`, `max_search_pages`, `max_cycle_seconds`, `required_keywords`, optional YAML `whitelist` / `blacklist` ASIN lists
 
 Note: search-only scraping (no PDP). Featured URL uses dynamic or fixed pagination; newest URL is page 1 only for ASINs not yet in SQLite.
 

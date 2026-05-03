@@ -326,13 +326,23 @@
       </div>
       <div class="field">
         <div class="label-row">
-          <span class="label-title">מילים חובה — לפחות אחת</span>
+          <span class="label-title">רשימה לבנה — ASIN (שורה לכל מזהה)</span>
           <span class="help-wrap">
             <button type="button" class="help-btn" aria-label="הסבר">?</button>
-            <span class="tip-bubble" role="tooltip">רשימת אפשרויות: מספיק שאחת מהן תופיע כדי לעמוד בתנאי זה (בנוסף לרשימת החובה הקודמת).</span>
+            <span class="tip-bubble" role="tooltip">מזהי ASIN שמופיעים בתוצאות החיפוש ייכנסו למעקב גם אם לא עברו את סינון שלב 1, וללא בדיקת מילות החובה. שימושי לכותרות חריגות או מקרי קצה.</span>
           </span>
         </div>
-        <textarea id="kw_required_any" placeholder="שורה אחת לכל אפשרות"></textarea>
+        <textarea id="asin_whitelist" placeholder="למשל B08XYZ1234"></textarea>
+      </div>
+      <div class="field">
+        <div class="label-row">
+          <span class="label-title">רשימה שחורה — ASIN (שורה לכל מזהה)</span>
+          <span class="help-wrap">
+            <button type="button" class="help-btn" aria-label="הסבר">?</button>
+            <span class="tip-bubble" role="tooltip">מזהים שלא ייכנסו למסד גם אם עברו סינון. אם ASIN מופיע גם ברשימה הלבנה — הרשימה השחורה גוברת.</span>
+          </span>
+        </div>
+        <textarea id="asin_blacklist" placeholder="למשל B09ABC5678"></textarea>
       </div>
     </section>
 
@@ -445,16 +455,6 @@
 
     <section class="card" aria-labelledby="sec-paths">
       <h2 id="sec-paths">קבצים ותיקיות</h2>
-      <div class="field">
-        <div class="label-row">
-          <span class="label-title">קובץ רשימה שחורה</span>
-          <span class="help-wrap">
-            <button type="button" class="help-btn" aria-label="הסבר">?</button>
-            <span class="tip-bubble" role="tooltip">נתיב יחסי או מלא לקובץ טקסט עם מזהים או מילות מפתח לסינון מוצרים לא רצויים.</span>
-          </span>
-        </div>
-        <input type="text" id="blacklist_file">
-      </div>
       <div class="grid-2">
         <div class="field">
           <div class="label-row">
@@ -746,7 +746,8 @@
       document.getElementById("delay_pagination_max").value = pag[1] ?? "";
 
       document.getElementById("kw_required").value = listToText(c.required_keywords);
-      document.getElementById("kw_required_any").value = listToText(c.required_any_keywords);
+      document.getElementById("asin_whitelist").value = listToText(c.whitelist);
+      document.getElementById("asin_blacklist").value = listToText(c.blacklist);
 
       document.getElementById("search_poll_minutes").value = c.search_poll_minutes ?? 4;
       document.getElementById("pagination_mode").value =
@@ -762,7 +763,6 @@
       document.getElementById("min_results_for_absence_reconcile").value =
         c.min_results_for_absence_reconcile ?? 1;
 
-      document.getElementById("blacklist_file").value = c.blacklist_file || "";
       document.getElementById("db_path").value = c.db_path || "";
       document.getElementById("log_dir").value = c.log_dir || "";
       document.getElementById("auth_dir").value = c.auth_dir || "";
@@ -805,7 +805,8 @@
         },
         keywords: {
           required: linesToList(document.getElementById("kw_required")),
-          required_any: linesToList(document.getElementById("kw_required_any"))
+          whitelist: linesToList(document.getElementById("asin_whitelist")),
+          blacklist: linesToList(document.getElementById("asin_blacklist"))
         },
         scraping: {
           search_poll_minutes: intOr(document.getElementById("search_poll_minutes"), 4),
@@ -822,7 +823,6 @@
             intOr(document.getElementById("min_results_for_absence_reconcile"), 1)
         },
         paths: {
-          blacklist_file: document.getElementById("blacklist_file").value,
           db_path: document.getElementById("db_path").value,
           log_dir: document.getElementById("log_dir").value,
           auth_dir: document.getElementById("auth_dir").value
