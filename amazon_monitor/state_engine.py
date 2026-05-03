@@ -246,9 +246,6 @@ class StateEngine:
                     self._record_alert(alert)
                     self.conn.execute("UPDATE products SET last_stock_alert = ? WHERE asin = ?", (now, asin))
                     back_in_stock_count += 1
-                elif stock_decision.skip_reason:
-                    LOGGER.info("alert_skip asin=%s alert=back_in_stock reason=%s", asin, stock_decision.skip_reason)
-
                 last_price_alert = parse_dt(row["last_price_alert"])
                 price_decision = decide_price_drop(
                     old_price,
@@ -274,8 +271,6 @@ class StateEngine:
                     self._record_alert(alert)
                     self.conn.execute("UPDATE products SET last_price_alert = ? WHERE asin = ?", (now, asin))
                     price_drop_count += 1
-                elif price_decision.skip_reason:
-                    LOGGER.info("alert_skip asin=%s alert=price_drop reason=%s", asin, price_decision.skip_reason)
             marked_oos_count = 0
             if reconcile_missing:
                 marked_oos_count = self._mark_missing_asins_out_of_stock(seen_asins, source, utc_iso())

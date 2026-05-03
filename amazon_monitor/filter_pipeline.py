@@ -285,15 +285,86 @@ def _maybe_warn_incompatible_url_facets(
 def _apply_blacklist_and_config_keywords(
     candidates: list[dict[str, Any]],
     config: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """After stage1: blacklist.txt then optional required_keywords / required_any_keywords."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """After stage1 core: blacklist.txt then optional required_keywords / required_any_keywords.
+
+    Returns (kept_products, drop_rows) where each drop_row has asin, reason, detail, title_snip.
+    """
     bl_file = str(config.get("blacklist_file", "blacklist.txt"))
-    stage = filter_by_blacklist_only(candidates, bl_file)
-    req_kw = config.get("required_keywords") or []
-    req_any = config.get("required_any_keywords")
-    if req_kw or req_any:
-        stage = filter_search_results(stage, req_kw, bl_file, req_any)
-    return stage
+    blocked_asins, blocked_patterns = _read_blacklist(bl_file)
+    req_kw_raw = config.get("required_keywords") or []
+    req_any_raw = config.get("required_any_keywords") or []
+    req_norm = [_normalize_text(k) for k in req_kw_raw if str(k).strip()]
+    req_any_norm = [_normalize_text(k) for k in req_any_raw if str(k).strip()]
+
+    drops: list[dict[str, Any]] = []
+    after_bl: list[dict[str, Any]] = []
+
+    for product in candidates:
+        asin = (product.get("asin") or "").strip().upper()
+        raw_title = product.get("title") or ""
+        title = _normalize_text(raw_title)
+        title_snip = (raw_title or "")[:140]
+        if not asin:
+            drops.append({"asin": "-", "reason": "missing_asin", "detail": "", "title_snip": title_snip})
+            continue
+        if not title:
+            drops.append({"asin": asin, "reason": "missing_title", "detail": "", "title_snip": title_snip})
+            continue
+        if asin in blocked_asins:
+            drops.append({"asin": asin, "reason": "blacklist_asin", "detail": bl_file, "title_snip": title_snip})
+            continue
+        matched_pat: str | None = None
+        for p in blocked_patterns:
+            if p.search(title):
+                matched_pat = p.pattern
+                break
+        if matched_pat is not None:
+            drops.append(
+                {
+                    "asin": asin,
+                    "reason": "blacklist_title_pattern",
+                    "detail": matched_pat[:180],
+                    "title_snip": title_snip,
+                }
+            )
+            continue
+        after_bl.append(product)
+
+    final: list[dict[str, Any]] = []
+    for product in after_bl:
+        asin = (product.get("asin") or "").strip().upper()
+        raw_title = product.get("title") or ""
+        title = _normalize_text(raw_title)
+        title_snip = (raw_title or "")[:140]
+        failed_kw: str | None = None
+        for kw in req_norm:
+            if not _keyword_matches_title(title, kw, raw_title):
+                failed_kw = kw
+                break
+        if failed_kw is not None:
+            drops.append(
+                {
+                    "asin": asin,
+                    "reason": "required_keyword_missing",
+                    "detail": failed_kw,
+                    "title_snip": title_snip,
+                }
+            )
+            continue
+        if req_any_norm and not any(k in title for k in req_any_norm):
+            drops.append(
+                {
+                    "asin": asin,
+                    "reason": "required_any_keyword_missing",
+                    "detail": ",".join(req_any_norm),
+                    "title_snip": title_snip,
+                }
+            )
+            continue
+        final.append(product)
+
+    return final, drops
 
 
 def _rows_for_state_engine(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -329,34 +400,23 @@ def run_search_filter_pipeline(
     reject_counts, reject_rows = stage1_reject_report(raw_items)
     meta["stage1_reject_counts"] = reject_counts
     meta["stage1_rejects"] = reject_rows
-    n_gate_rejects = sum(reject_counts.values())
-    n_pass_gates = len(raw_items) - n_gate_rejects
-    meta["stage1_pass_title_price_shipping"] = n_pass_gates
-    LOGGER.info(
-        "search_stage1_gate_summary raw=%s pass_title_price_shipping=%s gate_reject_counts=%s",
-        len(raw_items),
-        n_pass_gates,
-        reject_counts or {},
-    )
-    if config.get("log_stage1_rejects_detail", True) and reject_rows:
-        for row in reject_rows:
-            LOGGER.info(
-                "search_stage1_reject asin=%s reason=%s title=%s",
-                row["asin"],
-                row["reason"],
-                (row.get("title") or "")[:160],
-            )
+    meta["stage1_pass_title_price_shipping"] = len(raw_items) - sum(reject_counts.values())
     stage1_core = filter_stage1_candidates(raw_items)
     meta["stage1_core_count"] = len(stage1_core)
-    stage1 = _apply_blacklist_and_config_keywords(stage1_core, config)
+    stage1, bl_kw_drops = _apply_blacklist_and_config_keywords(stage1_core, config)
     meta["stage1_blacklist_kw_dropped"] = len(stage1_core) - len(stage1)
+    meta["blacklist_kw_drops"] = bl_kw_drops
     meta["stage1_count"] = len(stage1)
-    LOGGER.info(
-        "search_pipeline stage1_core=%s after_blacklist_keywords=%s dropped_by_blacklist_or_kw=%s",
-        len(stage1_core),
-        len(stage1),
-        meta["stage1_blacklist_kw_dropped"],
-    )
+    if bl_kw_drops:
+        LOGGER.info("search_kw_blacklist_blocked count=%s", len(bl_kw_drops))
+        for d in bl_kw_drops:
+            LOGGER.info(
+                "search_kw_blacklist_blocked asin=%s reason=%s detail=%s title=%s",
+                d.get("asin"),
+                d.get("reason"),
+                d.get("detail") or "-",
+                d.get("title_snip") or "",
+            )
     filtered = _rows_for_state_engine(stage1)
     meta["filtered_count"] = len(filtered)
     return filtered, meta
