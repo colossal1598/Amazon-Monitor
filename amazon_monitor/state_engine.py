@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from alert_decisions import decide_back_in_stock, decide_new_product, decide_price_drop
-from filter_pipeline import shipping_display_hebrew
+from filter_pipeline import normalize_title_line, shipping_display_hebrew
 
 LOGGER = logging.getLogger(__name__)
 
@@ -179,7 +179,7 @@ class StateEngine:
                 if not asin:
                     continue
                 seen_asins.add(asin)
-                title = item.get("title")
+                title = normalize_title_line(item.get("title"))
                 seller = item.get("seller") or source
                 image_url = item.get("image_url")
                 new_price = _as_float(item.get("price"))

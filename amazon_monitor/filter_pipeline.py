@@ -9,6 +9,18 @@ LOGGER = logging.getLogger(__name__)
 _ASIN_LINE = re.compile(r"^[A-Z0-9]{10}$")
 
 
+def normalize_title_line(value: Any) -> str | None:
+    """Collapse line breaks and repeated whitespace to a single line (e.g. brand + title on SERP)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    s = re.sub(r"[\r\n\v\f\u0085\u2028\u2029]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s or None
+
+
 def _normalize_text(value: str) -> str:
     """Lowercase and strip diacritics for accent-insensitive matching."""
     lowered = (value or "").lower().strip()

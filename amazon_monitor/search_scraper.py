@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 import browser_factory
 from browser_factory import close_context, create_stealth_context
 from exceptions import CaptchaBlocked, NetworkAccessDenied
+from filter_pipeline import normalize_title_line
 from serp_card_price import card_list_price
 
 LOGGER = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ def _extract_title(card) -> str:
             continue
         text = (node.inner_text() or "").strip()
         if text:
-            return text
+            return normalize_title_line(text) or ""
     return ""
 
 
