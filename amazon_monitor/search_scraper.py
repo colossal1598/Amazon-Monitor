@@ -1,4 +1,3 @@
-import html as html_module
 import logging
 import json
 import math
@@ -13,19 +12,12 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 import browser_factory
 from browser_factory import close_context, create_stealth_context
 from exceptions import CaptchaBlocked, NetworkAccessDenied
+from serp_card_price import card_list_price
 
 LOGGER = logging.getLogger(__name__)
 
 ScrapeMode = Literal["featured_full", "newest_front"]
 PaginationMode = Literal["auto", "fixed"]
-
-PRICE_RE = re.compile(r"\$?\s*([0-9]+(?:[.,][0-9]{1,2})?)")
-# Amazon a-offscreen often uses "ILS&nbsp;126.29" / "EUR 12,99" (no leading $).
-_CURRENCY_AMOUNT_RE = re.compile(
-    r"(?:ils|eur|gbp|jpy|aud|cad|usd|try|sgd|aed|sar|pln|sek|nok|dkk|hkd|myr|nzd|chf|brl|mxn|inr)\s*"
-    r"([0-9]+(?:[.,][0-9]{1,2})?)",
-    re.IGNORECASE,
-)
 
 
 def _is_network_error(error: Exception) -> bool:
@@ -54,24 +46,6 @@ def parse_search_metadata(html: str) -> dict[str, Any]:
     if m2:
         out["marketplaceId"] = m2.group(1).upper()
     return out
-
-
-def _parse_price(raw_text: str) -> float | None:
-    if not raw_text:
-        return None
-    t = html_module.unescape(raw_text).replace("\xa0", " ").strip()
-    t_flat = t.replace(",", "")
-    matches = list(PRICE_RE.findall(t_flat))
-    matches += _CURRENCY_AMOUNT_RE.findall(t)
-    if not matches:
-        return None
-    values = []
-    for match in matches:
-        try:
-            values.append(float(match.replace(",", "")))
-        except ValueError:
-            continue
-    return min(values) if values else None
 
 
 def _extract_title(card) -> str:
@@ -103,21 +77,38 @@ def _extract_by_selectors(card, selectors: tuple[str, ...]) -> tuple[str, str | 
     return "", None
 
 
-def _extract_price(card, card_text: str) -> float | None:
+def _extract_price(card) -> float | None:
+    """List price from Amazon’s price UI only (`price-recipe` / `a-offscreen`). No whole-card scrape."""
+    price_recipe = card.query_selector('[data-cy="price-recipe"]')
+    if price_recipe:
+        for off in price_recipe.query_selector_all("span.a-price span.a-offscreen"):
+            raw = (off.inner_text() or "").strip()
+            value = card_list_price(raw)
+            if value is not None:
+                return value
+        blob = (price_recipe.inner_text() or "").strip()
+        value = card_list_price(blob)
+        if value is not None:
+            return value
+
     for selector in ("span.a-price span.a-offscreen", "span[data-a-color='base'] span.a-offscreen"):
         node = card.query_selector(selector)
         if not node:
             continue
-        value = _parse_price((node.inner_text() or "").strip())
-        if value is not None and value >= 5:
+        value = card_list_price((node.inner_text() or "").strip())
+        if value is not None:
             return value
-    value = _parse_price(card_text)
-    if value is None:
-        return None
-    return value if value >= 5 else None
+
+    return None
 
 
 def _extract_price_text(card) -> tuple[str, str | None]:
+    price_recipe = card.query_selector('[data-cy="price-recipe"]')
+    if price_recipe:
+        for off in price_recipe.query_selector_all("span.a-price span.a-offscreen"):
+            text = (off.inner_text() or "").strip()
+            if text:
+                return text, '[data-cy="price-recipe"] span.a-price span.a-offscreen'
     selectors = (
         "span.a-price span.a-offscreen",
         "span[data-a-color='base'] span.a-offscreen",
@@ -300,6 +291,143 @@ def _dedupe_products_by_asin(products: list[dict[str, Any]]) -> list[dict[str, A
     return list(by_asin.values())
 
 
+_ASIN_RE = re.compile(r"^[A-Z0-9]{10}$")
+
+
+def _valid_asin(value: str | None) -> bool:
+    return bool(value and _ASIN_RE.match(value.strip().upper()))
+
+
+def _scroll_serp_to_settle(page, scroll_delay_range: tuple[float, float], max_steps: int = 10) -> None:
+    """Step-scroll the results page so lazy-loaded rows/carousel tiles attach before querying."""
+    prev_h = -1
+    stable_rounds = 0
+    for _ in range(max_steps):
+        h = page.evaluate(
+            "() => Math.max(document.documentElement.scrollHeight, document.body && document.body.scrollHeight || 0)"
+        )
+        try:
+            h_int = int(h) if h is not None else 0
+        except (TypeError, ValueError):
+            h_int = 0
+        vh = page.evaluate("() => window.innerHeight") or 800
+        try:
+            vh_int = max(400, int(vh))
+        except (TypeError, ValueError):
+            vh_int = 800
+
+        if h_int > 0 and abs(h_int - prev_h) < 40:
+            stable_rounds += 1
+            if stable_rounds >= 2:
+                break
+        else:
+            stable_rounds = 0
+        prev_h = h_int
+
+        page.mouse.wheel(0, random.randint(int(vh_int * 0.55), int(vh_int * 0.95)))
+        time.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+
+
+def _collect_product_row(
+    card,
+    *,
+    source: str,
+    current_url: str,
+) -> dict[str, Any] | None:
+    """Build one product dict from a PUI card root (organic s-search-result or carousel tile)."""
+    a = (card.get_attribute("data-asin") or "").strip().upper()
+    if not _valid_asin(a):
+        return None
+
+    product_title = _extract_title(card)
+    card_text = card.inner_text()
+    price = _extract_price(card)
+    price_text, price_selector = _extract_price_text(card)
+    image_url = _extract_image_url(card)
+    availability_text, availability_selector = _extract_availability_text(card, card_text)
+    seller_text, seller_selector = _extract_seller_text(card)
+    shipping_text, shipping_selector = _extract_shipping_text(card)
+    product_url = _extract_product_url(card)
+    inner_html = card.inner_html() or ""
+
+    return {
+        "asin": a,
+        "title": product_title,
+        "price": price,
+        "price_text": price_text,
+        "in_stock": _stock_flag(availability_text),
+        "availability_text": availability_text,
+        "seller": seller_text or source,
+        "seller_text": seller_text,
+        "shipping_text": shipping_text,
+        "image_url": image_url,
+        "product_url": product_url,
+        "source": source,
+        "search_url": current_url,
+        "_debug": {
+            "price_selector": price_selector,
+            "seller_selector": seller_selector,
+            "shipping_selector": shipping_selector,
+            "availability_selector": availability_selector,
+            "inner_html": inner_html,
+        },
+    }
+
+
+def _append_debug_for_row(debug_data: dict[str, Any], row: dict[str, Any]) -> None:
+    d = row.get("_debug") or {}
+    inner = str(d.get("inner_html") or "")
+    debug_data["selector_debug"].append(
+        {
+            "asin": row.get("asin"),
+            "title_found": bool(row.get("title")),
+            "price_found": row.get("price") is not None,
+            "seller_found": bool(row.get("seller_text")),
+            "shipping_found": bool(row.get("shipping_text")),
+            "availability_found": bool(row.get("availability_text")),
+            "price_selector": d.get("price_selector"),
+            "seller_selector": d.get("seller_selector"),
+            "shipping_selector": d.get("shipping_selector"),
+            "availability_selector": d.get("availability_selector"),
+            "card_html_snippet": inner[:4000],
+        }
+    )
+
+
+def _strip_debug(row: dict[str, Any]) -> dict[str, Any]:
+    row.pop("_debug", None)
+    return row
+
+
+def _carousel_tile_roots(page) -> list[Any]:
+    """Thematic / sponsored horizontal tiles (not wrapped in data-component-type=s-search-result)."""
+    roots: list[Any] = []
+    seen_el: set[int] = set()
+    for sel in (
+        ".s-searchgrid-carousel div[data-asin]",
+        "[cel_widget_id*='FEATURED_ASINS_LIST'] div[data-asin].s-result-item",
+    ):
+        try:
+            nodes = page.query_selector_all(sel)
+        except Exception:
+            nodes = []
+        for node in nodes:
+            try:
+                key = id(node)
+            except Exception:
+                continue
+            if key in seen_el:
+                continue
+            seen_el.add(key)
+            asin = (node.get_attribute("data-asin") or "").strip()
+            if not _valid_asin(asin):
+                continue
+            if not node.query_selector('[data-cy="asin-faceout-container"]'):
+                continue
+            roots.append(node)
+    return roots
+
+
 def _scrape_single_attempt(
     search_url: str,
     source: str,
@@ -350,8 +478,7 @@ def _scrape_single_attempt(
                 raise CaptchaBlocked(f"Captcha detected while scraping {source}")
 
             page.wait_for_selector("div[data-component-type='s-search-result']", timeout=25000)
-            page.mouse.wheel(0, random.randint(300, 1300))
-            time.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+            _scroll_serp_to_settle(page, scroll_delay_range)
 
             html = page.content()
             if page_num == 1:
@@ -394,54 +521,30 @@ def _scrape_single_attempt(
                 except OSError as exc:
                     LOGGER.warning("Failed to write raw search HTML %s: %s", out_path, exc)
 
+            seen_asins_page: set[str] = set()
             cards = page.query_selector_all("div[data-component-type='s-search-result']")
             for card in cards:
-                asin = (card.get_attribute("data-asin") or "").strip()
-                if not asin:
+                row = _collect_product_row(card, source=source, current_url=current_url)
+                if not row:
                     continue
-                product_title = _extract_title(card)
-                card_text = card.inner_text()
-                price = _extract_price(card, card_text)
-                price_text, price_selector = _extract_price_text(card)
-                image_url = _extract_image_url(card)
-                availability_text, availability_selector = _extract_availability_text(card, card_text)
-                seller_text, seller_selector = _extract_seller_text(card)
-                shipping_text, shipping_selector = _extract_shipping_text(card)
-                product_url = _extract_product_url(card)
-                inner_html = card.inner_html() or ""
-
-                row = {
-                    "asin": asin,
-                    "title": product_title,
-                    "price": price,
-                    "price_text": price_text,
-                    "in_stock": _stock_flag(availability_text),
-                    "availability_text": availability_text,
-                    "seller": seller_text or source,
-                    "seller_text": seller_text,
-                    "shipping_text": shipping_text,
-                    "image_url": image_url,
-                    "product_url": product_url,
-                    "source": source,
-                    "search_url": current_url,
-                }
-                all_products.append(row)
+                if row["asin"] in seen_asins_page:
+                    continue
+                seen_asins_page.add(row["asin"])
                 if collect_debug:
-                    debug_data["selector_debug"].append(
-                        {
-                            "asin": asin,
-                            "title_found": bool(product_title),
-                            "price_found": price is not None,
-                            "seller_found": bool(seller_text),
-                            "shipping_found": bool(shipping_text),
-                            "availability_found": bool(availability_text),
-                            "price_selector": price_selector,
-                            "seller_selector": seller_selector,
-                            "shipping_selector": shipping_selector,
-                            "availability_selector": availability_selector,
-                            "card_html_snippet": inner_html[:4000],
-                        }
-                    )
+                    _append_debug_for_row(debug_data, row)
+                all_products.append(_strip_debug(dict(row)))
+
+            for card in _carousel_tile_roots(page):
+                a = (card.get_attribute("data-asin") or "").strip().upper()
+                if a in seen_asins_page:
+                    continue
+                row = _collect_product_row(card, source=source, current_url=current_url)
+                if not row:
+                    continue
+                seen_asins_page.add(row["asin"])
+                if collect_debug:
+                    _append_debug_for_row(debug_data, row)
+                all_products.append(_strip_debug(dict(row)))
 
             if page_num >= total_pages_cap:
                 break

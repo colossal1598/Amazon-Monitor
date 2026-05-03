@@ -86,11 +86,36 @@ def _title_signals_pokemon_tcg_scope(title: str) -> bool:
         return False
     if "tcg" in text or "trading card" in text:
         return True
-
+    # Scarlet & Violet and other SV-era lines often omit a literal "tcg" token in the visible title.
+    if "scarlet" in text or "violet" in text or "paldea" in text or "hisui" in text or "alola" in text:
+        return True
+    product_tokens = (
+        "booster",
+        "blister",
+        "elite trainer",
+        " etb",
+        " tin",
+        "ex box",
+        " battle deck",
+        "poster box",
+        "collection box",
+        "booster bundle",
+        "sleeve booster",
+        "three pack",
+        "blister pack",
+        "premium pro",
+        "mini portfolio",
+        "tech sticker",
+        "sticker collection",
+        "world championship",
+    )
+    if any(tok in text for tok in product_tokens):
+        return True
+    return False
 
 
 def _has_pokemon_tcg_title(title: str) -> bool:
-    return _title_signals_pokemon_tcg_scope(title)
+    return bool(_title_signals_pokemon_tcg_scope(title))
 
 
 def _is_valid_price(item: dict[str, Any]) -> bool:
