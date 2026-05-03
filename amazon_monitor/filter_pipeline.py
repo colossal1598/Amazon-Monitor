@@ -215,19 +215,45 @@ def filter_by_blacklist_only(
     return out
 
 
+def stage1_reject_reason(item: dict[str, Any]) -> str | None:
+    """If this row fails Stage 1, return a short machine reason; if it passes, return None."""
+    title = item.get("title") or ""
+    if not _has_pokemon_tcg_title(title):
+        return "no_pokemon_tcg_title"
+    if not _is_valid_price(item):
+        if item.get("price") is None:
+            return "no_price_on_card"
+        pt = _normalize_ascii(str(item.get("price_text") or ""))
+        if "see price" in pt:
+            return "see_price_placeholder"
+        return "invalid_price_value"
+    if not _has_shipping_qualifier_on_card(item):
+        return "no_shipping_or_delivery_signal"
+    return None
+
+
 def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Pokémon TCG title + valid price + any scraped shipping/delivery signal on the card."""
     out: list[dict[str, Any]] = []
     for item in raw_items:
-        title = item.get("title") or ""
-        if not _has_pokemon_tcg_title(title):
-            continue
-        if not _is_valid_price(item):
-            continue
-        if not _has_shipping_qualifier_on_card(item):
-            continue
-        out.append(dict(item))
+        if stage1_reject_reason(item) is None:
+            out.append(dict(item))
     return out
+
+
+def stage1_reject_report(raw_items: list[dict[str, Any]]) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    """Per-item reject reasons plus aggregate counts (for logs / meta)."""
+    counts: dict[str, int] = {}
+    rows: list[dict[str, Any]] = []
+    for item in raw_items:
+        reason = stage1_reject_reason(item)
+        if reason is None:
+            continue
+        counts[reason] = counts.get(reason, 0) + 1
+        asin = (item.get("asin") or "").strip().upper() or "?"
+        title = (item.get("title") or "").strip()
+        rows.append({"asin": asin, "reason": reason, "title": title[:200]})
+    return counts, rows
 
 
 def _url_mixes_free_shipping_and_seller_p6(search_url: str) -> bool:
@@ -300,6 +326,24 @@ def run_search_filter_pipeline(
     """Stage1 (Pokémon TCG + price + shipping/delivery line on card) + blacklist + keywords -> state-engine rows."""
     meta: dict[str, Any] = {"pipeline": "search"}
     _maybe_warn_incompatible_url_facets(raw_items, meta)
+    reject_counts, reject_rows = stage1_reject_report(raw_items)
+    meta["stage1_reject_counts"] = reject_counts
+    meta["stage1_rejects"] = reject_rows
+    if reject_counts:
+        LOGGER.info(
+            "search_stage1_reject_summary raw=%s passed=%s counts=%s",
+            len(raw_items),
+            len(raw_items) - sum(reject_counts.values()),
+            reject_counts,
+        )
+    if config.get("log_stage1_rejects_detail", True) and reject_rows:
+        for row in reject_rows:
+            LOGGER.info(
+                "search_stage1_reject asin=%s reason=%s title=%s",
+                row["asin"],
+                row["reason"],
+                (row.get("title") or "")[:160],
+            )
     stage1 = filter_stage1_candidates(raw_items)
     stage1 = _apply_blacklist_and_config_keywords(stage1, config)
     meta["stage1_count"] = len(stage1)
