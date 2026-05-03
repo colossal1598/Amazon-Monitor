@@ -86,9 +86,7 @@ def _title_signals_pokemon_tcg_scope(title: str) -> bool:
         return False
     if "tcg" in text or "trading card" in text:
         return True
-    if "scarlet" in text and "violet" in text:
-        return True
-    return False
+
 
 
 def _has_pokemon_tcg_title(title: str) -> bool:
@@ -146,8 +144,22 @@ def _has_shipping_qualifier_on_card(item: dict[str, Any]) -> bool:
     return False
 
 
+def _paid_delivery_price_tail(line: str) -> str:
+    """Compact tail after 'משלוח:' — prefer '54₪' from ₪ / ILS; else whole line."""
+    m = re.search(r"([0-9]+(?:[.,][0-9]{1,2})?)\s*₪", line)
+    if m:
+        return f"{m.group(1)}₪"
+    m = re.search(r"₪\s*([0-9]+(?:[.,][0-9]{1,2})?)", line)
+    if m:
+        return f"{m.group(1)}₪"
+    m = re.search(r"(?i)ils\s*[:\s]*([0-9]+(?:[.,][0-9]{1,2})?)", line)
+    if m:
+        return f"{m.group(1)}₪"
+    return line.strip()
+
+
 def shipping_display_hebrew(shipping_text: str | None) -> str:
-    """Single WhatsApp line: free -> 'משלוח חינם'; else one-line Amazon text + ' משלוח' (verbatim, any locale/currency)."""
+    """WhatsApp `{shipping}`: free -> 'משלוח חינם'; paid -> 'משלוח: 54₪' (ILS/₪) or 'משלוח: …' from the scraped line."""
     raw = (shipping_text or "").strip()
     line = " ".join(raw.split())
     blob_clean = _normalize_ascii(raw)
@@ -155,7 +167,7 @@ def shipping_display_hebrew(shipping_text: str | None) -> str:
         return "משלוח חינם"
     if not line:
         return "משלוח"
-    return f"{line} משלוח"
+    return f"משלוח: {_paid_delivery_price_tail(line)}"
 
 
 def filter_by_blacklist_only(

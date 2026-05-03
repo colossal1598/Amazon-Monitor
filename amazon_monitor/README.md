@@ -15,7 +15,7 @@ Edit `config.yaml`:
 - `search_urls.amazon_com` — Amazon.com slot SERP URL (filters/sort embedded in the link).
 - `search_urls.aes_llc` — Amazon Export Sales LLC seller-scoped URL.
 - **Do not rely on combining** free-shipping refines (`p_n_is_free_shipping` in `rh`) **with** seller refines (`p_6` / `emi`) in one Amazon search URL—Amazon often does not honor both. Stage1 only needs a **visible shipping/delivery line** on the card: non-empty **`shipping_text`** (from `div[data-cy="delivery-block"]` / `.udm-primary-delivery-message` when present), or **`delivery` / `shipping`** in the scraped blob, or **free** phrasing (`free delivery` / `free shipping`, or **חינם** on the line). No currency parsing.
-- **WhatsApp templates** — `{shipping}` is **`משלוח חינם`** when the line looks free (English free phrases or **חינם**), otherwise the **scraped delivery line as one line** plus **` משלוח`** (whatever Amazon showed: ILS, $, Hebrew, etc.). Put `{shipping}` on its own line.
+- **WhatsApp templates** — `{shipping}` is built in code (`filter_pipeline.shipping_display_hebrew`): **`משלוח חינם`** when free, else **`משלוח: 54₪`**-style (amount + ₪ when the line has **₪** or **ILS** + digits; otherwise **`משלוח:`** + the full scraped line). Edit that function to change wording or `$` handling.
 - `pagination_mode`: `auto` (derive page count from `totalResultCount` / `asinOnPageCount`) or `fixed` (use `search_pages`).
 - `max_search_pages`, `max_cycle_seconds`, `search_pages`, `required_keywords`, `required_any_keywords`, `blacklist_file`, WhatsApp fields, `db_path`, etc.
 
