@@ -41,6 +41,15 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def _should_emit_new_product_alert(new_stock: int, new_price: float | None) -> bool:
+    """First DB row for an ASIN only triggers WhatsApp when the offer is plausibly buyable."""
+    if new_stock != 1:
+        return False
+    if new_price is None or new_price <= 0:
+        return False
+    return True
+
+
 class StateEngine:
     """Tracks products, detects changes, and records generated alerts."""
 
@@ -212,8 +221,6 @@ class StateEngine:
 
                 row = self._fetch_product(asin)
                 if row is None:
-                    nd = decide_new_product(is_first_observation=True)
-                    assert nd.emit and nd.alert_type is not None
                     self.conn.execute(
                         """
                         INSERT INTO products
@@ -222,18 +229,28 @@ class StateEngine:
                         """,
                         (asin, title, seller, new_price, new_stock, now, now),
                     )
-                    alert = self._build_alert(
-                        nd.alert_type,
-                        "search",
-                        asin,
-                        title,
-                        new_price,
-                        image_url=image_url,
-                        shipping=ship_line,
-                    )
-                    alerts.append(alert)
-                    self._record_alert(alert)
-                    new_count += 1
+                    if _should_emit_new_product_alert(new_stock, new_price):
+                        nd = decide_new_product(is_first_observation=True)
+                        assert nd.emit and nd.alert_type is not None
+                        alert = self._build_alert(
+                            nd.alert_type,
+                            "search",
+                            asin,
+                            title,
+                            new_price,
+                            image_url=image_url,
+                            shipping=ship_line,
+                        )
+                        alerts.append(alert)
+                        self._record_alert(alert)
+                        new_count += 1
+                    else:
+                        LOGGER.info(
+                            "product_seeded_no_new_alert asin=%s in_stock=%s price=%s",
+                            asin,
+                            new_stock,
+                            new_price,
+                        )
                     continue
 
                 old_price = _as_float(row["price"])
@@ -355,8 +372,6 @@ class StateEngine:
 
                 row = self._fetch_product(asin)
                 if row is None:
-                    nd = decide_new_product(is_first_observation=True)
-                    assert nd.emit and nd.alert_type is not None
                     self.conn.execute(
                         """
                         INSERT INTO products
@@ -365,18 +380,28 @@ class StateEngine:
                         """,
                         (asin, title, seller, new_price, new_stock, now, now),
                     )
-                    alert = self._build_alert(
-                        nd.alert_type,
-                        source,
-                        asin,
-                        title,
-                        new_price,
-                        image_url=image_url,
-                        shipping=ship_line,
-                    )
-                    alerts.append(alert)
-                    self._record_alert(alert)
-                    new_count += 1
+                    if _should_emit_new_product_alert(new_stock, new_price):
+                        nd = decide_new_product(is_first_observation=True)
+                        assert nd.emit and nd.alert_type is not None
+                        alert = self._build_alert(
+                            nd.alert_type,
+                            source,
+                            asin,
+                            title,
+                            new_price,
+                            image_url=image_url,
+                            shipping=ship_line,
+                        )
+                        alerts.append(alert)
+                        self._record_alert(alert)
+                        new_count += 1
+                    else:
+                        LOGGER.info(
+                            "pdp_watch_seeded_no_new_alert asin=%s in_stock=%s price=%s",
+                            asin,
+                            new_stock,
+                            new_price,
+                        )
                     continue
 
                 old_price = _as_float(row["price"])

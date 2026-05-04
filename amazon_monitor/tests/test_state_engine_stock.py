@@ -39,6 +39,36 @@ class TestStateEngineSearchStock(unittest.TestCase):
             finally:
                 se.conn.close()
 
+    def test_first_row_no_new_alert_when_oos_or_no_price(self) -> None:
+        """New ASIN is inserted but no new_product WhatsApp when unavailable or price missing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "m.db"
+            se = StateEngine(str(db), price_drop_percent=10)
+            try:
+                now = "2020-01-01T00:00:00+00:00"
+                alerts = se.process_search_candidates(
+                    [
+                        {
+                            "asin": "B033333333",
+                            "title": "Pokemon TCG X",
+                            "price": None,
+                            "in_stock": False,
+                            "shipping_text": "FREE delivery",
+                            "image_url": None,
+                            "seller": "search",
+                        }
+                    ],
+                    reconcile_missing=False,
+                )
+                self.assertEqual(alerts, [])
+                row = se.conn.execute(
+                    "SELECT in_stock, price FROM products WHERE asin = ?", ("B033333333",)
+                ).fetchone()
+                self.assertEqual(int(row[0]), 0)
+                self.assertIsNone(row[1])
+            finally:
+                se.conn.close()
+
     def test_reconcile_skips_pdp_exclude_asins(self) -> None:
         """SERP absence reconcile must not OOS ASINs excluded (e.g. PDP watch list)."""
         with tempfile.TemporaryDirectory() as tmp:
