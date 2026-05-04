@@ -260,18 +260,29 @@ def _maybe_warn_incompatible_url_facets(
     meta["warn_incompatible_url_facets"] = "free_shipping_plus_p_6"
 
 
+def _title_hits_blacklist(title_norm: str, phrases_norm: list[str]) -> str | None:
+    """Return the first normalized blacklist phrase found as a substring of ``title_norm``, or None."""
+    for phrase in phrases_norm:
+        if phrase and phrase in title_norm:
+            return phrase
+    return None
+
+
 def _apply_required_keywords_and_yaml_blacklist(
     candidates: list[dict[str, Any]],
     config: dict[str, Any],
     yaml_blacklist: set[str],
     whitelist: set[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """YAML blacklist ASINs drop first (wins over whitelist); whitelist skips required_keywords.
+    """YAML blacklist ASINs drop first (wins over whitelist); whitelist skips required_keywords and title blacklist.
 
     Returns (kept_products, drop_rows) with asin, reason, detail, title_snip per drop.
     """
     req_kw_raw = config.get("required_keywords") or []
     req_norm = [_normalize_text(k) for k in req_kw_raw if str(k).strip()]
+
+    bl_raw = config.get("title_blacklist_phrases") or []
+    title_bl_norm = [_normalize_text(str(p)) for p in bl_raw if str(p).strip()]
 
     drops: list[dict[str, Any]] = []
     final: list[dict[str, Any]] = []
@@ -300,6 +311,18 @@ def _apply_required_keywords_and_yaml_blacklist(
         if asin in whitelist:
             final.append(product)
             continue
+        if title_bl_norm:
+            hit = _title_hits_blacklist(title, title_bl_norm)
+            if hit is not None:
+                drops.append(
+                    {
+                        "asin": asin,
+                        "reason": "title_blacklist_phrase",
+                        "detail": hit,
+                        "title_snip": title_snip,
+                    }
+                )
+                continue
         failed_kw: str | None = None
         for kw in req_norm:
             if not _keyword_matches_title(title, kw, raw_title):

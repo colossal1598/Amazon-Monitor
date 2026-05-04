@@ -14,7 +14,9 @@ from dotenv import load_dotenv
 from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, NetworkAccessDenied
 from filter_pipeline import keep_asins_not_in_db, run_search_filter_pipeline
-from search_scraper import scrape_search
+from alert_dedupe import dedupe_alerts_by_asin
+from pdp_scraper import scrape_pdp_watch
+from search_scraper import _valid_asin, scrape_search
 from state_engine import StateEngine
 from webhook_sender import send_alert, send_heartbeat, send_operational_error
 
@@ -75,6 +77,20 @@ def setup_logging(log_dir: str) -> None:
 
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_pdp_watch_asins(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for x in raw:
+        a = str(x).strip().upper()
+        if not _valid_asin(a) or a in seen:
+            continue
+        seen.add(a)
+        out.append(a)
+    return out
 
 
 def main() -> None:
@@ -179,13 +195,13 @@ def main() -> None:
                     skipped_reason,
                     len(amazon_com_filtered),
                 )
+            all_alerts: list[dict[str, Any]] = []
             alerts = state_engine.process_search_candidates(
                 amazon_com_filtered,
                 reconcile_missing=reconcile_missing,
                 source="main_search",
             )
-            for alert in alerts:
-                send_alert(alert, config)
+            all_alerts.extend(alerts)
 
             aes_items, _ = scrape_search(
                 aes_llc_url,
@@ -214,7 +230,29 @@ def main() -> None:
                 reconcile_missing=False,
                 source="main_search",
             )
-            for alert in alerts_new:
+            all_alerts.extend(alerts_new)
+
+            watch_list = _normalize_pdp_watch_asins(config.get("pdp_watch_asins"))
+            if watch_list:
+                allowed_raw = config.get("pdp_allowed_seller_substrings")
+                allowed_subs = (
+                    [str(x) for x in allowed_raw if str(x).strip()]
+                    if isinstance(allowed_raw, list)
+                    else ["amazon.com", "amazon export"]
+                )
+                pdp_rows = scrape_pdp_watch(
+                    watch_list,
+                    allowed_subs,
+                    max_cycle_seconds=max_cycle_seconds,
+                    scroll_delay_range=scroll_r,
+                )
+                pdp_alerts = state_engine.process_pdp_watch_candidates(
+                    pdp_rows,
+                    set(watch_list),
+                )
+                all_alerts.extend(pdp_alerts)
+
+            for alert in dedupe_alerts_by_asin(all_alerts):
                 send_alert(alert, config)
 
             mark_job_success("search")
