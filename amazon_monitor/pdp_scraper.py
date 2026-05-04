@@ -16,6 +16,10 @@ from search_scraper import _valid_asin
 
 LOGGER = logging.getLogger(__name__)
 
+# ~15s worst-case per ASIN (goto + title wait); odd PDPs must not block search_loop.
+_PDP_GOTO_TIMEOUT_MS = 12_000
+_PDP_TITLE_WAIT_MS = 3_000
+
 _PRICE_RE = re.compile(r"\$?\s*([0-9][0-9,]*)(?:\.(\d{2}))?")
 
 
@@ -62,38 +66,42 @@ def _parse_price_text(text: str) -> float | None:
 
 
 def _extract_pdp_price(page) -> float | None:
-    for locator in (
-        page.locator("#corePrice_feature_div .a-price .a-offscreen").first,
-        page.locator("#corePriceDisplay_desktop_feature_div .a-price .a-offscreen").first,
-        page.locator(".reinventPricePriceToPayMargin .a-price .a-offscreen").first,
-        page.locator("#tp_price_block_total_price_ww .a-offscreen").first,
-        page.locator("span.a-price.a-text-price .a-offscreen").first,
+    """Use query_selector only (no locator auto-wait) so missing buy box returns fast."""
+    for sel in (
+        "#corePrice_feature_div .a-price .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
+        ".reinventPricePriceToPayMargin .a-price .a-offscreen",
+        "#tp_price_block_total_price_ww .a-offscreen",
+        "span.a-price.a-text-price .a-offscreen",
     ):
         try:
-            raw = (locator.text_content() or "").strip()
+            el = page.query_selector(sel)
+            if not el:
+                continue
+            raw = (el.inner_text() or "").strip()
         except Exception:
             raw = ""
         p = _parse_price_text(raw)
         if p is not None:
             return p
-    whole = page.locator(".a-price-whole").first
-    frac = page.locator(".a-price-fraction").first
     try:
-        w = (whole.inner_text() or "").strip().replace(",", "")
-        f = (frac.inner_text() or "").strip()
+        whole = page.query_selector(".a-price-whole")
+        frac = page.query_selector(".a-price-fraction")
+        if whole and frac:
+            w = (whole.inner_text() or "").strip().replace(",", "")
+            f = (frac.inner_text() or "").strip()
+            if w.isdigit() and f.isdigit():
+                return float(f"{w}.{f}")
     except Exception:
         return None
-    if w.isdigit() and f.isdigit():
-        try:
-            return float(f"{w}.{f}")
-        except ValueError:
-            return None
     return None
 
 
 def _extract_pdp_title(page) -> str:
     try:
-        node = page.locator("#productTitle").first
+        node = page.query_selector("#productTitle") or page.query_selector("#title")
+        if not node:
+            return ""
         return (node.inner_text() or "").strip()
     except Exception:
         return ""
@@ -102,7 +110,10 @@ def _extract_pdp_title(page) -> str:
 def _extract_pdp_image(page) -> str | None:
     for sel in ("#landingImage", "#imgBlkFront", "#main-image"):
         try:
-            href = page.locator(sel).first.get_attribute("src")
+            el = page.query_selector(sel)
+            if not el:
+                continue
+            href = el.get_attribute("src")
             if href and href.startswith("http"):
                 return href.strip()
         except Exception:
@@ -118,7 +129,10 @@ def _extract_pdp_shipping(page) -> str:
         "[data-cy='delivery-recipe']",
     ):
         try:
-            t = (page.locator(sel).first.inner_text() or "").strip()
+            el = page.query_selector(sel)
+            if not el:
+                continue
+            t = (el.inner_text() or "").strip()
             if t:
                 return t
         except Exception:
@@ -205,6 +219,8 @@ def scrape_pdp_watch(
     cycle_started = time.monotonic()
     try:
         page = context.new_page()
+        page.set_default_timeout(2_000)
+        page.set_default_navigation_timeout(_PDP_GOTO_TIMEOUT_MS)
         for idx, asin in enumerate(normalized):
             if time.monotonic() - cycle_started > max_cycle_seconds:
                 LOGGER.warning(
@@ -230,7 +246,7 @@ def scrape_pdp_watch(
 
             url = f"https://www.amazon.com/dp/{asin}"
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=55_000)
+                page.goto(url, wait_until="domcontentloaded", timeout=_PDP_GOTO_TIMEOUT_MS)
             except Exception as e:
                 if _is_network_error(e):
                     raise NetworkAccessDenied(f"PDP network error for {asin}: {e}", e) from e
@@ -254,7 +270,10 @@ def scrape_pdp_watch(
                 raise CaptchaBlocked(f"Captcha on PDP {asin}")
 
             try:
-                page.wait_for_selector("#productTitle, #title", timeout=25_000)
+                try:
+                    page.wait_for_selector("#productTitle, #title, h1.a-size-large", timeout=_PDP_TITLE_WAIT_MS)
+                except Exception:
+                    pass
                 title = _extract_pdp_title(page) or (page.title() or "").strip()
                 merchant_blob = _pdp_merchant_blob(page)
                 price = _extract_pdp_price(page)
