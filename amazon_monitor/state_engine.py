@@ -135,23 +135,41 @@ class StateEngine:
             "shipping": shipping,
         }
 
-    def _mark_missing_asins_out_of_stock(self, seen_asins: set[str], _source: str, now: str) -> int:
+    def _mark_missing_asins_out_of_stock(
+        self,
+        seen_asins: set[str],
+        _source: str,
+        now: str,
+        exclude_asins: set[str] | None = None,
+    ) -> int:
         """Mark tracked ASINs absent from this healthy run as out-of-stock.
 
         Single-tenant DB: scope by ASIN only (seller column holds display names like
         'Amazon.com', not a shared bucket string).
+
+        ``exclude_asins`` (e.g. PDP watch list): never marked OOS here—stock for those rows
+        comes from the PDP pass, not SERP presence.
         """
         if not seen_asins:
             return 0
-        placeholders = ",".join("?" for _ in seen_asins)
-        params: list[Any] = [now, *sorted(seen_asins)]
+        excl = {str(a).upper() for a in (exclude_asins or ()) if a}
+        seen_sorted = sorted(seen_asins)
+        ph_seen = ",".join("?" for _ in seen_sorted)
+        params: list[Any] = [now, *seen_sorted]
+        extra_not_in = ""
+        if excl:
+            ex_sorted = sorted(excl)
+            ph_ex = ",".join("?" for _ in ex_sorted)
+            extra_not_in = f" AND asin NOT IN ({ph_ex})"
+            params.extend(ex_sorted)
         cursor = self.conn.execute(
             f"""
             UPDATE products
             SET in_stock = 0,
                 last_seen = ?
             WHERE in_stock != 0
-              AND asin NOT IN ({placeholders})
+              AND asin NOT IN ({ph_seen})
+              {extra_not_in}
             """,
             params,
         )
@@ -162,11 +180,14 @@ class StateEngine:
         candidates: list[dict[str, Any]],
         reconcile_missing: bool = False,
         source: str = "amazon_export",
+        reconcile_exclude_asins: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Process scraped search candidates and emit new/stock/price alerts.
 
         When `reconcile_missing` is true, any tracked ASIN for the same source
         that is absent from this successful run is marked out-of-stock.
+
+        ``reconcile_exclude_asins``: ASINs not subject to that absence rule (e.g. PDP-only watches).
         """
         alerts: list[dict[str, Any]] = []
         seen_asins: set[str] = set()
@@ -275,16 +296,19 @@ class StateEngine:
                         price_drop_count += 1
             marked_oos_count = 0
             if reconcile_missing:
-                marked_oos_count = self._mark_missing_asins_out_of_stock(seen_asins, source, utc_iso())
+                marked_oos_count = self._mark_missing_asins_out_of_stock(
+                    seen_asins, source, utc_iso(), reconcile_exclude_asins
+                )
             LOGGER.info(
                 "search_reconcile seen_count=%s new_count=%s marked_oos_count=%s "
-                "back_in_stock_count=%s price_drop_count=%s reconcile_missing=%s",
+                "back_in_stock_count=%s price_drop_count=%s reconcile_missing=%s reconcile_excluded=%s",
                 len(seen_asins),
                 new_count,
                 marked_oos_count,
                 back_in_stock_count,
                 price_drop_count,
                 reconcile_missing,
+                len(reconcile_exclude_asins or ()),
             )
             self.conn.commit()
         return alerts

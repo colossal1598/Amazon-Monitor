@@ -169,6 +169,8 @@ def main() -> None:
         mark_job_started("search")
         scroll_r, page_r = scrape_delay_ranges(config)
         try:
+            pdp_watch_set = set(_normalize_pdp_watch_asins(config.get("pdp_watch_asins")))
+
             amazon_com_items, _ = scrape_search(
                 amazon_com_url,
                 source=amazon_com_src,
@@ -200,6 +202,7 @@ def main() -> None:
                 amazon_com_filtered,
                 reconcile_missing=reconcile_missing,
                 source="main_search",
+                reconcile_exclude_asins=pdp_watch_set,
             )
             all_alerts.extend(alerts)
 
@@ -232,7 +235,7 @@ def main() -> None:
             )
             all_alerts.extend(alerts_new)
 
-            watch_list = _normalize_pdp_watch_asins(config.get("pdp_watch_asins"))
+            watch_list = sorted(pdp_watch_set)
             if watch_list:
                 allowed_raw = config.get("pdp_allowed_seller_substrings")
                 allowed_subs = (
