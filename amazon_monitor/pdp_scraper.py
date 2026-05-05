@@ -18,7 +18,7 @@ LOGGER = logging.getLogger(__name__)
 
 # ~15s worst-case per ASIN (goto + title wait); odd PDPs must not block search_loop.
 _PDP_GOTO_TIMEOUT_MS = 12_000
-_PDP_TITLE_WAIT_MS = 3_000
+_PDP_TITLE_WAIT_MS = 8_000
 
 _PRICE_RE = re.compile(r"\$?\s*([0-9][0-9,]*)(?:\.(\d{2}))?")
 
@@ -215,7 +215,7 @@ def scrape_pdp_watch(
         LOGGER.warning("pdp_watch: no allowed_seller_substrings; all rows will be out of stock")
 
     results: list[dict[str, Any]] = []
-    context = create_stealth_context(persistent_dir=None, headless=False)
+    context = create_stealth_context(persistent_dir=None, headless=True)
     cycle_started = time.monotonic()
     try:
         page = context.new_page()

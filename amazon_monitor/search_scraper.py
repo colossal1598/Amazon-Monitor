@@ -445,7 +445,7 @@ def _scrape_single_attempt(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_products: list[dict[str, Any]] = []
     debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}}
-    context = create_stealth_context(persistent_dir=None, headless=False)
+    context = create_stealth_context(persistent_dir=None, headless=True)
     cycle_started = time.monotonic()
     total_pages_cap = 1
     page_meta_first: dict[str, Any] = {}
