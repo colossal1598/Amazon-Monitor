@@ -13,11 +13,12 @@ from dotenv import load_dotenv
 
 from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, NetworkAccessDenied
-from filter_pipeline import keep_asins_not_in_db, run_search_filter_pipeline
+from filter_pipeline import run_search_filter_pipeline
 from alert_dedupe import dedupe_alerts_by_asin
 import fx_rate
 from pdp_scraper import scrape_pdp_watch
 from search_scraper import _valid_asin, scrape_search
+from search_union import merge_search_candidates_by_asin, should_reconcile_missing_asins
 from state_engine import StateEngine
 from webhook_sender import send_alert, send_heartbeat, send_operational_error
 
@@ -48,15 +49,6 @@ def scrape_delay_ranges(config: dict[str, Any]) -> tuple[tuple[float, float], tu
     s = config.get("search_scroll_delay_seconds") or [0.25, 0.65]
     p = config.get("search_pagination_delay_seconds") or [2.0, 4.5]
     return (float(s[0]), float(s[1])), (float(p[0]), float(p[1]))
-
-
-def should_reconcile_missing_asins(config: dict, filtered_count: int) -> tuple[bool, str | None]:
-    if not config.get("enable_missing_asin_oos", True):
-        return False, "disabled_by_config"
-    min_results = int(config.get("min_results_for_absence_reconcile", 1))
-    if filtered_count < min_results:
-        return False, f"filtered_count_below_min:{filtered_count}<{min_results}"
-    return True, None
 
 
 def load_config(path: str = "config.yaml") -> dict:
@@ -191,21 +183,7 @@ def main() -> None:
                 amazon_com_meta.get("stage1_count"),
                 len(amazon_com_filtered),
             )
-            reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(amazon_com_filtered))
-            if skipped_reason:
-                LOGGER.info(
-                    "search_reconcile_skipped reason=%s filtered_count=%s",
-                    skipped_reason,
-                    len(amazon_com_filtered),
-                )
             all_alerts: list[dict[str, Any]] = []
-            alerts = state_engine.process_search_candidates(
-                amazon_com_filtered,
-                reconcile_missing=reconcile_missing,
-                source="main_search",
-                reconcile_exclude_asins=pdp_watch_set,
-            )
-            all_alerts.extend(alerts)
 
             aes_items, _ = scrape_search(
                 aes_llc_url,
@@ -220,21 +198,35 @@ def main() -> None:
                 pagination_delay_range=page_r,
             )
             aes_filtered, aes_meta = run_search_filter_pipeline(aes_items, config)
-            known = state_engine.list_known_asins()
-            aes_only = keep_asins_not_in_db(aes_filtered, known)
             LOGGER.info(
-                "search_aes_llc raw=%s stage1=%s filtered=%s not_in_db=%s",
+                "search_aes_llc raw=%s stage1=%s filtered=%s",
                 len(aes_items),
                 aes_meta.get("stage1_count"),
                 len(aes_filtered),
-                len(aes_only),
             )
-            alerts_new = state_engine.process_search_candidates(
-                aes_only,
-                reconcile_missing=False,
+
+            search_candidates = merge_search_candidates_by_asin(amazon_com_filtered, aes_filtered)
+            reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(search_candidates))
+            LOGGER.info(
+                "search_union amazon_com_filtered=%s aes_filtered=%s union_count=%s reconcile_missing=%s",
+                len(amazon_com_filtered),
+                len(aes_filtered),
+                len(search_candidates),
+                reconcile_missing,
+            )
+            if skipped_reason:
+                LOGGER.info(
+                    "search_reconcile_skipped reason=%s union_count=%s",
+                    skipped_reason,
+                    len(search_candidates),
+                )
+            alerts = state_engine.process_search_candidates(
+                search_candidates,
+                reconcile_missing=reconcile_missing,
                 source="main_search",
+                reconcile_exclude_asins=pdp_watch_set,
             )
-            all_alerts.extend(alerts_new)
+            all_alerts.extend(alerts)
 
             watch_list = sorted(pdp_watch_set)
             if watch_list:
