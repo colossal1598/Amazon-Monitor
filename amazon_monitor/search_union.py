@@ -22,6 +22,17 @@ def should_reconcile_missing_asins(config: dict, filtered_count: int) -> tuple[b
     return True, None
 
 
+def exclude_asins_from_candidates(
+    rows: list[dict[str, Any]],
+    exclude: set[str] | None,
+) -> list[dict[str, Any]]:
+    """Drop rows whose ASIN is in ``exclude`` (used to keep PDP watch ASINs out of SERP updates)."""
+    if not exclude:
+        return list(rows)
+    excl = {str(a or "").strip().upper() for a in exclude}
+    return [row for row in rows if (row.get("asin") or "").strip().upper() not in excl]
+
+
 def merge_search_candidates_by_asin(*candidate_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge filtered SERP rows into one presence-derived observation per ASIN."""
     by_asin: dict[str, dict[str, Any]] = {}

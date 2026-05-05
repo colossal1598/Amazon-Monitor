@@ -13,12 +13,16 @@ from dotenv import load_dotenv
 
 from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, NetworkAccessDenied
-from filter_pipeline import run_search_filter_pipeline
+from filter_pipeline import filter_free_shipping_candidates, run_search_filter_pipeline
 from alert_dedupe import dedupe_alerts_by_asin
 import fx_rate
 from pdp_scraper import scrape_pdp_watch
 from search_scraper import _valid_asin, scrape_search
-from search_union import merge_search_candidates_by_asin, should_reconcile_missing_asins
+from search_union import (
+    exclude_asins_from_candidates,
+    merge_search_candidates_by_asin,
+    should_reconcile_missing_asins,
+)
 from state_engine import StateEngine
 from webhook_sender import send_alert, send_heartbeat, send_operational_error
 
@@ -177,10 +181,13 @@ def main() -> None:
                 pagination_delay_range=page_r,
             )
             amazon_com_filtered, amazon_com_meta = run_search_filter_pipeline(amazon_com_items, config)
+            amazon_com_filtered_before_free = len(amazon_com_filtered)
+            amazon_com_filtered = filter_free_shipping_candidates(amazon_com_filtered)
             LOGGER.info(
-                "search_amazon_com raw=%s stage1=%s filtered=%s",
+                "search_amazon_com raw=%s stage1=%s filtered_before_free_shipping=%s filtered_free_shipping=%s",
                 len(amazon_com_items),
                 amazon_com_meta.get("stage1_count"),
+                amazon_com_filtered_before_free,
                 len(amazon_com_filtered),
             )
             all_alerts: list[dict[str, Any]] = []
@@ -205,13 +212,17 @@ def main() -> None:
                 len(aes_filtered),
             )
 
-            search_candidates = merge_search_candidates_by_asin(amazon_com_filtered, aes_filtered)
+            merged_candidates = merge_search_candidates_by_asin(amazon_com_filtered, aes_filtered)
+            search_candidates = exclude_asins_from_candidates(merged_candidates, pdp_watch_set)
+            pdp_excluded_from_search = len(merged_candidates) - len(search_candidates)
             reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(search_candidates))
             LOGGER.info(
-                "search_union amazon_com_filtered=%s aes_filtered=%s union_count=%s reconcile_missing=%s",
+                "search_union amazon_com_filtered=%s aes_filtered=%s union_count=%s "
+                "pdp_excluded_from_search=%s reconcile_missing=%s",
                 len(amazon_com_filtered),
                 len(aes_filtered),
                 len(search_candidates),
+                pdp_excluded_from_search,
                 reconcile_missing,
             )
             if skipped_reason:
