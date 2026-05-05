@@ -4,6 +4,8 @@ from typing import Any
 
 import requests
 
+import fx_rate
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -72,10 +74,30 @@ class _SafeDict(dict):
         return ""
 
 
-def _display_price(value: Any) -> str:
+def _format_usd(value: Any) -> str:
+    """Always show product price as USD with $ prefix (numeric alerts are stored as USD)."""
     if value is None:
         return "לא זמין"
-    return str(value)
+    try:
+        return f"${float(value):.2f}"
+    except (TypeError, ValueError):
+        return "לא זמין"
+
+
+def _price_line_parts(amount: Any, config: dict[str, Any]) -> tuple[str, str, str]:
+    """Returns (full_line_with_optional_ils, usd_only, ils_suffix_or_empty)."""
+    usd = _format_usd(amount)
+    if usd == "לא זמין":
+        return usd, usd, ""
+    rate = fx_rate.get_usd_ils(config)
+    if rate is None or rate <= 0:
+        return usd, usd, ""
+    try:
+        ils = int(round(float(amount) * rate))
+    except (TypeError, ValueError):
+        return usd, usd, ""
+    suffix = f" (~₪{ils} est)"
+    return usd + suffix, usd, suffix
 
 
 def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> str:
@@ -83,10 +105,25 @@ def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> st
     price = alert_payload.get("price")
     old_price = alert_payload.get("old_price")
     new_price = alert_payload.get("new_price")
-    if alert_type == "price_drop" and old_price:
-        price_text = f"{_display_price(old_price)} -> {_display_price(new_price or price)}"
+    if alert_type == "price_drop" and old_price is not None:
+        left_full, usd_l, ils_l = _price_line_parts(old_price, config)
+        right_full, usd_r, ils_r = _price_line_parts(
+            new_price if new_price is not None else price, config
+        )
+        price_text = f"{left_full} -> {right_full}"
+        price_text_usd_only = f"{usd_l} -> {usd_r}"
+        if ils_l and ils_r:
+            price_text_ils_suffix = f"{ils_l} -> {ils_r}"
+        elif ils_l:
+            price_text_ils_suffix = ils_l
+        elif ils_r:
+            price_text_ils_suffix = ils_r
+        else:
+            price_text_ils_suffix = ""
     else:
-        price_text = _display_price(new_price or price)
+        price_text, price_text_usd_only, price_text_ils_suffix = _price_line_parts(
+            new_price if new_price is not None else price, config
+        )
 
     templates = DEFAULT_MESSAGE_TEMPLATES.copy()
     user_templates = config.get("wa_message_templates")
@@ -100,14 +137,16 @@ def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> st
             "asin": alert_payload.get("asin"),
             "title": alert_payload.get("title") or "Untitled item",
             "price": price,
-            "old_price": _display_price(old_price),
-            "new_price": _display_price(new_price),
+            "old_price": _format_usd(old_price),
+            "new_price": _format_usd(new_price if new_price is not None else price),
             "pct_drop": alert_payload.get("pct_drop"),
             "source": alert_payload.get("source"),
             "image_url": alert_payload.get("image_url"),
             "affiliate_link": alert_payload.get("affiliate_link"),
             "timestamp": alert_payload.get("timestamp"),
             "price_text": price_text,
+            "price_text_usd_only": price_text_usd_only,
+            "price_text_ils_suffix": price_text_ils_suffix,
             "error_message": alert_payload.get("error_message"),
             "shipping": (alert_payload.get("shipping") or "").strip(),
         }

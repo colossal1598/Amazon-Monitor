@@ -15,6 +15,7 @@ from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, NetworkAccessDenied
 from filter_pipeline import keep_asins_not_in_db, run_search_filter_pipeline
 from alert_dedupe import dedupe_alerts_by_asin
+import fx_rate
 from pdp_scraper import scrape_pdp_watch
 from search_scraper import _valid_asin, scrape_search
 from state_engine import StateEngine
@@ -259,6 +260,7 @@ def main() -> None:
                 send_alert(alert, config)
 
             mark_job_success("search")
+            fx_rate.bump_search_tick(config)
         except CaptchaBlocked:
             mark_job_error("search", "CaptchaBlocked")
             send_operational_error("search_error", "CaptchaBlocked: scraping paused then resumed", config)

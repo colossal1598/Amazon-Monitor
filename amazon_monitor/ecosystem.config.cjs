@@ -25,7 +25,7 @@ module.exports = {
     {
       name: "wa-server",
       cwd: waServerRoot,
-      script: "index.js",
+      script: "server.js",
       autorestart: true,
       max_restarts: 20,
       exp_backoff_restart_delay: 3000,
