@@ -16,7 +16,7 @@ module.exports = {
       name: "amazon-monitor",
       cwd: monitorRoot,
       script: "main.py",
-      interpreter: "python",
+      interpreter: ".\\.venv\\Scripts\\python.exe",
       autorestart: true,
       max_restarts: 20,
       exp_backoff_restart_delay: 3000,
