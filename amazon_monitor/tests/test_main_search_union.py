@@ -1,6 +1,10 @@
 import unittest
 
-from search_union import merge_search_candidates_by_asin, should_reconcile_missing_asins
+from search_union import (
+    exclude_asins_from_candidates,
+    merge_search_candidates_by_asin,
+    should_reconcile_missing_asins,
+)
 
 
 class TestMainSearchUnion(unittest.TestCase):
@@ -47,6 +51,24 @@ class TestMainSearchUnion(unittest.TestCase):
         self.assertEqual(rows[0]["title"], "Explicit In Stock SERP Row")
         self.assertEqual(rows[0]["price"], 21.99)
         self.assertTrue(rows[0]["in_stock"])
+
+    def test_pdp_watch_asins_are_excluded_from_serp_candidates(self) -> None:
+        merged = merge_search_candidates_by_asin(
+            [
+                {"asin": "B011111111", "title": "Watched", "price": 10.0, "in_stock": True},
+                {"asin": "B022222222", "title": "Free SERP", "price": 20.0, "in_stock": True},
+            ],
+            [{"asin": "b033333333", "title": "AES Only", "price": 30.0, "in_stock": True}],
+        )
+
+        filtered = exclude_asins_from_candidates(merged, {"b011111111"})
+
+        self.assertEqual({row["asin"] for row in filtered}, {"B022222222", "B033333333"})
+
+    def test_exclude_handles_empty_set(self) -> None:
+        merged = [{"asin": "B011111111"}, {"asin": "B022222222"}]
+        self.assertEqual(exclude_asins_from_candidates(merged, None), merged)
+        self.assertEqual(exclude_asins_from_candidates(merged, set()), merged)
 
     def test_reconcile_decision_uses_candidate_count_threshold(self) -> None:
         config = {"enable_missing_asin_oos": True, "min_results_for_absence_reconcile": 2}

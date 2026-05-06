@@ -169,6 +169,13 @@ def shipping_display_hebrew(shipping_text: str | None) -> str:
     raw = (shipping_text or "").strip()
     line = " ".join(raw.split())
     blob_clean = _normalize_ascii(raw)
+    low = blob_clean.lower()
+    if (
+        "cannot be shipped to your selected delivery location" in low
+        or "can't be shipped to your selected delivery location" in low
+        or "choose a different delivery location" in low
+    ):
+        return "משלוח: לא ניתן לשלוח לכתובת שנבחרה"
     if _shipping_line_looks_free(line, blob_clean):
         return "משלוח חינם"
     if not line:

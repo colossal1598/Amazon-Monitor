@@ -339,28 +339,38 @@ class StateEngine:
     ) -> list[dict[str, Any]]:
         """Apply PDP watch scrape rows: same alert rules as search, no global SERP reconcile.
 
-        Expects one candidate per watched ASIN (gaps filled with OOS placeholders). Only ASINs in
-        ``watch_asins`` are processed.
+        Per-ASIN PDP failures are surfaced as ``_skip_update=True`` markers and intentionally
+        leave the existing DB row untouched. Watched ASINs missing entirely from ``candidates``
+        are also left untouched so a single broken page never falsely flips a product OOS.
+        Only ASINs in ``watch_asins`` are processed.
         """
         alerts: list[dict[str, Any]] = []
         new_count = 0
         back_in_stock_count = 0
         price_drop_count = 0
-        by_asin = {(item.get("asin") or "").upper(): item for item in candidates if item.get("asin")}
+        skipped_update_count = 0
+        by_asin: dict[str, dict[str, Any]] = {}
+        for item in candidates:
+            asin_key = (item.get("asin") or "").upper()
+            if not asin_key:
+                continue
+            by_asin[asin_key] = item
         watch_upper = {a.upper() for a in watch_asins}
         with self.lock:
             for asin in sorted(watch_upper):
                 item = by_asin.get(asin)
                 if item is None:
-                    item = {
-                        "asin": asin,
-                        "title": "",
-                        "price": None,
-                        "in_stock": False,
-                        "shipping_text": "",
-                        "image_url": None,
-                        "seller": source,
-                    }
+                    LOGGER.info("pdp_watch_no_row asin=%s (DB unchanged)", asin)
+                    skipped_update_count += 1
+                    continue
+                if item.get("_skip_update"):
+                    LOGGER.info(
+                        "pdp_watch_skip_update asin=%s reason=%s (DB unchanged)",
+                        asin,
+                        item.get("skip_reason") or "unknown",
+                    )
+                    skipped_update_count += 1
+                    continue
                 title = normalize_title_line(item.get("title"))
                 seller = item.get("seller") or source
                 image_url = item.get("image_url")
@@ -466,12 +476,13 @@ class StateEngine:
             missing_candidates = len(watch_upper - set(by_asin.keys()))
             LOGGER.info(
                 "pdp_watch candidate_rows=%s watch=%s new_count=%s back_in_stock_count=%s price_drop_count=%s "
-                "asins_without_scrape_row=%s",
+                "skipped_update_count=%s asins_without_scrape_row=%s",
                 len(by_asin),
                 len(watch_upper),
                 new_count,
                 back_in_stock_count,
                 price_drop_count,
+                skipped_update_count,
                 missing_candidates,
             )
             self.conn.commit()

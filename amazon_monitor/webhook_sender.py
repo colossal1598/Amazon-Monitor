@@ -96,7 +96,7 @@ def _price_line_parts(amount: Any, config: dict[str, Any]) -> tuple[str, str, st
         ils = int(round(float(amount) * rate))
     except (TypeError, ValueError):
         return usd, usd, ""
-    suffix = f" (~₪{ils} est)"
+    suffix = f" (כ- {ils}₪)"
     return usd + suffix, usd, suffix
 
 

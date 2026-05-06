@@ -39,6 +39,7 @@ def merchant_matches_allowed(merchant_blob: str, allowed_substrings: list[str]) 
 
 
 def _is_network_error(error: Exception) -> bool:
+    """True only for clear global-network failures; a single-page timeout is per-ASIN, not global."""
     err_str = str(error).lower()
     network_patterns = (
         "err_network_access_denied",
@@ -48,7 +49,6 @@ def _is_network_error(error: Exception) -> bool:
         "err_connection_timed_out",
         "err_internet_disconnected",
         "net::err_",
-        "timeout",
     )
     return any(p in err_str for p in network_patterns)
 
@@ -162,6 +162,19 @@ def _pdp_merchant_blob(page) -> str:
     return "\n".join(parts)
 
 
+def _is_not_shippable(shipping_text: str) -> bool:
+    """True when Amazon explicitly states the item can't ship to the selected location."""
+    t = _normalize_for_match(shipping_text or "")
+    patterns = (
+        "cannot be shipped to your selected delivery location",
+        "can't be shipped to your selected delivery location",
+        "cannot be delivered to your selected delivery location",
+        "can't be delivered to your selected delivery location",
+        "choose a different delivery location",
+    )
+    return any(p in t for p in patterns)
+
+
 def _pdp_row(
     asin: str,
     *,
@@ -173,6 +186,8 @@ def _pdp_row(
     allowed: list[str],
 ) -> dict[str, Any]:
     qualifies = price is not None and merchant_matches_allowed(merchant_blob, allowed)
+    if _is_not_shippable(shipping_text):
+        qualifies = False
     return {
         "asin": asin,
         "title": title,
@@ -183,6 +198,16 @@ def _pdp_row(
         "seller": "pdp_watch",
         "seller_text": merchant_blob[:2000],
         "product_url": f"https://www.amazon.com/dp/{asin}",
+        "source": "pdp_watch",
+    }
+
+
+def _pdp_skip_row(asin: str, reason: str) -> dict[str, Any]:
+    """Marker row for one-page operational failures: state engine must not touch the DB row."""
+    return {
+        "asin": asin,
+        "_skip_update": True,
+        "skip_reason": reason,
         "source": "pdp_watch",
     }
 
@@ -224,21 +249,11 @@ def scrape_pdp_watch(
         for idx, asin in enumerate(normalized):
             if time.monotonic() - cycle_started > max_cycle_seconds:
                 LOGGER.warning(
-                    "PDP watch cycle budget exceeded (elapsed=%.1fs); marking remaining ASINs OOS",
+                    "PDP watch cycle budget exceeded (elapsed=%.1fs); skipping remaining ASINs (DB unchanged)",
                     time.monotonic() - cycle_started,
                 )
                 for rest in normalized[idx:]:
-                    results.append(
-                        _pdp_row(
-                            rest,
-                            title="",
-                            price=None,
-                            shipping_text="",
-                            image_url=None,
-                            merchant_blob="",
-                            allowed=allowed,
-                        )
-                    )
+                    results.append(_pdp_skip_row(rest, "cycle_budget_exceeded"))
                 break
 
             if browser_factory.global_rate_limiter:
@@ -250,18 +265,8 @@ def scrape_pdp_watch(
             except Exception as e:
                 if _is_network_error(e):
                     raise NetworkAccessDenied(f"PDP network error for {asin}: {e}", e) from e
-                LOGGER.warning("PDP goto failed asin=%s: %s", asin, e)
-                results.append(
-                    _pdp_row(
-                        asin,
-                        title="",
-                        price=None,
-                        shipping_text="",
-                        image_url=None,
-                        merchant_blob="",
-                        allowed=allowed,
-                    )
-                )
+                LOGGER.warning("PDP goto failed asin=%s: %s (skipping update)", asin, e)
+                results.append(_pdp_skip_row(asin, "goto_failed"))
                 time.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                 continue
 
@@ -291,18 +296,8 @@ def scrape_pdp_watch(
                     )
                 )
             except Exception as exc:
-                LOGGER.warning("PDP row parse failed asin=%s: %s", asin, exc)
-                results.append(
-                    _pdp_row(
-                        asin,
-                        title="",
-                        price=None,
-                        shipping_text="",
-                        image_url=None,
-                        merchant_blob="",
-                        allowed=allowed,
-                    )
-                )
+                LOGGER.warning("PDP row parse failed asin=%s: %s (skipping update)", asin, exc)
+                results.append(_pdp_skip_row(asin, "parse_failed"))
             time.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
     finally:
         close_context(context)
