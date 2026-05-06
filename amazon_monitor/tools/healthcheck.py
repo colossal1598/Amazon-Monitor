@@ -6,6 +6,7 @@ from pathlib import Path
 HEALTH_FILE = Path("data/health.json")
 
 
+# Turn a saved timestamp string into a datetime so we can check how old the last success was.
 def parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -15,6 +16,7 @@ def parse_dt(value: str | None) -> datetime | None:
         return None
 
 
+# Check the monitor’s health file and exit with a non-zero code when jobs are stale or have recent errors.
 def main() -> int:
     if not HEALTH_FILE.exists():
         print("FAIL: health file not found at data/health.json")

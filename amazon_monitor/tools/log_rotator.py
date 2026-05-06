@@ -1,6 +1,7 @@
 from pathlib import Path
 
 
+# Keep your logs folder tidy by deleting older rotated monitor log files and keeping only the newest few.
 def cleanup_old_logs(log_dir: str = "logs", keep: int = 5) -> None:
     path = Path(log_dir)
     if not path.exists():

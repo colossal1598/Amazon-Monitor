@@ -23,6 +23,7 @@ USER_AGENTS = [
 
 
 class TokenBucketRateLimiter:
+    # Set up a simple “budget” of requests so the scraper doesn’t hit Amazon too fast.
     def __init__(self, capacity: int, refill_per_second: float) -> None:
         self.capacity = max(1, capacity)
         self.tokens = float(self.capacity)
@@ -30,6 +31,7 @@ class TokenBucketRateLimiter:
         self.last_refill = time.monotonic()
         self.lock = threading.Lock()
 
+    # Wait until it’s “safe” to make another request by spending tokens and sleeping when we run out.
     def acquire(self, tokens: float = 1.0) -> None:
         while True:
             with self.lock:
@@ -48,6 +50,7 @@ global_rate_limiter: Optional[TokenBucketRateLimiter] = None
 STEALTH = Stealth()
 
 
+# Create one shared rate limiter for the whole run so every scrape call follows the same speed limit.
 def init_global_rate_limiter(max_requests_per_minute: int) -> TokenBucketRateLimiter:
     global global_rate_limiter
     global_rate_limiter = TokenBucketRateLimiter(
@@ -57,10 +60,12 @@ def init_global_rate_limiter(max_requests_per_minute: int) -> TokenBucketRateLim
     return global_rate_limiter
 
 
+# Apply the “look like a real browser” tweaks to a page as soon as it appears.
 def _stealth_page(page) -> None:
     STEALTH.apply_stealth_sync(page)
 
 
+# Start a Playwright browser context that tries to look human (location, language, headers) so scraping is less likely to get blocked.
 def create_stealth_context(
     persistent_dir: Optional[str] = None,
     headless: bool = False,
@@ -99,6 +104,7 @@ def create_stealth_context(
     return context
 
 
+# Close the browser cleanly and also stop the Playwright runner we started with it.
 def close_context(context: BrowserContext) -> None:
     pw_runner = getattr(context, "_pw_runner", None)
     context.close()

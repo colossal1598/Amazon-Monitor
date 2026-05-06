@@ -12,6 +12,7 @@ from typing import Any
 import browser_factory
 from browser_factory import close_context, create_stealth_context
 from exceptions import CaptchaBlocked, NetworkAccessDenied
+from filter_pipeline import row_has_free_shipping
 from search_scraper import _valid_asin
 
 LOGGER = logging.getLogger(__name__)
@@ -23,11 +24,13 @@ _PDP_TITLE_WAIT_MS = 8_000
 _PRICE_RE = re.compile(r"\$?\s*([0-9][0-9,]*)(?:\.(\d{2}))?")
 
 
+# Simplify text into an easy-to-compare form so seller and shipping wording matches even when formatting differs.
 def _normalize_for_match(value: str) -> str:
     decomposed = unicodedata.normalize("NFKD", (value or "").lower().strip())
     return decomposed.encode("ascii", "ignore").decode("ascii")
 
 
+# Check if the product’s seller/shipping text includes any of the allowed seller hints you configured.
 def merchant_matches_allowed(merchant_blob: str, allowed_substrings: list[str]) -> bool:
     """True if any normalized substring appears in the normalized merchant/shipping blob."""
     blob = _normalize_for_match(merchant_blob)
@@ -38,6 +41,7 @@ def merchant_matches_allowed(merchant_blob: str, allowed_substrings: list[str]) 
     return False
 
 
+# Recognize “the whole connection is failing” errors so the monitor can pause and recover instead of treating it like a single bad product page.
 def _is_network_error(error: Exception) -> bool:
     """True only for clear global-network failures; a single-page timeout is per-ASIN, not global."""
     err_str = str(error).lower()
@@ -53,6 +57,7 @@ def _is_network_error(error: Exception) -> bool:
     return any(p in err_str for p in network_patterns)
 
 
+# Pull a usable price number out of a chunk of page text so we can decide if the offer is actually buyable.
 def _parse_price_text(text: str) -> float | None:
     m = _PRICE_RE.search(text or "")
     if not m:
@@ -65,6 +70,7 @@ def _parse_price_text(text: str) -> float | None:
         return None
 
 
+# Try a few known Amazon page spots to find the buy-box price and return quickly when the page doesn’t have one.
 def _extract_pdp_price(page) -> float | None:
     """Use query_selector only (no locator auto-wait) so missing buy box returns fast."""
     for sel in (
@@ -97,6 +103,7 @@ def _extract_pdp_price(page) -> float | None:
     return None
 
 
+# Read the product’s visible title from the page so alerts show a clean name instead of a generic page title.
 def _extract_pdp_title(page) -> str:
     try:
         node = page.query_selector("#productTitle") or page.query_selector("#title")
@@ -107,6 +114,7 @@ def _extract_pdp_title(page) -> str:
         return ""
 
 
+# Grab a main product image URL (when available) so WhatsApp alerts can include a picture.
 def _extract_pdp_image(page) -> str | None:
     for sel in ("#landingImage", "#imgBlkFront", "#main-image"):
         try:
@@ -121,6 +129,7 @@ def _extract_pdp_image(page) -> str | None:
     return None
 
 
+# Extract the delivery/shipping message from the product page so alerts can show whether it ships to your location.
 def _extract_pdp_shipping(page) -> str:
     for sel in (
         "#deliveryBlockMessage",
@@ -140,6 +149,7 @@ def _extract_pdp_shipping(page) -> str:
     return ""
 
 
+# Collect the page’s merchant and buy-box text into one blob so we can confirm the seller matches what you allow.
 def _pdp_merchant_blob(page) -> str:
     parts: list[str] = []
     for sel in (
@@ -162,6 +172,7 @@ def _pdp_merchant_blob(page) -> str:
     return "\n".join(parts)
 
 
+# Detect the “can’t ship to your address” message so we don’t treat the item as in stock for you.
 def _is_not_shippable(shipping_text: str) -> bool:
     """True when Amazon explicitly states the item can't ship to the selected location."""
     t = _normalize_for_match(shipping_text or "")
@@ -175,6 +186,7 @@ def _is_not_shippable(shipping_text: str) -> bool:
     return any(p in t for p in patterns)
 
 
+# Build one standardized row for the state engine from a PDP scrape so the rest of the monitor can treat it like a normal observation.
 def _pdp_row(
     asin: str,
     *,
@@ -187,6 +199,8 @@ def _pdp_row(
 ) -> dict[str, Any]:
     qualifies = price is not None and merchant_matches_allowed(merchant_blob, allowed)
     if _is_not_shippable(shipping_text):
+        qualifies = False
+    if qualifies and not row_has_free_shipping({"shipping_text": shipping_text}):
         qualifies = False
     return {
         "asin": asin,
@@ -202,6 +216,7 @@ def _pdp_row(
     }
 
 
+# Create a “do not update this ASIN” marker when a single product page fails, so a bad scrape doesn’t flip the database state.
 def _pdp_skip_row(asin: str, reason: str) -> dict[str, Any]:
     """Marker row for one-page operational failures: state engine must not touch the DB row."""
     return {
@@ -212,6 +227,7 @@ def _pdp_skip_row(asin: str, reason: str) -> dict[str, Any]:
     }
 
 
+# Visit each watched product page and return a simple stock/price snapshot for each ASIN without letting one slow page break the whole cycle.
 def scrape_pdp_watch(
     asins: list[str],
     allowed_seller_substrings: list[str],

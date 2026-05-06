@@ -13,14 +13,17 @@ from filter_pipeline import normalize_title_line, shipping_display_hebrew
 LOGGER = logging.getLogger(__name__)
 
 
+# Get “right now” in UTC so all timestamps in the database and alerts line up.
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Turn a datetime into a standard text timestamp (or use the current time if none was given).
 def utc_iso(dt: datetime | None = None) -> str:
     return (dt or utc_now()).isoformat()
 
 
+# Convert a stored timestamp string back into a datetime so we can compare times like cooldown windows.
 def parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -30,6 +33,7 @@ def parse_dt(value: str | None) -> datetime | None:
         return None
 
 
+# Safely turn something into a number we can compare as a price, returning None when it’s missing or invalid.
 def _as_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -41,6 +45,7 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+# Decide if a first-time-seen product is “good enough to message about” by requiring it to look in-stock and have a real price.
 def _should_emit_new_product_alert(new_stock: int, new_price: float | None) -> bool:
     """First DB row for an ASIN only triggers WhatsApp when the offer is plausibly buyable."""
     if new_stock != 1:
@@ -53,6 +58,7 @@ def _should_emit_new_product_alert(new_stock: int, new_price: float | None) -> b
 class StateEngine:
     """Tracks products, detects changes, and records generated alerts."""
 
+    # Create the database connection and configure how big a price drop must be to alert.
     def __init__(self, db_path: str, price_drop_percent: float) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +70,7 @@ class StateEngine:
         self.init_db()
         self._price_alert_cooldown = timedelta(hours=24)
 
+    # Create the tables we need (products + alerts) so the monitor can remember what it saw between runs.
     def init_db(self) -> None:
         with self.lock:
             self.conn.executescript(
@@ -93,15 +100,18 @@ class StateEngine:
             )
             self.conn.commit()
 
+    # Look up the saved product row for an ASIN so we can compare “before” vs “now”.
     def _fetch_product(self, asin: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM products WHERE asin = ?", (asin,)).fetchone()
 
+    # List all ASINs we’re already tracking so other parts of the pipeline can avoid re-seeding duplicates.
     def list_known_asins(self) -> set[str]:
         """All ASINs currently in the products table (uppercase)."""
         with self.lock:
             rows = self.conn.execute("SELECT asin FROM products").fetchall()
         return {str(r[0]).upper() for r in rows if r and r[0]}
 
+    # Save an alert record into the database so you have a history of what was sent and when.
     def _record_alert(self, alert: dict[str, Any]) -> None:
         self.conn.execute(
             "INSERT INTO alerts (asin, alert_type, source, old_price, new_price, sent_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -115,6 +125,7 @@ class StateEngine:
             ),
         )
 
+    # Create the standard alert dictionary that the WhatsApp sender expects, including percent drop when relevant.
     def _build_alert(
         self,
         alert_type: str,
@@ -144,6 +155,7 @@ class StateEngine:
             "shipping": shipping,
         }
 
+    # Mark tracked products as out of stock when they don’t show up in a healthy run, unless they’re excluded (like PDP-watch items).
     def _mark_missing_asins_out_of_stock(
         self,
         seen_asins: set[str],
@@ -184,6 +196,7 @@ class StateEngine:
         )
         return cursor.rowcount
 
+    # Update the database from search-page results and generate alerts for new items, back-in-stock, and price drops.
     def process_search_candidates(
         self,
         candidates: list[dict[str, Any]],
@@ -330,6 +343,7 @@ class StateEngine:
             self.conn.commit()
         return alerts
 
+    # Update the database from watched product-page checks and generate alerts, while skipping updates for pages that failed to scrape.
     def process_pdp_watch_candidates(
         self,
         candidates: list[dict[str, Any]],

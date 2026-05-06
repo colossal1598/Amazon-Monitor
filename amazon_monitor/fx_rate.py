@@ -18,11 +18,13 @@ _cached_usd_ils: float | None = None
 _search_ticks: int = 0
 
 
+# Decide where to store the saved exchange rate on disk so it survives restarts.
 def _cache_path(config: dict[str, Any]) -> Path:
     raw = config.get("fx_cache_path") or "data/fx_usd_ils.json"
     return Path(str(raw))
 
 
+# Load a previously saved USD→ILS rate from disk so alerts can show ILS even before the first network refresh.
 def _load_cache_file(config: dict[str, Any]) -> None:
     global _cached_usd_ils
     path = _cache_path(config)
@@ -37,6 +39,7 @@ def _load_cache_file(config: dict[str, Any]) -> None:
         LOGGER.warning("fx_rate: could not read cache %s: %s", path, exc)
 
 
+# Save the latest USD→ILS rate to disk so the monitor can keep using it after restarts.
 def _write_cache_file(config: dict[str, Any], rate: float) -> None:
     path = _cache_path(config)
     try:
@@ -52,6 +55,7 @@ def _write_cache_file(config: dict[str, Any], rate: float) -> None:
         LOGGER.warning("fx_rate: could not write cache %s: %s", path, exc)
 
 
+# Use a configured “good enough” fallback rate when the live lookup fails, so price messages can still include ILS.
 def _fallback_rate(config: dict[str, Any]) -> float | None:
     v = config.get("fx_fallback_usd_ils")
     if v is None:
@@ -63,6 +67,7 @@ def _fallback_rate(config: dict[str, Any]) -> float | None:
         return None
 
 
+# Fetch the latest USD→ILS rate from the internet so WhatsApp price lines can show an approximate ILS value.
 def _fetch_usd_ils(config: dict[str, Any]) -> float | None:
     timeout = float(config.get("fx_request_timeout_seconds", 5) or 5)
     try:
@@ -79,6 +84,7 @@ def _fetch_usd_ils(config: dict[str, Any]) -> float | None:
         return None
 
 
+# Refresh the in-memory rate and update the cache file, falling back to config or disk when the live fetch isn’t available.
 def _fetch_and_cache(config: dict[str, Any]) -> None:
     global _cached_usd_ils
     rate = _fetch_usd_ils(config)
@@ -98,6 +104,7 @@ def _fetch_and_cache(config: dict[str, Any]) -> None:
             LOGGER.info("fx_rate: restored from file usd_ils=%.4f", _cached_usd_ils)
 
 
+# Count successful search cycles and occasionally refresh the exchange rate so alerts don’t go stale without calling the network too often.
 def bump_search_tick(config: dict[str, Any]) -> None:
     """Call once per successful search_loop. Refreshes FX every ``fx_refresh_every_runs`` ticks."""
     global _search_ticks, _cached_usd_ils
@@ -113,6 +120,7 @@ def bump_search_tick(config: dict[str, Any]) -> None:
         _fetch_and_cache(config)
 
 
+# Return the best available USD→ILS rate (from memory, disk, or fallback) so message formatting can add an approximate ILS amount.
 def get_usd_ils(config: dict[str, Any]) -> float | None:
     """Effective ILS per 1 USD for formatting (memory, file cache, or fallback)."""
     global _cached_usd_ils

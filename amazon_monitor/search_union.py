@@ -9,10 +9,12 @@ from typing import Any
 _ASIN_RE = re.compile(r"^[A-Z0-9]{10}$")
 
 
+# Check if a string looks like a real Amazon ASIN so we don’t track garbage IDs.
 def _valid_asin(value: str | None) -> bool:
     return bool(value and _ASIN_RE.match(value.strip().upper()))
 
 
+# Decide if it’s safe to mark missing items as “out of stock” by checking your config and making sure we have enough results this run.
 def should_reconcile_missing_asins(config: dict, filtered_count: int) -> tuple[bool, str | None]:
     if not config.get("enable_missing_asin_oos", True):
         return False, "disabled_by_config"
@@ -22,6 +24,7 @@ def should_reconcile_missing_asins(config: dict, filtered_count: int) -> tuple[b
     return True, None
 
 
+# Remove certain ASINs from the search results so items you watch via product pages don’t get updated by the search-page pass.
 def exclude_asins_from_candidates(
     rows: list[dict[str, Any]],
     exclude: set[str] | None,
@@ -33,6 +36,7 @@ def exclude_asins_from_candidates(
     return [row for row in rows if (row.get("asin") or "").strip().upper() not in excl]
 
 
+# Combine multiple filtered search result lists into one “best row per ASIN” list so the state engine sees only one snapshot per product.
 def merge_search_candidates_by_asin(*candidate_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge filtered SERP rows into one presence-derived observation per ASIN."""
     by_asin: dict[str, dict[str, Any]] = {}

@@ -13,6 +13,7 @@ HTML_PATH = ROOT / "tools" / "config_editor_he.html"
 SCRIPTS_DIR = ROOT / "scripts"
 
 
+# Read the current YAML config from disk (or return an empty config if it doesn’t exist yet).
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         return {}
@@ -21,11 +22,13 @@ def load_config() -> dict:
     return data
 
 
+# Save an updated config back to YAML so the monitor will use it on the next run.
 def save_config(updated: dict) -> None:
     with CONFIG_PATH.open("w", encoding="utf-8") as f:
         yaml.safe_dump(updated, f, allow_unicode=True, sort_keys=False)
 
 
+# Prepare a browser-safe copy of the config by stripping secrets so you can edit settings without exposing keys.
 def config_for_client(cfg: dict) -> dict:
     """Copy safe for browser — omits secrets."""
     out = dict(cfg)
@@ -33,18 +36,21 @@ def config_for_client(cfg: dict) -> dict:
     return out
 
 
+# Turn a “min/max” style input into a clean pair of numbers, falling back to defaults when needed.
 def _coerce_float_pair(raw: Any, default: tuple[float, float]) -> tuple[float, float]:
     if isinstance(raw, (list, tuple)) and len(raw) >= 2:
         return float(raw[0]), float(raw[1])
     return default
 
 
+# Clean up a list of strings from the editor so it becomes a neat list without empty items.
 def _normalize_string_list(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [str(x).strip() for x in raw if str(x).strip()]
 
 
+# Apply the web editor’s changes onto the config while keeping sensitive fields (like the API key) untouched.
 def apply_config_payload(cfg: dict, payload: dict) -> None:
     """Merge editor payload into cfg. Never touches wa_api_key."""
     search = payload.get("search")
@@ -150,6 +156,7 @@ def apply_config_payload(cfg: dict, payload: dict) -> None:
     cfg.pop("blacklist_file", None)
 
 
+# Restart the monitor scripts (and optionally the WhatsApp service) so config changes take effect without manual steps.
 def restart_services(cfg: dict) -> None:
     stop_script = SCRIPTS_DIR / "stop_monitor.ps1"
     start_script = SCRIPTS_DIR / "start_monitor.ps1"
@@ -174,6 +181,7 @@ def restart_services(cfg: dict) -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Send a JSON response in a consistent way so the frontend can reliably parse success and error replies.
     def _json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -182,6 +190,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # Serve the HTML editor page and provide a read-only config endpoint for the browser.
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
@@ -199,6 +208,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(404, {"ok": False, "error": "not_found"})
 
+    # Accept config changes from the browser, validate required fields, save them, and optionally restart services.
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path != "/api/config":
@@ -227,6 +237,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "restarted": restart_requested})
 
 
+# Run a tiny local web server so you can edit `config.yaml` in a friendly Hebrew UI.
 def main() -> None:
     server = HTTPServer(("127.0.0.1", 8765), Handler)
     print("Hebrew config editor running at http://127.0.0.1:8765")

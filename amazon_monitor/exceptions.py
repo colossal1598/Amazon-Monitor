@@ -8,6 +8,7 @@ class NetworkAccessDenied(Exception):
     This is retryable — unlike captcha which requires IP rotation.
     """
 
+    # Build a clear error you can log and keep the original failure attached for later troubleshooting.
     def __init__(self, message: str, original_error: Exception | None = None) -> None:
         super().__init__(message)
         self.original_error = original_error

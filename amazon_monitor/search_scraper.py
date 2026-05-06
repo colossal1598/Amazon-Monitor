@@ -21,6 +21,7 @@ ScrapeMode = Literal["featured_full", "newest_front"]
 PaginationMode = Literal["auto", "fixed"]
 
 
+# Recognize the “internet is blocked/broken” kinds of failures so the monitor can pause and recover instead of just retrying a page forever.
 def _is_network_error(error: Exception) -> bool:
     err_str = str(error).lower()
     network_patterns = [
@@ -36,6 +37,7 @@ def _is_network_error(error: Exception) -> bool:
     return any(p in err_str for p in network_patterns)
 
 
+# Read the page’s built-in metadata so we can estimate how many pages exist and stop scraping at a sensible point.
 def parse_search_metadata(html: str) -> dict[str, Any]:
     """Parse Amazon s-metadata JSON blob for pagination and marketplace id."""
     out: dict[str, Any] = {"totalResultCount": None, "asinOnPageCount": None, "marketplaceId": None}
@@ -49,6 +51,7 @@ def parse_search_metadata(html: str) -> dict[str, Any]:
     return out
 
 
+# Pull a human-readable product title from a search result card by trying a few common spots until something looks good.
 def _extract_title(card) -> str:
     selectors = (
         "[data-cy='title-recipe']",
@@ -67,6 +70,7 @@ def _extract_title(card) -> str:
     return ""
 
 
+# Try a list of selectors and return the first non-empty text plus which selector worked (useful for debugging).
 def _extract_by_selectors(card, selectors: tuple[str, ...]) -> tuple[str, str | None]:
     for selector in selectors:
         node = card.query_selector(selector)
@@ -78,6 +82,7 @@ def _extract_by_selectors(card, selectors: tuple[str, ...]) -> tuple[str, str | 
     return "", None
 
 
+# Get the product’s card price (as a number) by reading Amazon’s visible price elements on the search card.
 def _extract_price(card) -> float | None:
     """List price from Amazon’s price UI only (`price-recipe` / `a-offscreen`). No whole-card scrape."""
     price_recipe = card.query_selector('[data-cy="price-recipe"]')
@@ -103,6 +108,7 @@ def _extract_price(card) -> float | None:
     return None
 
 
+# Get the “price as text” from the card (like “$12.34”) so we can log or display what Amazon actually showed.
 def _extract_price_text(card) -> tuple[str, str | None]:
     price_recipe = card.query_selector('[data-cy="price-recipe"]')
     if price_recipe:
@@ -117,6 +123,7 @@ def _extract_price_text(card) -> tuple[str, str | None]:
     return _extract_by_selectors(card, selectors)
 
 
+# Turn availability wording into a simple in-stock / out-of-stock guess for alerts and state tracking.
 def _stock_flag(text: str) -> bool:
     lowered = (text or "").lower()
     out_of_stock_terms = (
@@ -134,6 +141,7 @@ def _stock_flag(text: str) -> bool:
     return any(term in lowered for term in in_stock_terms)
 
 
+# Find the best availability text we can (or fall back to the whole card text) so stock guessing has something to work with.
 def _extract_availability_text(card, card_text: str) -> tuple[str, str | None]:
     selectors = (
         "span.a-size-base.a-color-price",
@@ -144,6 +152,7 @@ def _extract_availability_text(card, card_text: str) -> tuple[str, str | None]:
     return (text or card_text, selector)
 
 
+# Decide whether a chunk of text is probably the “sold by / ships from” info and not something unrelated like reviews.
 def _looks_like_seller_blob(value: str) -> bool:
     text = _normalize_ascii(value)
     if not text:
@@ -158,6 +167,7 @@ def _looks_like_seller_blob(value: str) -> bool:
     )
 
 
+# Simplify text into a plain form so matching works even when Amazon adds symbols, accents, or odd spacing.
 def _normalize_ascii(value: str) -> str:
     decomposed = unicodedata.normalize("NFKD", (value or "").lower().strip())
     return decomposed.encode("ascii", "ignore").decode("ascii")
@@ -175,6 +185,7 @@ _SELLER_DOM_REGION_SELECTORS: tuple[str, ...] = (
 )
 
 
+# Pull the primary delivery message from Amazon’s newer delivery block, which is often the cleanest shipping signal on the card.
 def _extract_delivery_block_primary(card) -> tuple[str, str | None]:
     """Amazon UDM delivery row: data-cy=delivery-block, primary line often in udm-primary-delivery-message."""
     block = card.query_selector('div[data-cy="delivery-block"]')
@@ -191,6 +202,7 @@ def _extract_delivery_block_primary(card) -> tuple[str, str | None]:
     return "", None
 
 
+# Extract the “sold by / ships from” text from the card so later filters can keep only the sellers you care about.
 def _extract_seller_text(card) -> tuple[str, str | None]:
     for selector in _SELLER_DOM_REGION_SELECTORS:
         node = card.query_selector(selector)
@@ -224,6 +236,7 @@ def _extract_seller_text(card) -> tuple[str, str | None]:
     return "", None
 
 
+# Pull older-style shipping hints from the card for cases where the newer delivery block isn’t present.
 def _extract_shipping_text_legacy(card) -> tuple[str, str | None]:
     selectors = (
         "span:has-text('FREE Shipping')",
@@ -234,6 +247,7 @@ def _extract_shipping_text_legacy(card) -> tuple[str, str | None]:
     return _extract_by_selectors(card, selectors)
 
 
+# Get the best shipping/delivery text we can from the card, preferring the main delivery block and falling back to older hints.
 def _extract_shipping_text(card) -> tuple[str, str | None]:
     """Prefer SERP delivery-block (matches PDP-style UDM); fall back to legacy span hints."""
     text, sel = _extract_delivery_block_primary(card)
@@ -242,6 +256,7 @@ def _extract_shipping_text(card) -> tuple[str, str | None]:
     return _extract_shipping_text_legacy(card)
 
 
+# Find a reasonably large product image URL so WhatsApp alerts can include a picture when available.
 def _extract_image_url(card) -> str | None:
     image_el = card.query_selector("img.s-image")
     if not image_el:
@@ -264,6 +279,7 @@ def _extract_image_url(card) -> str | None:
     return src.strip() if src else None
 
 
+# Build a full product link from the search card so alerts can point straight to the item.
 def _extract_product_url(card) -> str | None:
     link = card.query_selector("h2 a")
     if not link:
@@ -274,6 +290,7 @@ def _extract_product_url(card) -> str | None:
     return urljoin("https://www.amazon.com", href)
 
 
+# Create the next-page URL by setting the “page=” query value so we can paginate without guessing link structures.
 def _set_page_param(search_url: str, page_num: int) -> str:
     parsed = urlparse(search_url)
     query = parse_qs(parsed.query, keep_blank_values=True)
@@ -282,6 +299,7 @@ def _set_page_param(search_url: str, page_num: int) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
 
+# Keep only the latest row per ASIN so the final output list doesn’t contain duplicates from multiple cards or tiles.
 def _dedupe_products_by_asin(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_asin: dict[str, dict[str, Any]] = {}
     for p in products:
@@ -295,10 +313,12 @@ def _dedupe_products_by_asin(products: list[dict[str, Any]]) -> list[dict[str, A
 _ASIN_RE = re.compile(r"^[A-Z0-9]{10}$")
 
 
+# Check if an ASIN looks valid so we skip empty or malformed card entries.
 def _valid_asin(value: str | None) -> bool:
     return bool(value and _ASIN_RE.match(value.strip().upper()))
 
 
+# Slowly scroll the results page until it settles so lazy-loaded cards and tiles have a chance to appear before we collect them.
 def _scroll_serp_to_settle(page, scroll_delay_range: tuple[float, float], max_steps: int = 10) -> None:
     """Step-scroll the results page so lazy-loaded rows/carousel tiles attach before querying."""
     prev_h = -1
@@ -329,6 +349,7 @@ def _scroll_serp_to_settle(page, scroll_delay_range: tuple[float, float], max_st
         time.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
 
 
+# Turn one search result card into a single structured product snapshot (asin/title/price/shipping/etc) for the rest of the pipeline.
 def _collect_product_row(
     card,
     *,
@@ -375,6 +396,7 @@ def _collect_product_row(
     }
 
 
+# Add a small debug record for this row so you can see which selectors did or didn’t work when scraping changes.
 def _append_debug_for_row(debug_data: dict[str, Any], row: dict[str, Any]) -> None:
     d = row.get("_debug") or {}
     inner = str(d.get("inner_html") or "")
@@ -395,11 +417,13 @@ def _append_debug_for_row(debug_data: dict[str, Any], row: dict[str, Any]) -> No
     )
 
 
+# Remove debug-only data from a row so normal runs store and process only the product fields you care about.
 def _strip_debug(row: dict[str, Any]) -> dict[str, Any]:
     row.pop("_debug", None)
     return row
 
 
+# Find extra product tiles (like featured carousels) that aren’t standard search-result cards but still contain real ASINs.
 def _carousel_tile_roots(page) -> list[Any]:
     """Thematic / sponsored horizontal tiles (not wrapped in data-component-type=s-search-result)."""
     roots: list[Any] = []
@@ -429,6 +453,7 @@ def _carousel_tile_roots(page) -> list[Any]:
     return roots
 
 
+# Do one full scrape attempt across one or more pages, collecting product rows while respecting time and page limits.
 def _scrape_single_attempt(
     search_url: str,
     source: str,
@@ -565,6 +590,7 @@ def _scrape_single_attempt(
     return deduped, debug_data
 
 
+# Scrape Amazon search results with retries and simple modes so the monitor can gather candidates without visiting individual product pages.
 def scrape_search(
     search_url: str,
     *,

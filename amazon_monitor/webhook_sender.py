@@ -9,6 +9,7 @@ import fx_rate
 LOGGER = logging.getLogger(__name__)
 
 
+# Send a WhatsApp-style message to your webhook by posting the prepared payload and quietly logging if it fails.
 def _post_wa(config: dict[str, Any], payload: dict[str, Any]) -> None:
     url = config.get("wa_api_url")
     api_key = config.get("wa_api_key")
@@ -70,10 +71,12 @@ DEFAULT_MESSAGE_TEMPLATES = {
 
 
 class _SafeDict(dict):
+    # Prevent missing template fields from crashing message formatting by returning an empty string instead.
     def __missing__(self, key: str) -> str:
         return ""
 
 
+# Turn a stored numeric price into a friendly “$12.34” string (or “not available” when we can’t).
 def _format_usd(value: Any) -> str:
     """Always show product price as USD with $ prefix (numeric alerts are stored as USD)."""
     if value is None:
@@ -84,6 +87,7 @@ def _format_usd(value: Any) -> str:
         return "לא זמין"
 
 
+# Build the price line for alerts by showing USD and optionally adding an approximate ILS amount when you configured exchange rate support.
 def _price_line_parts(amount: Any, config: dict[str, Any]) -> tuple[str, str, str]:
     """Returns (full_line_with_optional_ils, usd_only, ils_suffix_or_empty)."""
     usd = _format_usd(amount)
@@ -100,6 +104,7 @@ def _price_line_parts(amount: Any, config: dict[str, Any]) -> tuple[str, str, st
     return usd + suffix, usd, suffix
 
 
+# Create the final WhatsApp message text by choosing the right template and filling in the alert details.
 def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> str:
     alert_type = str(alert_payload.get("type") or "default")
     price = alert_payload.get("price")
@@ -154,12 +159,14 @@ def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> st
     return template.format_map(values)
 
 
+# Choose where to send messages (group vs personal) based on whether it’s a product alert or an operational message.
 def _pick_recipient(config: dict[str, Any], operational: bool = False) -> str | None:
     if operational:
         return config.get("wa_client_to") or config.get("wa_group_id")
     return config.get("wa_group_id")
 
 
+# Turn an internal alert dict into a WhatsApp webhook payload (including affiliate link) and send it out.
 def send_alert(alert_dict: dict[str, Any], config: dict[str, Any]) -> None:
     asin = alert_dict.get("asin")
     tag = config.get("affiliate_tag", "")
@@ -187,6 +194,7 @@ def send_alert(alert_dict: dict[str, Any], config: dict[str, Any]) -> None:
     _post_wa(config, wa_payload)
 
 
+# Send a small “I’m alive” heartbeat message on a schedule when you enabled it in the config.
 def send_heartbeat(config: dict[str, Any]) -> None:
     if not config.get("wa_send_heartbeat", False):
         return
@@ -198,11 +206,13 @@ def send_heartbeat(config: dict[str, Any]) -> None:
     _post_wa(config, payload)
 
 
+# Keep this function as a harmless placeholder so old configs don’t break, even though modem rotation is no longer used.
 def send_modem_trigger(config: dict[str, Any]) -> None:
     """No-op: modem rotation was removed from the monitor."""
     LOGGER.debug("send_modem_trigger ignored (modem flow removed)")
 
 
+# Send an operational error message (like search/heartbeat problems) so you’ll notice failures even when no product alerts fire.
 def send_operational_error(event_type: str, error_message: str, config: dict[str, Any]) -> None:
     now = datetime.now(timezone.utc).isoformat()
     payload = {

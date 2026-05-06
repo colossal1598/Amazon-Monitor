@@ -26,6 +26,7 @@ class AlertDecision:
     """Set when emit is False; stable token for logs (e.g. SKIP_COOLDOWN)."""
 
 
+# Decide if we should send a “new product” alert by only allowing it the first time we ever see that ASIN.
 def decide_new_product(is_first_observation: bool) -> AlertDecision:
     """Whether to emit `new_product` for this search hit.
 
@@ -41,6 +42,7 @@ def decide_new_product(is_first_observation: bool) -> AlertDecision:
     return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_NOT_NEW_ASIN")
 
 
+# Decide if we should send a “back in stock” alert by checking if the item went from missing to present again.
 def decide_back_in_stock(old_stock: int, new_stock: int) -> AlertDecision:
     """Whether to emit `back_in_stock`.
 
@@ -62,6 +64,7 @@ def decide_back_in_stock(old_stock: int, new_stock: int) -> AlertDecision:
     return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_STOCK_UNCHANGED_OTHER")
 
 
+# Decide if we should send a “price drop” alert by comparing the old and new prices and skipping repeats too soon.
 def decide_price_drop(
     old_price: float | None,
     new_price: float | None,

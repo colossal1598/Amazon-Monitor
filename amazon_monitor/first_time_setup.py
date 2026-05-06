@@ -4,11 +4,13 @@ from dotenv import load_dotenv
 from webhook_sender import send_alert
 
 
+# Load your monitor settings from YAML so the setup test uses the same WhatsApp configuration as the real monitor.
 def load_config(path: str = "config.yaml") -> dict:
     with open(path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file)
 
 
+# Send a one-time “setup test” message and ask you to confirm it arrived so you know the WhatsApp connection works.
 def run_setup() -> None:
     load_dotenv()
     config = load_config()

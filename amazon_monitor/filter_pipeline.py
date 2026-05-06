@@ -9,6 +9,7 @@ LOGGER = logging.getLogger(__name__)
 _ASIN_LINE = re.compile(r"^[A-Z0-9]{10}$")
 
 
+# Turn a messy title snippet into a clean single-line title by trimming it and replacing line breaks with spaces.
 def normalize_title_line(value: Any) -> str | None:
     """Collapse line breaks and repeated whitespace to a single line (e.g. brand + title on SERP)."""
     if value is None:
@@ -21,6 +22,7 @@ def normalize_title_line(value: Any) -> str | None:
     return s or None
 
 
+# Make text easier to compare by lowering it, removing accents, and applying a couple of project-specific wording tweaks.
 def _normalize_text(value: str) -> str:
     """Lowercase and strip diacritics for accent-insensitive matching."""
     lowered = (value or "").lower().strip()
@@ -30,6 +32,7 @@ def _normalize_text(value: str) -> str:
     return normalized
 
 
+# Check if a required keyword is “present enough” in the product title, with one special case for the Pokémon TCG scope.
 def _keyword_matches_title(title_norm: str, keyword: str, raw_title: str) -> bool:
     if not keyword:
         return True
@@ -40,6 +43,7 @@ def _keyword_matches_title(title_norm: str, keyword: str, raw_title: str) -> boo
     return False
 
 
+# Read a whitelist/blacklist list from config and turn it into a clean set of ASINs we can reliably compare against.
 def _config_asin_set(config: dict[str, Any], key: str) -> set[str]:
     """Normalize config whitelist/blacklist entries to uppercase 10-char ASINs."""
     raw = config.get(key)
@@ -53,11 +57,13 @@ def _config_asin_set(config: dict[str, Any], key: str) -> set[str]:
     return out
 
 
+# Convert text into a simple “plain letters” version so matching works even when there are special symbols or accents.
 def _normalize_ascii(value: str) -> str:
     decomposed = unicodedata.normalize("NFKD", (value or "").lower().strip())
     return decomposed.encode("ascii", "ignore").decode("ascii")
 
 
+# Decide if a title looks like it’s really for Pokémon trading cards (not just anything that happens to say “Pokemon”).
 def _title_signals_pokemon_tcg_scope(title: str) -> bool:
     """Whether the visible title is the card-game product line (not every product with 'Pokemon' in the name)."""
     text = _normalize_ascii(title)
@@ -95,10 +101,12 @@ def _title_signals_pokemon_tcg_scope(title: str) -> bool:
     return False
 
 
+# Quick helper that answers “does this title fit our Pokémon TCG scope check?”.
 def _has_pokemon_tcg_title(title: str) -> bool:
     return bool(_title_signals_pokemon_tcg_scope(title))
 
 
+# Make sure the card has a real price we can act on (and skip “See price” style placeholders).
 def _is_valid_price(item: dict[str, Any]) -> bool:
     price_value = item.get("price")
     price_text = _normalize_ascii(str(item.get("price_text") or ""))
@@ -114,6 +122,7 @@ def _is_valid_price(item: dict[str, Any]) -> bool:
     return True
 
 
+# Combine the scraped delivery/seller bits into one blob so we can quickly spot shipping signals on the search result card.
 def _card_blob_for_delivery_line(item: dict[str, Any]) -> str:
     """Per-card fields from the SERP scrape (incl. UDM delivery-block via shipping_text)."""
     parts = [
@@ -124,9 +133,19 @@ def _card_blob_for_delivery_line(item: dict[str, Any]) -> str:
     return "\n".join(p for p in parts if p.strip())
 
 
+# Decide if a shipping line looks free by looking for common “free” phrases in English or Hebrew.
 def _shipping_line_looks_free(line: str, clean_blob: str) -> bool:
     """English or common Hebrew free-shipping cues (no currency parsing)."""
     c = _normalize_ascii(line)
+    low_blob = (clean_blob or "").lower()
+    if (
+        "cannot be shipped to your selected delivery location" in low_blob
+        or "can't be shipped to your selected delivery location" in low_blob
+        or "cannot be delivered to your selected delivery location" in low_blob
+        or "can't be delivered to your selected delivery location" in low_blob
+        or "choose a different delivery location" in low_blob
+    ):
+        return False
     if "free delivery" in c or "free shipping" in c:
         return True
     if "free delivery" in clean_blob or "free shipping" in clean_blob:
@@ -136,6 +155,7 @@ def _shipping_line_looks_free(line: str, clean_blob: str) -> bool:
     return False
 
 
+# Check if the product card shows any delivery/shipping clue so we can avoid items with missing delivery info.
 def _has_shipping_qualifier_on_card(item: dict[str, Any]) -> bool:
     """True when the card exposes a shipping/delivery line: UDM `shipping_text`, or free phrasing in blob."""
     blob = _card_blob_for_delivery_line(item)
@@ -150,6 +170,7 @@ def _has_shipping_qualifier_on_card(item: dict[str, Any]) -> bool:
     return False
 
 
+# Tell whether this row clearly shows free shipping so we can filter for “free delivery” searches.
 def row_has_free_shipping(row: dict[str, Any]) -> bool:
     """True when the row exposes an explicit free-shipping/delivery cue.
 
@@ -162,44 +183,26 @@ def row_has_free_shipping(row: dict[str, Any]) -> bool:
     return _shipping_line_looks_free(ship, clean)
 
 
+# Keep only the items that show free shipping by checking each row’s shipping/delivery text.
 def filter_free_shipping_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep only rows whose shipping/delivery line is free; used by the amazon_com SERP source."""
     return [row for row in rows if row_has_free_shipping(row)]
 
 
-def _paid_delivery_price_tail(line: str) -> str:
-    """Compact tail after 'משלוח:' — prefer '54₪' from ₪ / ILS; else whole line."""
-    m = re.search(r"([0-9]+(?:[.,][0-9]{1,2})?)\s*₪", line)
-    if m:
-        return f"{m.group(1)}₪"
-    m = re.search(r"₪\s*([0-9]+(?:[.,][0-9]{1,2})?)", line)
-    if m:
-        return f"{m.group(1)}₪"
-    m = re.search(r"(?i)ils\s*[:\s]*([0-9]+(?:[.,][0-9]{1,2})?)", line)
-    if m:
-        return f"{m.group(1)}₪"
-    return line.strip()
 
 
+# Turn the scraped shipping text into a friendly Hebrew snippet for WhatsApp (free, paid, or can’t-ship cases).
 def shipping_display_hebrew(shipping_text: str | None) -> str:
-    """WhatsApp `{shipping}`: free -> 'משלוח חינם'; paid -> 'משלוח: 54₪' (ILS/₪) or 'משלוח: …' from the scraped line."""
+    """WhatsApp `{shipping}`: free -> 'משלוח חינם'; otherwise blank (non-free or not shippable items should be filtered out)."""
     raw = (shipping_text or "").strip()
     line = " ".join(raw.split())
     blob_clean = _normalize_ascii(raw)
-    low = blob_clean.lower()
-    if (
-        "cannot be shipped to your selected delivery location" in low
-        or "can't be shipped to your selected delivery location" in low
-        or "choose a different delivery location" in low
-    ):
-        return "משלוח: לא ניתן לשלוח לכתובת שנבחרה"
     if _shipping_line_looks_free(line, blob_clean):
         return "משלוח חינם"
-    if not line:
-        return "משלוח"
-    return f"משלוח: {_paid_delivery_price_tail(line)}"
+    return ""
 
 
+# Add back any whitelisted ASINs that got filtered out earlier so “always-track” items can still reach the state engine.
 def _merge_whitelist_raw(
     raw_items: list[dict[str, Any]],
     stage1_core: list[dict[str, Any]],
@@ -217,6 +220,7 @@ def _merge_whitelist_raw(
     return out
 
 
+# Explain why an item fails the first filtering gate so you can see what’s being dropped and why.
 def stage1_reject_reason(item: dict[str, Any]) -> str | None:
     """If this row fails Stage 1, return a short machine reason; if it passes, return None."""
     title = item.get("title") or ""
@@ -234,6 +238,7 @@ def stage1_reject_reason(item: dict[str, Any]) -> str | None:
     return None
 
 
+# Run the first “basic quality” filter over raw search results and keep only the rows that look usable.
 def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Pokémon TCG title + valid price + any scraped shipping/delivery signal on the card."""
     out: list[dict[str, Any]] = []
@@ -243,6 +248,7 @@ def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, 
     return out
 
 
+# Build a small report of what got rejected in stage 1 so logs can show the breakdown and examples.
 def stage1_reject_report(raw_items: list[dict[str, Any]]) -> tuple[dict[str, int], list[dict[str, Any]]]:
     """Per-item reject reasons plus aggregate counts (for logs / meta)."""
     counts: dict[str, int] = {}
@@ -258,6 +264,7 @@ def stage1_reject_report(raw_items: list[dict[str, Any]]) -> tuple[dict[str, int
     return counts, rows
 
 
+# Detect a known Amazon URL combo that tends to “lie” by mixing seller filtering with free-shipping filters.
 def _url_mixes_free_shipping_and_seller_p6(search_url: str) -> bool:
     """Amazon often ignores or mangles seller (p_6) when combined with free-shipping refines in one rh=."""
     if not search_url:
@@ -269,6 +276,7 @@ def _url_mixes_free_shipping_and_seller_p6(search_url: str) -> bool:
     return bool(re.search(r"\bp_6\s*:", decoded))
 
 
+# Warn in the run metadata when the search URL likely won’t behave as intended so you don’t trust the results blindly.
 def _maybe_warn_incompatible_url_facets(
     raw_items: list[dict[str, Any]],
     meta: dict[str, Any],
@@ -284,6 +292,7 @@ def _maybe_warn_incompatible_url_facets(
     meta["warn_incompatible_url_facets"] = "free_shipping_plus_p_6"
 
 
+# See if the title contains any blocked phrase so we can skip unwanted items early.
 def _title_hits_blacklist(title_norm: str, phrases_norm: list[str]) -> str | None:
     """Return the first normalized blacklist phrase found as a substring of ``title_norm``, or None."""
     for phrase in phrases_norm:
@@ -292,6 +301,7 @@ def _title_hits_blacklist(title_norm: str, phrases_norm: list[str]) -> str | Non
     return None
 
 
+# Apply required keywords and ASIN blacklist rules (with whitelist shortcuts) and also return a human-readable drop list for logs.
 def _apply_required_keywords_and_yaml_blacklist(
     candidates: list[dict[str, Any]],
     config: dict[str, Any],
@@ -367,6 +377,7 @@ def _apply_required_keywords_and_yaml_blacklist(
     return final, drops
 
 
+# Convert filtered scrape items into the simple row format the state engine expects for tracking changes over time.
 def _rows_for_state_engine(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize to state-engine row shape (no merchant resolution)."""
     rows: list[dict[str, Any]] = []
@@ -390,6 +401,7 @@ def _rows_for_state_engine(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+# Run the full “search results → tracked products” pipeline by filtering, applying lists/keywords, and shaping rows for the state engine.
 def run_search_filter_pipeline(
     raw_items: list[dict[str, Any]],
     config: dict[str, Any],
@@ -428,5 +440,21 @@ def run_search_filter_pipeline(
     return filtered, meta
 
 
+# Pull out a short “price-like” ending for paid delivery lines so WhatsApp messages stay compact and readable.
+def _paid_delivery_price_tail(line: str) -> str:
+    """Compact tail after 'משלוח:' — prefer '54₪' from ₪ / ILS; else whole line."""
+    m = re.search(r"([0-9]+(?:[.,][0-9]{1,2})?)\s*₪", line)
+    if m:
+        return f"{m.group(1)}₪"
+    m = re.search(r"₪\s*([0-9]+(?:[.,][0-9]{1,2})?)", line)
+    if m:
+        return f"{m.group(1)}₪"
+    m = re.search(r"(?i)ils\s*[:\s]*([0-9]+(?:[.,][0-9]{1,2})?)", line)
+    if m:
+        return f"{m.group(1)}₪"
+    return line.strip()
+
+
+# Keep only rows whose ASINs are not already in the database so the “new items” path can handle them.
 def keep_asins_not_in_db(rows: list[dict[str, Any]], known_asins: set[str]) -> list[dict[str, Any]]:
     return [r for r in rows if (r.get("asin") or "").upper() not in known_asins]

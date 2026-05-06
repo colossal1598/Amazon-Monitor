@@ -29,6 +29,7 @@ from webhook_sender import send_alert, send_heartbeat, send_operational_error
 LOGGER = logging.getLogger("monitor")
 
 
+# Pick the two search page URLs this monitor should watch by reading them from your config and falling back to older config names.
 def resolve_monitor_search_urls(config: dict[str, Any]) -> tuple[str, str, str, str]:
     """Returns (amazon_com_source_key, amazon_com_url, aes_llc_source_key, aes_llc_url) for scrape_search source= labels."""
     raw_map = config.get("search_urls")
@@ -49,17 +50,20 @@ def resolve_monitor_search_urls(config: dict[str, Any]) -> tuple[str, str, str, 
     return "amazon_com", amazon_com_url, "aes_llc", aes_llc_url
 
 
+# Read the “wait a bit between actions” settings from your config so scraping looks more natural and less bursty.
 def scrape_delay_ranges(config: dict[str, Any]) -> tuple[tuple[float, float], tuple[float, float]]:
     s = config.get("search_scroll_delay_seconds") or [0.25, 0.65]
     p = config.get("search_pagination_delay_seconds") or [2.0, 4.5]
     return (float(s[0]), float(s[1])), (float(p[0]), float(p[1]))
 
 
+# Load the monitor’s settings from a YAML file so the rest of the app can use one shared config object.
 def load_config(path: str = "config.yaml") -> dict:
     with open(path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file)
 
 
+# Set up file and console logging so you can review what the monitor did (and why) after it runs.
 def setup_logging(log_dir: str) -> None:
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(Path(log_dir) / "monitor.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8")
@@ -72,10 +76,12 @@ def setup_logging(log_dir: str) -> None:
     root.addHandler(logging.StreamHandler())
 
 
+# Get the current time in a standard text format so logs, alerts, and health files all use the same clock style.
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Clean and dedupe the “watch these ASINs by product page” list so it only contains valid, unique ASINs.
 def _normalize_pdp_watch_asins(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
@@ -90,6 +96,7 @@ def _normalize_pdp_watch_asins(raw: Any) -> list[str]:
     return out
 
 
+# Run the full monitor loop by scraping search pages and watched product pages, updating the database, and sending WhatsApp alerts on changes.
 def main() -> None:
     load_dotenv()
     config = load_config()
@@ -121,6 +128,7 @@ def main() -> None:
         "heartbeat": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
     }
 
+    # Write a small “status snapshot” file so you can quickly see when jobs last ran and whether they succeeded.
     def write_health() -> None:
         health_file.write_text(
             json.dumps(
@@ -133,20 +141,24 @@ def main() -> None:
             encoding="utf-8",
         )
 
+    # Mark a job as started in the health file so you can tell the scheduler is actually running.
     def mark_job_started(job: str) -> None:
         health_state[job]["last_started_at"] = utc_iso()
         write_health()
 
+    # Mark a job as successful and clear its last error so the health file shows the latest good run.
     def mark_job_success(job: str) -> None:
         health_state[job]["last_success_at"] = utc_iso()
         health_state[job]["last_error_message"] = None
         write_health()
 
+    # Record a job failure in the health file so you can see what went wrong without digging through full logs.
     def mark_job_error(job: str, exc: Exception | str) -> None:
         health_state[job]["last_error_at"] = utc_iso()
         health_state[job]["last_error_message"] = str(exc)
         write_health()
 
+    # Pause scraping for a short time when Amazon blocks or the network breaks, then resume automatically.
     def handle_captcha_or_network_pause() -> None:
         LOGGER.warning("Captcha or network recovery: pausing search job 120s (no modem rotation)")
         scraping_paused["value"] = True
@@ -160,6 +172,7 @@ def main() -> None:
         scraping_paused["value"] = False
         LOGGER.info("Search job resumed")
 
+    # Do one full “check cycle” by scraping both search sources, merging results, updating state, and sending any alerts.
     def search_loop() -> None:
         if scraping_paused["value"]:
             return
@@ -205,10 +218,13 @@ def main() -> None:
                 pagination_delay_range=page_r,
             )
             aes_filtered, aes_meta = run_search_filter_pipeline(aes_items, config)
+            aes_filtered_before_free = len(aes_filtered)
+            aes_filtered = filter_free_shipping_candidates(aes_filtered)
             LOGGER.info(
-                "search_aes_llc raw=%s stage1=%s filtered=%s",
+                "search_aes_llc raw=%s stage1=%s filtered_before_free_shipping=%s filtered_free_shipping=%s",
                 len(aes_items),
                 aes_meta.get("stage1_count"),
+                aes_filtered_before_free,
                 len(aes_filtered),
             )
 
@@ -278,6 +294,7 @@ def main() -> None:
             mark_job_error("search", exc)
             send_operational_error("search_error", str(exc), config)
 
+    # Send a periodic “still running” message so you’ll notice if the monitor stops sending anything for a long time.
     def heartbeat_loop() -> None:
         mark_job_started("heartbeat")
         try:
