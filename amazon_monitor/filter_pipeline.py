@@ -150,6 +150,23 @@ def _has_shipping_qualifier_on_card(item: dict[str, Any]) -> bool:
     return False
 
 
+def row_has_free_shipping(row: dict[str, Any]) -> bool:
+    """True when the row exposes an explicit free-shipping/delivery cue.
+
+    Works on both raw SERP rows and post-pipeline state-engine rows; the latter omit
+    ``availability_text`` but `_card_blob_for_delivery_line` tolerates missing keys.
+    """
+    blob = _card_blob_for_delivery_line(row)
+    clean = _normalize_ascii(blob)
+    ship = str(row.get("shipping_text") or "").strip()
+    return _shipping_line_looks_free(ship, clean)
+
+
+def filter_free_shipping_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only rows whose shipping/delivery line is free; used by the amazon_com SERP source."""
+    return [row for row in rows if row_has_free_shipping(row)]
+
+
 def _paid_delivery_price_tail(line: str) -> str:
     """Compact tail after 'משלוח:' — prefer '54₪' from ₪ / ILS; else whole line."""
     m = re.search(r"([0-9]+(?:[.,][0-9]{1,2})?)\s*₪", line)
