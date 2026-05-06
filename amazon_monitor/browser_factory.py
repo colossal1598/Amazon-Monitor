@@ -8,17 +8,14 @@ from typing import Optional
 from playwright.sync_api import BrowserContext, sync_playwright
 from playwright_stealth.stealth import Stealth
 
+# Rotate majors near current Chrome stable; re-sync periodically with Chrome Releases or chrome://version.
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.6613.120 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6668.90 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.69 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.86 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.6834.110 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
 ]
 
 
@@ -65,6 +62,28 @@ def _stealth_page(page) -> None:
     STEALTH.apply_stealth_sync(page)
 
 
+def _apply_amazon_cookie_prefs(context: BrowserContext) -> None:
+    """USD + English storefront prefs before first navigation (Israel locale/geo unchanged)."""
+    context.add_cookies(
+        [
+            {
+                "name": "i18n-prefs",
+                "value": "USD",
+                "domain": ".amazon.com",
+                "path": "/",
+                "secure": True,
+            },
+            {
+                "name": "lc-main",
+                "value": "en_US",
+                "domain": ".amazon.com",
+                "path": "/",
+                "secure": True,
+            },
+        ]
+    )
+
+
 # Start a Playwright browser context that tries to look human (location, language, headers) so scraping is less likely to get blocked.
 def create_stealth_context(
     persistent_dir: Optional[str] = None,
@@ -95,7 +114,8 @@ def create_stealth_context(
         browser = chromium.launch(**launch_args)
         context = browser.new_context(**context_kwargs)
 
-    context.set_extra_http_headers({"Accept-Language": "en-IL,en;q=0.9,he;q=0.8"})
+    context.set_extra_http_headers({"Accept-Language": "en-IL,en;q=0.9"})
+    _apply_amazon_cookie_prefs(context)
     context.on("page", _stealth_page)
     for page in context.pages:
         _stealth_page(page)
