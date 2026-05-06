@@ -54,7 +54,7 @@ def _kv_tail(**fields: Any) -> str:
     return " ".join(parts)
 
 
-def _english_head(event: str) -> str:
+def _english_head(event: str, fields: dict[str, Any]) -> str:
     # Lifecycle/action
     if event == "monitor_started":
         return "Monitor started."
@@ -88,7 +88,7 @@ def _english_head(event: str) -> str:
 
 
 def _log(channel: str, event: str, *, cycle_stamp: bool = False, **fields: Any) -> None:
-    head = _english_head(event)
+    head = _english_head(event, fields)
     tail = _kv_tail(**fields)
     msg = f"{head} {tail}".strip() if tail else head
     if cycle_stamp:
