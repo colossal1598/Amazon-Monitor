@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 import browser_factory
 from browser_factory import close_context, create_stealth_context
 from exceptions import CaptchaBlocked, NetworkAccessDenied
@@ -453,6 +455,56 @@ def _carousel_tile_roots(page) -> list[Any]:
     return roots
 
 
+def _serp_captcha_or_raise(page, source: str) -> None:
+    title = (page.title() or "").lower()
+    if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
+        raise CaptchaBlocked(f"Captcha detected while scraping {source}")
+
+
+def _wait_serp_result_cards(
+    page,
+    current_url: str,
+    source: str,
+    *,
+    serp_inner_retries: int,
+    selector_timeout_ms: int = 25_000,
+    goto_timeout_ms: int = 45_000,
+) -> None:
+    """Wait for SERP result cards; on timeout, re-goto the search URL up to ``serp_inner_retries`` times."""
+    recoveries = max(0, serp_inner_retries)
+    total_rounds = 1 + recoveries
+    for round_idx in range(total_rounds):
+        try:
+            page.wait_for_selector(
+                "div[data-component-type='s-search-result']",
+                timeout=selector_timeout_ms,
+            )
+            return
+        except PlaywrightTimeoutError:
+            if round_idx >= total_rounds - 1:
+                raise
+            title_snip = ((page.title() or "").strip())[:160]
+            LOGGER.warning(
+                "SERP selector timeout source=%s round=%s/%s url=%s title=%r — retrying goto",
+                source,
+                round_idx + 1,
+                total_rounds,
+                page.url,
+                title_snip,
+            )
+            time.sleep(random.uniform(0.5, 1.5))
+            try:
+                page.goto(current_url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
+            except Exception as e:
+                if _is_network_error(e):
+                    raise NetworkAccessDenied(
+                        f"Network error during SERP recovery round {round_idx + 1}: {e}",
+                        e,
+                    ) from e
+                raise
+            _serp_captcha_or_raise(page, source)
+
+
 # Do one full scrape attempt across one or more pages, collecting product rows while respecting time and page limits.
 def _scrape_single_attempt(
     search_url: str,
@@ -467,6 +519,7 @@ def _scrape_single_attempt(
     *,
     scroll_delay_range: tuple[float, float] = (0.25, 0.65),
     pagination_delay_range: tuple[float, float] = (2.0, 4.5),
+    serp_inner_retries: int = 2,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_products: list[dict[str, Any]] = []
     debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}}
@@ -499,11 +552,14 @@ def _scrape_single_attempt(
                 if _is_network_error(e):
                     raise NetworkAccessDenied(f"Network error on page {page_num}: {e}", e)
                 raise
-            title = (page.title() or "").lower()
-            if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
-                raise CaptchaBlocked(f"Captcha detected while scraping {source}")
+            _serp_captcha_or_raise(page, source)
 
-            page.wait_for_selector("div[data-component-type='s-search-result']", timeout=25000)
+            _wait_serp_result_cards(
+                page,
+                current_url,
+                source,
+                serp_inner_retries=serp_inner_retries,
+            )
             _scroll_serp_to_settle(page, scroll_delay_range)
 
             html = page.content()
@@ -605,6 +661,7 @@ def scrape_search(
     html_dump_dir: str | Path | None = None,
     scroll_delay_range: tuple[float, float] | None = None,
     pagination_delay_range: tuple[float, float] | None = None,
+    serp_inner_retries: int = 2,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Scrape Amazon search results. No PDP visits.
 
@@ -630,6 +687,7 @@ def scrape_search(
                 max_search_pages=max_search_pages,
                 scroll_delay_range=sdr,
                 pagination_delay_range=pdr,
+                serp_inner_retries=serp_inner_retries,
             )
         except NetworkAccessDenied as e:
             last_error = e
@@ -638,6 +696,14 @@ def scrape_search(
                 time.sleep(random.uniform(1.5, 3.0))
             else:
                 LOGGER.error("Network errors persisted after %s attempts", max_retries + 1)
+                raise
+        except PlaywrightTimeoutError as e:
+            last_error = e
+            LOGGER.warning("Scrape timeout on attempt %s: %s", attempt + 1, e)
+            if attempt < max_retries:
+                time.sleep(random.uniform(1.5, 3.0))
+            else:
+                LOGGER.error("Scrape timeouts persisted after %s attempts", max_retries + 1)
                 raise
         except CaptchaBlocked:
             raise

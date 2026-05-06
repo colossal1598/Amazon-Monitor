@@ -230,6 +230,7 @@ def main() -> None:
         pagination_mode = "auto"
     fixed_pages = int(config.get("search_pages", 2))
     scroll_r, page_r = scrape_delay_ranges(config)
+    serp_inner_retries = max(0, int(config.get("search_serp_inner_retries", 2)))
 
     scheduler = BackgroundScheduler()
     scraping_paused = {"value": False}
@@ -272,12 +273,16 @@ def main() -> None:
 
     # Pause scraping for a short time when Amazon blocks or the network breaks, then resume automatically.
     def handle_captcha_or_network_pause() -> None:
-        LOGGER.warning("Captcha or network recovery: pausing search job 120s (no modem rotation)")
+        pause_s = max(0, int(config.get("captcha_recovery_pause_seconds", 120)))
+        LOGGER.warning(
+            "Captcha or network recovery: pausing search job %ss (no modem rotation)",
+            pause_s,
+        )
         scraping_paused["value"] = True
         for job_id in ("search_loop",):
             if scheduler.get_job(job_id):
                 scheduler.pause_job(job_id)
-        time.sleep(120)
+        time.sleep(float(pause_s))
         for job_id in ("search_loop",):
             if scheduler.get_job(job_id):
                 scheduler.resume_job(job_id)
@@ -310,6 +315,7 @@ def main() -> None:
                 max_cycle_seconds=max_cycle_seconds,
                 scroll_delay_range=scroll_r,
                 pagination_delay_range=page_r,
+                serp_inner_retries=serp_inner_retries,
             )
             amazon_com_filtered, amazon_com_meta = run_search_filter_pipeline(amazon_com_items, config)
             amazon_com_filtered_before_free = len(amazon_com_filtered)
@@ -339,6 +345,7 @@ def main() -> None:
                 max_cycle_seconds=max_cycle_seconds,
                 scroll_delay_range=scroll_r,
                 pagination_delay_range=page_r,
+                serp_inner_retries=serp_inner_retries,
             )
             aes_filtered, aes_meta = run_search_filter_pipeline(aes_items, config)
             aes_filtered_before_free = len(aes_filtered)
