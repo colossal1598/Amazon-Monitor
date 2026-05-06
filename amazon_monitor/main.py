@@ -29,6 +29,94 @@ from webhook_sender import send_alert, send_heartbeat, send_operational_error
 LOGGER = logging.getLogger("monitor")
 
 
+# ---------- Logging helpers (lifecycle vs debug) ----------
+def _kv_tail(**fields: Any) -> str:
+    """Normalized key=value tail (quote values only when needed)."""
+
+    def fmt(v: Any) -> str:
+        if v is None:
+            return "null"
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return str(v)
+        s = str(v)
+        if s == "":
+            return '""'
+        needs_quote = any(ch.isspace() for ch in s) or any(ch in s for ch in ['"', "=", "\\"])
+        return json.dumps(s, ensure_ascii=False) if needs_quote else s
+
+    parts: list[str] = []
+    for k in sorted(fields.keys()):
+        if not k:
+            continue
+        parts.append(f"{k}={fmt(fields[k])}")
+    return " ".join(parts)
+
+
+def _english_head(event: str) -> str:
+    # Lifecycle/action
+    if event == "monitor_started":
+        return "Monitor started."
+    if event == "monitor_shutdown":
+        return "Monitor shutting down."
+    if event == "cycle_start":
+        return "Cycle start."
+    if event == "scrape_search_start":
+        src = str(fields.get("source") or "")
+        if src == "amazon_com":
+            return "Scraping amazon.com SERP."
+        if src == "aes_llc":
+            return "Scraping AES LLC SERP."
+        return "Scraping SERP."
+    if event == "scrape_pdp_watch_start":
+        return "Scraping PDP watch list."
+    if event == "search_cycle_done":
+        return "Cycle done."
+    # Debug
+    if event == "search_amazon_com_counts":
+        return "Amazon.com SERP counts."
+    if event == "search_aes_llc_counts":
+        return "AES LLC SERP counts."
+    if event == "search_union_counts":
+        return "Merged search counts."
+    if event == "search_reconcile_skipped":
+        return "Reconcile missing skipped."
+    if event == "pdp_watch_counts":
+        return "PDP watch counts."
+    return "Log."
+
+
+def _log(channel: str, event: str, *, cycle_stamp: bool = False, **fields: Any) -> None:
+    head = _english_head(event)
+    tail = _kv_tail(**fields)
+    msg = f"{head} {tail}".strip() if tail else head
+    if cycle_stamp:
+        # Timestamp only on the first line of a cycle.
+        msg = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+    LOGGER.info(msg, extra={"channel": channel})
+
+
+def log_lifecycle(event: str, **fields: Any) -> None:
+    _log("lifecycle", event, **fields)
+
+
+def log_debug(event: str, **fields: Any) -> None:
+    _log("debug", event, **fields)
+
+
+class _ChannelFilter(logging.Filter):
+    def __init__(self, *, allowed_channels: set[str]):
+        super().__init__()
+        self.allowed_channels = allowed_channels
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        ch = getattr(record, "channel", None)
+        return isinstance(ch, str) and ch in self.allowed_channels
+
+
 # Pick the two search page URLs this monitor should watch by reading them from your config and falling back to older config names.
 def resolve_monitor_search_urls(config: dict[str, Any]) -> tuple[str, str, str, str]:
     """Returns (amazon_com_source_key, amazon_com_url, aes_llc_source_key, aes_llc_url) for scrape_search source= labels."""
@@ -66,14 +154,38 @@ def load_config(path: str = "config.yaml") -> dict:
 # Set up file and console logging so you can review what the monitor did (and why) after it runs.
 def setup_logging(log_dir: str) -> None:
     Path(log_dir).mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(Path(log_dir) / "monitor.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8")
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    handler.setFormatter(formatter)
+
+    # No timestamp prefix here; we stamp only the first line of a cycle in-message.
+    formatter = logging.Formatter("%(message)s")
+
+    lifecycle_file = RotatingFileHandler(
+        Path(log_dir) / "monitor.log",
+        maxBytes=2_000_000,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    lifecycle_file.setFormatter(formatter)
+    lifecycle_file.addFilter(_ChannelFilter(allowed_channels={"lifecycle"}))
+
+    debug_file = RotatingFileHandler(
+        Path(log_dir) / "monitor.debug.log",
+        maxBytes=5_000_000,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    debug_file.setFormatter(formatter)
+    debug_file.addFilter(_ChannelFilter(allowed_channels={"debug"}))
+
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    console.addFilter(_ChannelFilter(allowed_channels={"lifecycle"}))
+
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG)
     root.handlers.clear()
-    root.addHandler(handler)
-    root.addHandler(logging.StreamHandler())
+    root.addHandler(lifecycle_file)
+    root.addHandler(debug_file)
+    root.addHandler(console)
 
 
 # Get the current time in a standard text format so logs, alerts, and health files all use the same clock style.
@@ -181,6 +293,12 @@ def main() -> None:
         try:
             pdp_watch_set = set(_normalize_pdp_watch_asins(config.get("pdp_watch_asins")))
 
+            _log("lifecycle", "cycle_start", cycle_stamp=True)
+            log_lifecycle(
+                "scrape_search_start",
+                source=amazon_com_src,
+                mode="featured_full",
+            )
             amazon_com_items, _ = scrape_search(
                 amazon_com_url,
                 source=amazon_com_src,
@@ -196,15 +314,20 @@ def main() -> None:
             amazon_com_filtered, amazon_com_meta = run_search_filter_pipeline(amazon_com_items, config)
             amazon_com_filtered_before_free = len(amazon_com_filtered)
             amazon_com_filtered = filter_free_shipping_candidates(amazon_com_filtered)
-            LOGGER.info(
-                "search_amazon_com raw=%s stage1=%s filtered_before_free_shipping=%s filtered_free_shipping=%s",
-                len(amazon_com_items),
-                amazon_com_meta.get("stage1_count"),
-                amazon_com_filtered_before_free,
-                len(amazon_com_filtered),
+            log_debug(
+                "search_amazon_com_counts",
+                raw=len(amazon_com_items),
+                stage1=amazon_com_meta.get("stage1_count"),
+                filtered_before_free_shipping=amazon_com_filtered_before_free,
+                filtered_free_shipping=len(amazon_com_filtered),
             )
             all_alerts: list[dict[str, Any]] = []
 
+            log_lifecycle(
+                "scrape_search_start",
+                source=aes_llc_src,
+                mode="newest_front",
+            )
             aes_items, _ = scrape_search(
                 aes_llc_url,
                 source=aes_llc_src,
@@ -220,33 +343,28 @@ def main() -> None:
             aes_filtered, aes_meta = run_search_filter_pipeline(aes_items, config)
             aes_filtered_before_free = len(aes_filtered)
             aes_filtered = filter_free_shipping_candidates(aes_filtered)
-            LOGGER.info(
-                "search_aes_llc raw=%s stage1=%s filtered_before_free_shipping=%s filtered_free_shipping=%s",
-                len(aes_items),
-                aes_meta.get("stage1_count"),
-                aes_filtered_before_free,
-                len(aes_filtered),
+            log_debug(
+                "search_aes_llc_counts",
+                raw=len(aes_items),
+                stage1=aes_meta.get("stage1_count"),
+                filtered_before_free_shipping=aes_filtered_before_free,
+                filtered_free_shipping=len(aes_filtered),
             )
 
             merged_candidates = merge_search_candidates_by_asin(amazon_com_filtered, aes_filtered)
             search_candidates = exclude_asins_from_candidates(merged_candidates, pdp_watch_set)
             pdp_excluded_from_search = len(merged_candidates) - len(search_candidates)
             reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(search_candidates))
-            LOGGER.info(
-                "search_union amazon_com_filtered=%s aes_filtered=%s union_count=%s "
-                "pdp_excluded_from_search=%s reconcile_missing=%s",
-                len(amazon_com_filtered),
-                len(aes_filtered),
-                len(search_candidates),
-                pdp_excluded_from_search,
-                reconcile_missing,
+            log_debug(
+                "search_union_counts",
+                amazon_com_filtered=len(amazon_com_filtered),
+                aes_filtered=len(aes_filtered),
+                union_count=len(search_candidates),
+                pdp_excluded_from_search=pdp_excluded_from_search,
+                reconcile_missing=reconcile_missing,
             )
             if skipped_reason:
-                LOGGER.info(
-                    "search_reconcile_skipped reason=%s union_count=%s",
-                    skipped_reason,
-                    len(search_candidates),
-                )
+                log_debug("search_reconcile_skipped", reason=skipped_reason, union_count=len(search_candidates))
             alerts = state_engine.process_search_candidates(
                 search_candidates,
                 reconcile_missing=reconcile_missing,
@@ -263,12 +381,15 @@ def main() -> None:
                     if isinstance(allowed_raw, list)
                     else ["amazon.com", "amazon export"]
                 )
+                log_lifecycle("scrape_pdp_watch_start", count=len(watch_list))
                 pdp_rows = scrape_pdp_watch(
                     watch_list,
                     allowed_subs,
                     max_cycle_seconds=max_cycle_seconds,
                     scroll_delay_range=scroll_r,
                 )
+                skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
+                log_debug("pdp_watch_counts", watch=len(watch_list), rows=len(pdp_rows), skip_update=skip_rows)
                 pdp_alerts = state_engine.process_pdp_watch_candidates(
                     pdp_rows,
                     set(watch_list),
@@ -278,6 +399,12 @@ def main() -> None:
             for alert in dedupe_alerts_by_asin(all_alerts):
                 send_alert(alert, config)
 
+            log_lifecycle(
+                "search_cycle_done",
+                alerts=len(all_alerts),
+                search_candidates=len(search_candidates),
+                pdp_watch=len(watch_list),
+            )
             mark_job_success("search")
             fx_rate.bump_search_tick(config)
         except CaptchaBlocked:
@@ -318,12 +445,12 @@ def main() -> None:
 
     write_health()
     scheduler.start()
-    LOGGER.info("Monitor started")
+    log_lifecycle("monitor_started")
     try:
         while True:
             time.sleep(2)
     except KeyboardInterrupt:
-        LOGGER.info("Shutting down monitor...")
+        log_lifecycle("monitor_shutdown")
         scheduler.shutdown(wait=False)
 
 
