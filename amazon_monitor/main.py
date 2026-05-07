@@ -394,6 +394,8 @@ def main() -> None:
                     allowed_subs,
                     max_cycle_seconds=max_cycle_seconds,
                     scroll_delay_range=scroll_r,
+                    max_concurrent_tabs=int(config.get("pdp_watch_max_concurrent_tabs", 2)),
+                    tab_jitter_seconds=config.get("pdp_watch_tab_jitter_seconds"),
                 )
                 skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
                 log_debug("pdp_watch_counts", watch=len(watch_list), rows=len(pdp_rows), skip_update=skip_rows)
