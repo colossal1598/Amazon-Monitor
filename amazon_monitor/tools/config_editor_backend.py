@@ -1,5 +1,8 @@
 import json
 import subprocess
+import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -7,10 +10,192 @@ from urllib.parse import urlparse
 
 import yaml
 
+try:
+    import sqlite_web  # noqa: F401
+    _HAVE_SQLITE_WEB = True
+except ImportError:
+    _HAVE_SQLITE_WEB = False
+
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config.yaml"
 HTML_PATH = ROOT / "tools" / "config_editor_he.html"
 SCRIPTS_DIR = ROOT / "scripts"
+
+# Only these template keys are edited in the web UI; operational keys are code-only in webhook_sender.
+EDITOR_TEMPLATE_KEYS = frozenset({"default", "new_product", "price_drop", "back_in_stock"})
+# Remove from saved YAML so old custom operational text does not confuse (runtime ignores them anyway).
+STRIP_FROM_SAVED_TEMPLATES = frozenset(
+    {"setup_test", "heartbeat_ok", "heartbeat_error", "search_error", "modem_error", "modem_trigger"}
+)
+
+SQLITE_WEB_HOST = "127.0.0.1"
+SQLITE_WEB_PORT = 8768
+SQLITE_WEB_TTL_SEC = 600
+
+_sqlite_lock = threading.RLock()
+_sqlite_proc: subprocess.Popen | None = None
+_sqlite_timer: threading.Timer | None = None
+_sqlite_deadline_mono: float | None = None
+_sqlite_read_only: bool | None = None
+
+
+def _resolve_db_path(cfg: dict) -> Path:
+    raw = cfg.get("db_path") or "data/monitor.db"
+    p = Path(str(raw).strip())
+    if not p.is_absolute():
+        p = ROOT / p
+    return p.resolve()
+
+
+def _popen_kwargs() -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "cwd": str(ROOT),
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+    return kwargs
+
+
+def _stop_sqlite_web_unlocked() -> None:
+    global _sqlite_proc, _sqlite_timer, _sqlite_deadline_mono, _sqlite_read_only
+    if _sqlite_timer is not None:
+        _sqlite_timer.cancel()
+        _sqlite_timer = None
+    if _sqlite_proc is not None:
+        proc = _sqlite_proc
+        _sqlite_proc = None
+        try:
+            proc.terminate()
+            proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=4)
+            except Exception:
+                pass
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    _sqlite_deadline_mono = None
+    _sqlite_read_only = None
+
+
+def stop_sqlite_web() -> None:
+    with _sqlite_lock:
+        _stop_sqlite_web_unlocked()
+
+
+def _on_sqlite_timer() -> None:
+    with _sqlite_lock:
+        _stop_sqlite_web_unlocked()
+
+
+def sqlite_web_status() -> dict[str, Any]:
+    with _sqlite_lock:
+        if _sqlite_proc is None or _sqlite_deadline_mono is None:
+            return {
+                "ok": True,
+                "running": False,
+                "seconds_remaining": 0,
+                "url": None,
+                "read_only": None,
+            }
+        if _sqlite_proc.poll() is not None:
+            _stop_sqlite_web_unlocked()
+            return {
+                "ok": True,
+                "running": False,
+                "seconds_remaining": 0,
+                "url": None,
+                "read_only": None,
+            }
+        rem = max(0, int(_sqlite_deadline_mono - time.monotonic()))
+        return {
+            "ok": True,
+            "running": True,
+            "read_only": _sqlite_read_only,
+            "seconds_remaining": rem,
+            "url": f"http://{SQLITE_WEB_HOST}:{SQLITE_WEB_PORT}/",
+        }
+
+
+def start_sqlite_web(*, read_only: bool) -> dict[str, Any]:
+    global _sqlite_proc, _sqlite_timer, _sqlite_deadline_mono, _sqlite_read_only
+    if not _HAVE_SQLITE_WEB:
+        return {
+            "ok": False,
+            "error": "sqlite_web_missing",
+            "message_he": "חבילת sqlite-web לא מותקנת. הריצו: pip install sqlite-web",
+        }
+
+    cfg = load_config()
+    db = _resolve_db_path(cfg)
+    if not db.is_file():
+        return {
+            "ok": False,
+            "error": "db_not_found",
+            "message_he": "קובץ מסד הנתונים לא נמצא בנתיב המוגדר. ודאו ש־db_path נכון או שהמוניטור כבר יצר את הקובץ.",
+        }
+
+    with _sqlite_lock:
+        _stop_sqlite_web_unlocked()
+        if read_only:
+            args = [
+                sys.executable,
+                "-m",
+                "sqlite_web",
+                "-x",
+                "-H",
+                SQLITE_WEB_HOST,
+                "-p",
+                str(SQLITE_WEB_PORT),
+                "-r",
+                str(db),
+            ]
+        else:
+            args = [
+                sys.executable,
+                "-m",
+                "sqlite_web",
+                "-x",
+                "-H",
+                SQLITE_WEB_HOST,
+                "-p",
+                str(SQLITE_WEB_PORT),
+                str(db),
+            ]
+        try:
+            _sqlite_proc = subprocess.Popen(args, **_popen_kwargs())
+        except OSError as exc:
+            return {"ok": False, "error": "spawn_failed", "message_he": str(exc)}
+
+        time.sleep(0.45)
+        if _sqlite_proc.poll() is not None:
+            _stop_sqlite_web_unlocked()
+            return {
+                "ok": False,
+                "error": "sqlite_web_exited",
+                "message_he": "sqlite-web נסגר מיד — ייתכן שהקובץ אינו מסד SQLite תקין או שהנתיב שגוי.",
+            }
+
+        _sqlite_deadline_mono = time.monotonic() + SQLITE_WEB_TTL_SEC
+        _sqlite_read_only = read_only
+        t = threading.Timer(float(SQLITE_WEB_TTL_SEC), _on_sqlite_timer)
+        t.daemon = True
+        _sqlite_timer = t
+        t.start()
+
+    url = f"http://{SQLITE_WEB_HOST}:{SQLITE_WEB_PORT}/"
+    return {
+        "ok": True,
+        "url": url,
+        "seconds_remaining": SQLITE_WEB_TTL_SEC,
+        "read_only": read_only,
+    }
 
 
 # Read the current YAML config from disk (or return an empty config if it doesn’t exist yet).
@@ -91,6 +276,15 @@ def apply_config_payload(cfg: dict, payload: dict) -> None:
             cfg["whitelist"] = _normalize_string_list(keywords.get("whitelist"))
         if keywords.get("blacklist") is not None:
             cfg["blacklist"] = _normalize_string_list(keywords.get("blacklist"))
+        if keywords.get("title_blacklist") is not None:
+            cfg["title_blacklist_phrases"] = _normalize_string_list(keywords.get("title_blacklist"))
+
+    pdp = payload.get("pdp")
+    if isinstance(pdp, dict):
+        if pdp.get("watch_asins") is not None:
+            cfg["pdp_watch_asins"] = _normalize_string_list(pdp.get("watch_asins"))
+        if pdp.get("allowed_seller_substrings") is not None:
+            cfg["pdp_allowed_seller_substrings"] = _normalize_string_list(pdp.get("allowed_seller_substrings"))
 
     scraping = payload.get("scraping")
     if isinstance(scraping, dict):
@@ -107,6 +301,23 @@ def apply_config_payload(cfg: dict, payload: dict) -> None:
         if scraping.get("pagination_mode") is not None:
             mode = str(scraping["pagination_mode"]).lower().strip()
             cfg["pagination_mode"] = mode if mode in ("auto", "fixed") else "auto"
+        if scraping.get("search_serp_inner_retries") is not None:
+            cfg["search_serp_inner_retries"] = max(0, int(scraping["search_serp_inner_retries"]))
+        if scraping.get("captcha_recovery_pause_seconds") is not None:
+            cfg["captcha_recovery_pause_seconds"] = max(0, int(scraping["captcha_recovery_pause_seconds"]))
+
+    fx = payload.get("fx")
+    if isinstance(fx, dict):
+        if fx.get("fx_enabled") is not None:
+            cfg["fx_enabled"] = bool(fx["fx_enabled"])
+        if fx.get("fx_refresh_every_runs") is not None:
+            cfg["fx_refresh_every_runs"] = max(1, int(fx["fx_refresh_every_runs"]))
+        if fx.get("fx_fallback_usd_ils") is not None:
+            cfg["fx_fallback_usd_ils"] = float(fx["fx_fallback_usd_ils"])
+        if fx.get("fx_request_timeout_seconds") is not None:
+            cfg["fx_request_timeout_seconds"] = max(0.0, float(fx["fx_request_timeout_seconds"]))
+        if fx.get("fx_cache_path") is not None:
+            cfg["fx_cache_path"] = str(fx.get("fx_cache_path", "")).strip()
 
     alerts = payload.get("alerts")
     if isinstance(alerts, dict):
@@ -145,7 +356,11 @@ def apply_config_payload(cfg: dict, payload: dict) -> None:
         if not isinstance(existing, dict):
             existing = {}
         merged = dict(existing)
-        merged.update({str(k): str(v) for k, v in templates.items()})
+        for k in EDITOR_TEMPLATE_KEYS:
+            if k in templates:
+                merged[k] = str(templates[k])
+        for k in STRIP_FROM_SAVED_TEMPLATES:
+            merged.pop(k, None)
         cfg["wa_message_templates"] = merged
 
     advanced = payload.get("advanced")
@@ -206,17 +421,39 @@ class Handler(BaseHTTPRequestHandler):
             cfg = load_config()
             self._json(200, {"ok": True, "config": config_for_client(cfg)})
             return
+        if path == "/api/sqlite-web/status":
+            self._json(200, sqlite_web_status())
+            return
         self._json(404, {"ok": False, "error": "not_found"})
 
     # Accept config changes from the browser, validate required fields, save them, and optionally restart services.
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(content_length) if content_length > 0 else b""
+
+        if path == "/api/sqlite-web/start":
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except json.JSONDecodeError:
+                self._json(400, {"ok": False, "error": "invalid_json"})
+                return
+            mode = str(body.get("mode") or "").strip().lower()
+            read_only = mode in ("read_only", "ro", "r")
+            result = start_sqlite_web(read_only=read_only)
+            status = 200 if result.get("ok") else 400
+            self._json(status, result)
+            return
+
+        if path == "/api/sqlite-web/stop":
+            stop_sqlite_web()
+            self._json(200, {"ok": True})
+            return
+
         if path != "/api/config":
             self._json(404, {"ok": False, "error": "not_found"})
             return
 
-        content_length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(content_length)
         try:
             payload = json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError:
@@ -241,6 +478,10 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     server = HTTPServer(("127.0.0.1", 8765), Handler)
     print("Hebrew config editor running at http://127.0.0.1:8765")
+    print(
+        f"sqlite-web (when started from the UI) uses http://{SQLITE_WEB_HOST}:{SQLITE_WEB_PORT}/ "
+        f"and stops after {SQLITE_WEB_TTL_SEC // 60} minutes."
+    )
     server.serve_forever()
 
 

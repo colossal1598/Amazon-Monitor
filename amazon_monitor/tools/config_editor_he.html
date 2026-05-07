@@ -60,6 +60,17 @@
       padding-bottom: 8px;
       border-bottom: 1px solid #e8eef5;
     }
+    h3.adv-sub {
+      margin: 20px 0 10px 0;
+      font-size: 0.95rem;
+      font-weight: 800;
+      color: #254c77;
+      padding: 0;
+      border: none;
+    }
+    h3.adv-sub:first-of-type {
+      margin-top: 0;
+    }
     .card {
       background: var(--card);
       padding: 20px 18px;
@@ -196,6 +207,46 @@
       outline: 2px solid var(--accent);
       outline-offset: 3px;
     }
+    button.secondary {
+      padding: 12px 22px;
+      cursor: pointer;
+      border: 2px solid #8aa8c9;
+      border-radius: 10px;
+      background: #fff;
+      color: #2c527d;
+      font-weight: 700;
+      font-size: 15px;
+      font-family: inherit;
+    }
+    button.secondary:hover { background: #f0f5fb; }
+    button.secondary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+    button.ghost {
+      padding: 10px 16px;
+      cursor: pointer;
+      border: 1px solid #c7d7ea;
+      border-radius: 10px;
+      background: #fbfdff;
+      color: #516274;
+      font-weight: 600;
+      font-size: 14px;
+      font-family: inherit;
+    }
+    button.ghost:hover { background: #eef4fc; }
+    .sqlite-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+    }
+    .sqlite-timer {
+      font-weight: 800;
+      font-size: 1.05rem;
+      color: #1f3a5f;
+      min-width: 5.5ch;
+    }
     details.card summary {
       cursor: pointer;
       font-weight: 800;
@@ -237,8 +288,8 @@
   <div class="page">
     <header class="page-head">
       <h1>הגדרות המוניטור</h1>
-      <p class="lede">כאן מגדירים את החיפושים, הסינון, הקצב והודעות הוואטסאפ. השמירה כותבת ישירות לקובץ ההגדרות של המוניטור.</p>
-      <p class="note">מפתח ה־API של שרת הוואטסאפ אינו מוצג כאן מטעמי אבטחה. כדי לשנות אותו יש לעדכן את הקובץ ידנית או לבקש ממנהל המערכת.</p>
+      <p class="lede">כאן מגדירים את החיפושים, הסינון, מעקב PDP, הקצב והודעות הוואטסאפ. השמירה כותבת ישירות לקובץ ההגדרות של המוניטור.</p>
+      <p class="note">מפתח ה־API של שרת הוואטסאפ אינו מוצג כאן מטעמי אבטחה — לעריכתו יש לעדכן את <code>config.yaml</code> ידנית. כתובת שרת ההודעות, מזהה הקבוצה, יעד שליחה חלופי ומצב דפדוף נמצאים תחת „הגדרות מתקדמות“.</p>
     </header>
 
     <section class="card" aria-labelledby="sec-search">
@@ -262,53 +313,6 @@
           </span>
         </div>
         <textarea id="search_aes_llc" rows="2" spellcheck="false"></textarea>
-      </div>
-    </section>
-
-    <section class="card" aria-labelledby="sec-delays">
-      <h2 id="sec-delays">השהיות וגלילה</h2>
-      <p style="margin:0 0 12px;font-size:14px;color:var(--muted);">מספרים בשניות. טווח אקראי בין המינימום למקסימום עוזר להיראות טבעי יותר.</p>
-      <div class="grid-2">
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">השהיית גלילה — מינימום</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">זמן קצר לאחר טעינת עמוד לפני המשך הפעולה. ערכים נמוכים מזרזים; גבוהים מדי עלולים להאט מיותר.</span>
-            </span>
-          </div>
-          <input type="number" id="delay_scroll_min" step="0.01" min="0">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">השהיית גלילה — מקסימום</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">הגבול העליון של טווח ההשהיה לאחר גלילה.</span>
-            </span>
-          </div>
-          <input type="number" id="delay_scroll_max" step="0.01" min="0">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">השהייה בין עמודים — מינימום</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">מנוחה קצרה לפני מעבר לעמוד תוצאות הבא. עוזר להימנע מעומס על האתר.</span>
-            </span>
-          </div>
-          <input type="number" id="delay_pagination_min" step="0.01" min="0">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">השהייה בין עמודים — מקסימום</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">הגבול העליון של ההשהיה בין עמודי תוצאות.</span>
-            </span>
-          </div>
-          <input type="number" id="delay_pagination_max" step="0.01" min="0">
-        </div>
       </div>
     </section>
 
@@ -346,8 +350,34 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="sec-scrape">
-      <h2 id="sec-scrape">תדירות, דפדוף ומגבלות</h2>
+    <section class="card" aria-labelledby="sec-pdp">
+      <h2 id="sec-pdp">מעקב PDP</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:var(--muted);">מוצרים ברשימה נבדקים בעמוד המוצר בכל סיבוב חיפוש; לא נספרים כ״חסרים מה־SERP״. התראות משתמשות באותן תבניות כמו לשאר ההתראות.</p>
+      <div class="field">
+        <div class="label-row">
+          <span class="label-title">ASIN למעקב PDP (שורה לכל מזהה)</span>
+          <span class="help-wrap">
+            <button type="button" class="help-btn" aria-label="הסבר">?</button>
+            <span class="tip-bubble" role="tooltip">מזהי ASIN שייבקרו בעמוד המוצר. במלאי נחשב רק כשיש מחיר קופה והטקסט של המוכר מכיל אחת ממחרוזות המוכר המותרות.</span>
+          </span>
+        </div>
+        <textarea id="pdp_watch_asins" placeholder="למשל B0XXXXXXXX" spellcheck="false"></textarea>
+      </div>
+      <div class="field">
+        <div class="label-row">
+          <span class="label-title">מחרוזות מוכר מותרות (שורה לכל ביטוי)</span>
+          <span class="help-wrap">
+            <button type="button" class="help-btn" aria-label="הסבר">?</button>
+            <span class="tip-bubble" role="tooltip">התאמה מנורמלת (ללא תלות ברישיות). ברירת מחדל טיפוסית: amazon.com, amazon export.</span>
+          </span>
+        </div>
+        <textarea id="pdp_allowed_seller_substrings" placeholder="amazon.com" spellcheck="false"></textarea>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="sec-pace">
+      <h2 id="sec-pace">קצב ודפדוף</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:var(--muted);">מצב דפדוף (אוטומטי / קבוע) נמצא תחת „הגדרות מתקדמות“.</p>
       <div class="grid-2">
         <div class="field">
           <div class="label-row">
@@ -361,23 +391,10 @@
         </div>
         <div class="field">
           <div class="label-row">
-            <span class="label-title">מצב דפדוף בעמודי תוצאות</span>
+            <span class="label-title">מספר עמודים (מצב קבוע / גיבוי)</span>
             <span class="help-wrap">
               <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">אוטומטי: המערכת מנסה להבין כמה עמודים יש. קבוע: משתמשים במספר העמודים מהשדה הבא בלבד.</span>
-            </span>
-          </div>
-          <select id="pagination_mode">
-            <option value="auto">אוטומטי</option>
-            <option value="fixed">קבוע</option>
-          </select>
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">מספר עמודים במצב קבוע</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">כמה עמודי תוצאות לסרוק כשהמצב הוא „קבוע“, או כשבמצב אוטומטי לא ניתן לקרוא את סך התוצאות.</span>
+              <span class="tip-bubble" role="tooltip">כמה עמודי תוצאות כשהמצב „קבוע“, או כשבמצב אוטומטי לא ניתן לקרוא את סך התוצאות.</span>
             </span>
           </div>
           <input type="number" id="search_pages" min="1" step="1">
@@ -391,26 +408,6 @@
             </span>
           </div>
           <input type="number" id="max_search_pages" min="1" step="1">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">מקסימום בקשות לדקה</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">הגבלת קצב גלובלית כדי להפחית חסימות ועומס על האתר.</span>
-            </span>
-          </div>
-          <input type="number" id="max_requests_per_minute" min="1" step="1">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">מקסימום שניות למחזור חיפוש</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">מגבלת זמן למחזור אחד כדי שלא „יתקע“ על סריקה ארוכה במיוחד.</span>
-            </span>
-          </div>
-          <input type="number" id="max_cycle_seconds" min="1" step="1">
         </div>
       </div>
     </section>
@@ -453,103 +450,24 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="sec-paths">
-      <h2 id="sec-paths">קבצים ותיקיות</h2>
-      <div class="grid-2">
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">מסד נתונים</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">קובץ במסד הנתונים שבו נשמרים המוצרים והמחירים. שינוי דורש הבנה של הנתיבים בתיקיית הפרויקט.</span>
-            </span>
-          </div>
-          <input type="text" id="db_path">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">תיקיית יומני רישום</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">איפה נשמרים קבצי הלוג של המוניטור.</span>
-            </span>
-          </div>
-          <input type="text" id="log_dir">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">תיקיית אימות דפדפן</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">תיקייה לאחסון נתוני התחברות/סשן של הדפדפן האוטומטי.</span>
-            </span>
-          </div>
-          <input type="text" id="auth_dir">
-        </div>
-      </div>
-    </section>
-
-    <section class="card" aria-labelledby="sec-wa">
-      <h2 id="sec-wa">וואטסאפ ושותפים</h2>
-      <div class="grid-2">
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">כתובת שרת ההודעות</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">כתובת ה־URL של שירות השליחה לוואטסאפ (למשל השרת המקומי שלכם). שדה חובה.</span>
-            </span>
-          </div>
-          <input type="url" id="wa_api_url" placeholder="הדביקו כאן את כתובת השרת המלאה" dir="ltr" style="text-align:left;">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">מזהה קבוצת וואטסאפ</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">מזהה הקבוצה אליה נשלחות ההתראות (פורמט כמו במערכת השליחה שלכם). שדה חובה.</span>
-            </span>
-          </div>
-          <input type="text" id="wa_group_id">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">שליחה ישירות למספר (אופציונלי)</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">אם השרת תומך בשליחה ללא קבוצה, ניתן למלא כאן יעד חלופי. ניתן להשאיר ריק אם משתמשים רק בקבוצה.</span>
-            </span>
-          </div>
-          <input type="text" id="wa_client_to">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <span class="label-title">תג שותפים באמזון</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">קוד השותף שמצורף לקישורי המוצר בהודעות.</span>
-            </span>
-          </div>
-          <input type="text" id="affiliate_tag">
-        </div>
-      </div>
+    <section class="card" aria-labelledby="sec-affiliate">
+      <h2 id="sec-affiliate">תג שותפים</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:var(--muted);">חיבור לשרת הוואטסאפ ומזהה הקבוצה — תחת „הגדרות מתקדמות“.</p>
       <div class="field">
-        <div class="check-row">
-          <input type="checkbox" id="wa_send_heartbeat">
-          <div class="label-row" style="margin-bottom:0;">
-            <span class="label-title">שליחת הודעת „חיים“ תקופתית לשרת</span>
-            <span class="help-wrap">
-              <button type="button" class="help-btn" aria-label="הסבר">?</button>
-              <span class="tip-bubble" role="tooltip">כאשר מסומן, המערכת שולחת עדכון תקופתי שהכל תקין או דיווח על שגיאה — לפי התבניות למטה.</span>
-            </span>
-          </div>
+        <div class="label-row">
+          <span class="label-title">תג שותפים באמזון</span>
+          <span class="help-wrap">
+            <button type="button" class="help-btn" aria-label="הסבר">?</button>
+            <span class="tip-bubble" role="tooltip">קוד השותף שמצורף לקישורי המוצר בהודעות.</span>
+          </span>
         </div>
+        <input type="text" id="affiliate_tag">
       </div>
     </section>
 
     <section class="card tpl-grid" aria-labelledby="sec-templates">
       <h2 id="sec-templates">תבניות הודעות</h2>
-      <p style="margin:0 0 10px;font-size:14px;color:var(--muted);">בחרו תיבת טקסט של תבנית, ואז לחצו על אחד השדות למטה כדי להוסיף אותו להודעה.</p>
+      <p style="margin:0 0 10px;font-size:14px;color:var(--muted);">רק תבניות להתראות מוצר (חיצוניות). בדיקת הקמה, דופק ושגיאות חיפוש מוגדרות בקוד ואינן נשמרות כאן.</p>
       <div class="chips" id="chips" aria-label="שדות דינמיים להוספה"></div>
 
       <div class="field">
@@ -592,59 +510,285 @@
         </div>
         <textarea id="tpl_back_in_stock"></textarea>
       </div>
-      <div class="field">
-        <div class="label-row">
-          <span class="label-title">בדיקת הקמה</span>
-          <span class="help-wrap">
-            <button type="button" class="help-btn" aria-label="הסבר">?</button>
-            <span class="tip-bubble" role="tooltip">הודעת בדיקה בעת הגדרת המערכת או בדיקת חיבור.</span>
-          </span>
-        </div>
-        <textarea id="tpl_setup_test"></textarea>
-      </div>
-      <div class="field">
-        <div class="label-row">
-          <span class="label-title">דופק תקין</span>
-          <span class="help-wrap">
-            <button type="button" class="help-btn" aria-label="הסבר">?</button>
-            <span class="tip-bubble" role="tooltip">מצב כשהודעת הלב תקינה נשלחה בהצלחה.</span>
-          </span>
-        </div>
-        <textarea id="tpl_heartbeat_ok"></textarea>
-      </div>
-      <div class="field">
-        <div class="label-row">
-          <span class="label-title">שגיאת דופק</span>
-          <span class="help-wrap">
-            <button type="button" class="help-btn" aria-label="הסבר">?</button>
-            <span class="tip-bubble" role="tooltip">כששליחת בדיקת החיים נכשלה.</span>
-          </span>
-        </div>
-        <textarea id="tpl_heartbeat_error"></textarea>
-      </div>
-      <div class="field">
-        <div class="label-row">
-          <span class="label-title">שגיאת חיפוש</span>
-          <span class="help-wrap">
-            <button type="button" class="help-btn" aria-label="הסבר">?</button>
-            <span class="tip-bubble" role="tooltip">כשמחזור החיפוש נכשל או נתקע עם שגיאה.</span>
-          </span>
-        </div>
-        <textarea id="tpl_search_error"></textarea>
+    </section>
+
+    <section class="card" aria-labelledby="sec-sqlite">
+      <h2 id="sec-sqlite">דפדפן מסד נתונים (sqlite-web)</h2>
+      <p style="margin:0 0 10px;font-size:14px;color:var(--muted);">נפתח בחלון נפרד. המופע נסגר אוטומטית אחרי 10 דקות. מצב עריכה עלול להתנגש עם המוניטור שרץ — תוצג אזהרה.</p>
+      <div class="sqlite-toolbar">
+        <button type="button" class="primary" id="sqliteBtnRo">קריאה בלבד</button>
+        <button type="button" class="secondary" id="sqliteBtnRw">עריכה</button>
+        <button type="button" class="ghost" id="sqliteBtnStop">סגור עכשיו</button>
+        <span class="sqlite-timer" id="sqliteCountdown" aria-live="polite">—</span>
       </div>
     </section>
 
     <details class="card">
       <summary>הגדרות מתקדמות</summary>
-      <div class="field" style="margin-top:14px;">
-        <div class="label-row">
-          <span class="label-title">פקודה להפעלת שרת וואטסאפ מחדש אחרי שמירה</span>
-          <span class="help-wrap">
-            <button type="button" class="help-btn" aria-label="הסבר">?</button>
-            <span class="tip-bubble" role="tooltip">אופציונלי. אם ממלאים, לאחר שמירה והפעלה מחדש המערכת תנסה להריץ את הפקודה בפאוורשל (למשל התחלת שרת נוד). השארו ריק אם לא צריך.</span>
-          </span>
+      <div style="margin-top:14px;">
+        <h3 class="adv-sub">וואטסאפ — חיבור</h3>
+        <div class="grid-2">
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">כתובת שרת ההודעות</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">כתובת ה־URL של שירות השליחה לוואטסאפ. שדה חובה לשמירה.</span>
+              </span>
+            </div>
+            <input type="url" id="wa_api_url" placeholder="הדביקו כאן את כתובת השרת המלאה" dir="ltr" style="text-align:left;">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">מזהה קבוצת וואטסאפ</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">מזהה הקבוצה אליה נשלחות ההתראות. שדה חובה לשמירה.</span>
+              </span>
+            </div>
+            <input type="text" id="wa_group_id">
+          </div>
+          <div class="field" style="grid-column: 1 / -1;">
+            <div class="label-row">
+              <span class="label-title">שליחה ישירות למספר (אופציונלי)</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">יעד חלופי אם השרת תומך. ניתן להשאיר ריק.</span>
+              </span>
+            </div>
+            <input type="text" id="wa_client_to">
+          </div>
         </div>
-        <input type="text" id="wa_restart_command" dir="ltr" style="text-align:left;">
+
+        <h3 class="adv-sub">דפדוף</h3>
+        <div class="field">
+          <div class="label-row">
+            <span class="label-title">מצב דפדוף בעמודי תוצאות</span>
+            <span class="help-wrap">
+              <button type="button" class="help-btn" aria-label="הסבר">?</button>
+              <span class="tip-bubble" role="tooltip">אוטומטי: המערכת מנסה להבין כמה עמודים יש. קבוע: משתמשים במספר העמודים מהשדה בקטע „קצב ודפדוף“.</span>
+            </span>
+          </div>
+          <select id="pagination_mode">
+            <option value="auto">אוטומטי</option>
+            <option value="fixed">קבוע</option>
+          </select>
+        </div>
+
+        <h3 class="adv-sub">השהיות וגלילה</h3>
+        <p style="margin:0 0 12px;font-size:14px;color:var(--muted);">מספרים בשניות. טווח אקראי בין המינימום למקסימום.</p>
+        <div class="grid-2">
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">השהיית גלילה — מינימום</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">זמן קצר לאחר טעינת עמוד לפני המשך הפעולה.</span>
+              </span>
+            </div>
+            <input type="number" id="delay_scroll_min" step="0.01" min="0">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">השהיית גלילה — מקסימום</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">הגבול העליון של טווח ההשהיה לאחר גלילה.</span>
+              </span>
+            </div>
+            <input type="number" id="delay_scroll_max" step="0.01" min="0">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">השהייה בין עמודים — מינימום</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">מנוחה לפני מעבר לעמוד תוצאות הבא.</span>
+              </span>
+            </div>
+            <input type="number" id="delay_pagination_min" step="0.01" min="0">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">השהייה בין עמודים — מקסימום</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">הגבול העליון של ההשהיה בין עמודי תוצאות.</span>
+              </span>
+            </div>
+            <input type="number" id="delay_pagination_max" step="0.01" min="0">
+          </div>
+        </div>
+
+        <h3 class="adv-sub">מגבלות סריקה ו־SERP</h3>
+        <div class="grid-2">
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">מקסימום בקשות לדקה</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">הגבלת קצב גלובלית.</span>
+              </span>
+            </div>
+            <input type="number" id="max_requests_per_minute" min="1" step="1">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">מקסימום שניות למחזור חיפוש</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">מגבלת זמן למחזור אחד.</span>
+              </span>
+            </div>
+            <input type="number" id="max_cycle_seconds" min="1" step="1">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">ניסיונות פנימיים ב־SERP</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">מספר סבבי goto פנימיים אחרי כשל בהמתנה לעמוד תוצאות.</span>
+              </span>
+            </div>
+            <input type="number" id="search_serp_inner_retries" min="0" step="1">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">השהיה אחרי קאפצ׳ה (שניות)</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">השהיה לפני המשך לאחר זיהוי מצב קאפצ׳ה / התאוששות.</span>
+              </span>
+            </div>
+            <input type="number" id="captcha_recovery_pause_seconds" min="0" step="1">
+          </div>
+        </div>
+
+        <h3 class="adv-sub">שער ומטבע (ILS)</h3>
+        <div class="field">
+          <div class="check-row">
+            <input type="checkbox" id="fx_enabled">
+            <div class="label-row" style="margin-bottom:0;">
+              <span class="label-title">הצגת הערכת שקלים בהודעות</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">כאשר מופעל, נטען שער USD/ILS (Frankfurter) ומוצג סיומת משוערת ליד המחיר בדולר.</span>
+              </span>
+            </div>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">רענון שער כל N סיבובי חיפוש מוצלחים</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">כל כמה מחזורי חיפוש מוצלחים לעדכן את השער מהרשת.</span>
+              </span>
+            </div>
+            <input type="number" id="fx_refresh_every_runs" min="1" step="1">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">שער גיבוי USD→ILS</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">כאשר אין שער זמין מהמטמון או מהרשת.</span>
+              </span>
+            </div>
+            <input type="number" id="fx_fallback_usd_ils" min="0" step="0.01">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">Timeout בקשת שער (שניות)</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">מגבלת זמן לבקשת HTTP לשער.</span>
+              </span>
+            </div>
+            <input type="number" id="fx_request_timeout_seconds" min="0" step="0.1">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">נתיב קובץ מטמון שער</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">איפה נשמר שער הדולר/שקל בין הריצות.</span>
+              </span>
+            </div>
+            <input type="text" id="fx_cache_path" dir="ltr" style="text-align:left;">
+          </div>
+        </div>
+
+        <h3 class="adv-sub">סינון כותרות (מתקדם)</h3>
+        <div class="field">
+          <div class="label-row">
+            <span class="label-title">ביטויים לסינון בכותרת (שורה לכל ביטוי)</span>
+            <span class="help-wrap">
+              <button type="button" class="help-btn" aria-label="הסבר">?</button>
+              <span class="tip-bubble" role="tooltip">התאמת תת־מחרוזת מנורמלת; ASIN ברשימה הלבנה עוקף.</span>
+            </span>
+          </div>
+          <textarea id="title_blacklist_phrases" placeholder="למשל magic the gathering"></textarea>
+        </div>
+
+        <h3 class="adv-sub">קבצים ותיקיות</h3>
+        <div class="grid-2">
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">מסד נתונים</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">קובץ מסד הנתונים של המוניטור.</span>
+              </span>
+            </div>
+            <input type="text" id="db_path">
+          </div>
+          <div class="field">
+            <div class="label-row">
+              <span class="label-title">תיקיית יומני רישום</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">איפה נשמרים קבצי הלוג.</span>
+              </span>
+            </div>
+            <input type="text" id="log_dir">
+          </div>
+          <div class="field" style="grid-column: 1 / -1;">
+            <div class="label-row">
+              <span class="label-title">תיקיית אימות דפדפן</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">תיקייה לנתוני סשן של הדפדפן האוטומטי.</span>
+              </span>
+            </div>
+            <input type="text" id="auth_dir">
+          </div>
+        </div>
+
+        <h3 class="adv-sub">וואטסאפ תפעולי</h3>
+        <div class="field">
+          <div class="check-row">
+            <input type="checkbox" id="wa_send_heartbeat">
+            <div class="label-row" style="margin-bottom:0;">
+              <span class="label-title">שליחת הודעת „חיים“ תקופתית</span>
+              <span class="help-wrap">
+                <button type="button" class="help-btn" aria-label="הסבר">?</button>
+                <span class="tip-bubble" role="tooltip">עדכון תקופתי שהכל תקין או דיווח שגיאה — לפי התבניות.</span>
+              </span>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <div class="label-row">
+            <span class="label-title">פקודה להפעלת שרת וואטסאפ מחדש אחרי שמירה</span>
+            <span class="help-wrap">
+              <button type="button" class="help-btn" aria-label="הסבר">?</button>
+              <span class="tip-bubble" role="tooltip">אופציונלי. פאוורשל — ריק אם לא נדרש.</span>
+            </span>
+          </div>
+          <input type="text" id="wa_restart_command" dir="ltr" style="text-align:left;">
+        </div>
       </div>
     </details>
 
@@ -656,13 +800,13 @@
 
   <script>
     const placeholders = [
-      "{title}", "{price_text}", "{old_price}", "{new_price}", "{affiliate_link}",
+      "{title}", "{price_text}", "{price_text_usd_only}", "{price_text_ils_suffix}",
+      "{old_price}", "{new_price}", "{affiliate_link}",
       "{asin}", "{timestamp}", "{error_message}", "{pct_drop}",
       "{shipping}"
     ];
     const templateIds = [
-      "tpl_default", "tpl_new_product", "tpl_price_drop", "tpl_back_in_stock",
-      "tpl_setup_test", "tpl_heartbeat_ok", "tpl_heartbeat_error", "tpl_search_error"
+      "tpl_default", "tpl_new_product", "tpl_price_drop", "tpl_back_in_stock"
     ];
 
     let activeTemplate = null;
@@ -749,6 +893,10 @@
       document.getElementById("asin_whitelist").value = listToText(c.whitelist);
       document.getElementById("asin_blacklist").value = listToText(c.blacklist);
 
+      document.getElementById("pdp_watch_asins").value = listToText(c.pdp_watch_asins);
+      document.getElementById("pdp_allowed_seller_substrings").value =
+        listToText(c.pdp_allowed_seller_substrings);
+
       document.getElementById("search_poll_minutes").value = c.search_poll_minutes ?? 4;
       document.getElementById("pagination_mode").value =
         (c.pagination_mode === "fixed") ? "fixed" : "auto";
@@ -756,6 +904,20 @@
       document.getElementById("max_search_pages").value = c.max_search_pages ?? 5;
       document.getElementById("max_requests_per_minute").value = c.max_requests_per_minute ?? 10;
       document.getElementById("max_cycle_seconds").value = c.max_cycle_seconds ?? 170;
+      document.getElementById("search_serp_inner_retries").value =
+        c.search_serp_inner_retries ?? 2;
+      document.getElementById("captcha_recovery_pause_seconds").value =
+        c.captcha_recovery_pause_seconds ?? 120;
+
+      document.getElementById("fx_enabled").checked = c.fx_enabled !== false;
+      document.getElementById("fx_refresh_every_runs").value = c.fx_refresh_every_runs ?? 10;
+      document.getElementById("fx_fallback_usd_ils").value = c.fx_fallback_usd_ils ?? 3.7;
+      document.getElementById("fx_request_timeout_seconds").value =
+        c.fx_request_timeout_seconds ?? 5;
+      document.getElementById("fx_cache_path").value = c.fx_cache_path || "";
+
+      document.getElementById("title_blacklist_phrases").value =
+        listToText(c.title_blacklist_phrases);
 
       document.getElementById("price_drop_percent").value = c.price_drop_percent ?? 10;
       document.getElementById("enable_missing_asin_oos").checked =
@@ -780,10 +942,6 @@
       document.getElementById("tpl_new_product").value = t.new_product || "";
       document.getElementById("tpl_price_drop").value = t.price_drop || "";
       document.getElementById("tpl_back_in_stock").value = t.back_in_stock || "";
-      document.getElementById("tpl_setup_test").value = t.setup_test || "";
-      document.getElementById("tpl_heartbeat_ok").value = t.heartbeat_ok || "";
-      document.getElementById("tpl_heartbeat_error").value = t.heartbeat_error || "";
-      document.getElementById("tpl_search_error").value = t.search_error || "";
     }
 
     async function saveConfig() {
@@ -806,7 +964,12 @@
         keywords: {
           required: linesToList(document.getElementById("kw_required")),
           whitelist: linesToList(document.getElementById("asin_whitelist")),
-          blacklist: linesToList(document.getElementById("asin_blacklist"))
+          blacklist: linesToList(document.getElementById("asin_blacklist")),
+          title_blacklist: linesToList(document.getElementById("title_blacklist_phrases"))
+        },
+        pdp: {
+          watch_asins: linesToList(document.getElementById("pdp_watch_asins")),
+          allowed_seller_substrings: linesToList(document.getElementById("pdp_allowed_seller_substrings"))
         },
         scraping: {
           search_poll_minutes: intOr(document.getElementById("search_poll_minutes"), 4),
@@ -814,7 +977,19 @@
           pagination_mode: document.getElementById("pagination_mode").value,
           max_search_pages: intOr(document.getElementById("max_search_pages"), 5),
           max_requests_per_minute: intOr(document.getElementById("max_requests_per_minute"), 10),
-          max_cycle_seconds: intOr(document.getElementById("max_cycle_seconds"), 170)
+          max_cycle_seconds: intOr(document.getElementById("max_cycle_seconds"), 170),
+          search_serp_inner_retries: intOr(document.getElementById("search_serp_inner_retries"), 2),
+          captcha_recovery_pause_seconds: intOr(
+            document.getElementById("captcha_recovery_pause_seconds"),
+            120
+          )
+        },
+        fx: {
+          fx_enabled: document.getElementById("fx_enabled").checked,
+          fx_refresh_every_runs: intOr(document.getElementById("fx_refresh_every_runs"), 10),
+          fx_fallback_usd_ils: numOr(document.getElementById("fx_fallback_usd_ils"), 3.7),
+          fx_request_timeout_seconds: numOr(document.getElementById("fx_request_timeout_seconds"), 5),
+          fx_cache_path: document.getElementById("fx_cache_path").value
         },
         alerts: {
           price_drop_percent: numOr(document.getElementById("price_drop_percent"), 10),
@@ -849,7 +1024,7 @@
       const data = await res.json();
       if (!res.ok || !data.ok) {
         const err = data.error === "missing_required_fields"
-          ? "חסרים כתובת השרת או מזהה הקבוצה בוואטסאפ."
+          ? "חסרים כתובת השרת או מזהה הקבוצה בוואטסאפ (בהגדרות מתקדמות)."
           : (data.error || "לא ידוע");
         setStatus("השמירה נכשלה: " + err, false);
         return;
@@ -857,10 +1032,61 @@
       setStatus("נשמר בהצלחה. השירותים הופעלו מחדש.");
     }
 
+    const SQLITE_RW_WARN =
+      "עריכת מסד הנתונים בזמן שהמוניטור רץ עלולה לגרום ל-SQLITE_BUSY, עיכובים או בעיות נתונים.\n\nלהמשיך בכל זאת?";
+
+    async function refreshSqliteStatus() {
+      try {
+        const res = await fetch("/api/sqlite-web/status");
+        const d = await res.json();
+        const el = document.getElementById("sqliteCountdown");
+        if (!d.running) {
+          el.textContent = "—";
+          return;
+        }
+        const s = Math.max(0, Math.floor(d.seconds_remaining ?? 0));
+        const m = Math.floor(s / 60);
+        const sec = s % 60;
+        el.textContent = `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+      } catch {
+        document.getElementById("sqliteCountdown").textContent = "—";
+      }
+    }
+
+    async function startSqlite(mode) {
+      const res = await fetch("/api/sqlite-web/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode })
+      });
+      const d = await res.json();
+      if (!res.ok || !d.ok) {
+        setStatus(d.message_he || d.error || "sqlite-web נכשל", false);
+        return;
+      }
+      if (d.url) window.open(d.url, "_blank", "noopener,noreferrer");
+      refreshSqliteStatus();
+    }
+
+    document.getElementById("sqliteBtnRo").addEventListener("click", () => {
+      startSqlite("read_only");
+    });
+    document.getElementById("sqliteBtnRw").addEventListener("click", () => {
+      if (!confirm(SQLITE_RW_WARN)) return;
+      startSqlite("edit");
+    });
+    document.getElementById("sqliteBtnStop").addEventListener("click", async () => {
+      await fetch("/api/sqlite-web/stop", { method: "POST" });
+      refreshSqliteStatus();
+    });
+    setInterval(refreshSqliteStatus, 1000);
+
     document.getElementById("saveBtn").addEventListener("click", saveConfig);
     makeChips();
     bindTemplateFocus();
-    loadConfig().catch(() => setStatus("טעינת ההגדרות נכשלה.", false));
+    loadConfig()
+      .then(() => refreshSqliteStatus())
+      .catch(() => setStatus("טעינת ההגדרות נכשלה.", false));
   </script>
 </body>
 </html>

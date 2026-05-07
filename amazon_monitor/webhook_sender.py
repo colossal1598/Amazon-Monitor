@@ -26,6 +26,9 @@ def _post_wa(config: dict[str, Any], payload: dict[str, Any]) -> None:
         LOGGER.warning("WhatsApp API call failed (%s): %s", url, exc)
 
 
+# YAML may only override these product-facing templates; operational alerts always use strings below.
+USER_OVERRIDABLE_MESSAGE_KEYS = frozenset({"default", "new_product", "price_drop", "back_in_stock"})
+
 DEFAULT_MESSAGE_TEMPLATES = {
     "default": (
         "New product detected!\n"
@@ -133,7 +136,9 @@ def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> st
     templates = DEFAULT_MESSAGE_TEMPLATES.copy()
     user_templates = config.get("wa_message_templates")
     if isinstance(user_templates, dict):
-        templates.update({k: str(v) for k, v in user_templates.items()})
+        for key, val in user_templates.items():
+            if key in USER_OVERRIDABLE_MESSAGE_KEYS:
+                templates[key] = str(val)
 
     template = templates.get(alert_type) or templates["default"]
     values = _SafeDict(
