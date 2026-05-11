@@ -29,6 +29,26 @@ from webhook_sender import send_alert, send_heartbeat, send_operational_error
 LOGGER = logging.getLogger("monitor")
 
 
+# Collect valid ASINs from SERP/pipeline rows for debug logs (sorted, unique).
+def _sorted_asins_from_items(rows: list[dict[str, Any]]) -> list[str]:
+    found: set[str] = set()
+    for row in rows:
+        a = (row.get("asin") or "").strip().upper()
+        if _valid_asin(a):
+            found.add(a)
+    return sorted(found)
+
+
+# Keep debug log lines bounded when many ASINs are marked OOS.
+def _asin_csv_truncated(asins: list[str], *, max_chars: int = 2000) -> str:
+    if not asins:
+        return ""
+    s = ",".join(asins)
+    if len(s) <= max_chars:
+        return s
+    return s[: max_chars - 20] + "...(truncated)"
+
+
 # ---------- Logging helpers (lifecycle vs debug) ----------
 def _kv_tail(**fields: Any) -> str:
     """Normalized key=value tail (quote values only when needed)."""
@@ -86,6 +106,14 @@ def _english_head(event: str, fields: dict[str, Any]) -> str:
         return "Reconcile missing skipped."
     if event == "pdp_watch_counts":
         return "PDP watch counts."
+    if event == "aes_llc_asin_debug":
+        return "AES LLC SERP ASINs (debug)."
+    if event == "search_union_asins":
+        return "Union SERP ASINs (debug)."
+    if event == "search_state_engine":
+        return "Search state engine run (debug)."
+    if event == "serp_pipeline_presence_debug":
+        return "SERP pipeline presence touch (debug)."
     return "Log."
 
 
@@ -374,6 +402,14 @@ def main() -> None:
                 filtered_before_free_shipping=aes_filtered_before_free,
                 filtered_free_shipping=len(aes_filtered),
             )
+            log_debug(
+                "aes_llc_asin_debug",
+                scraped_asins=_asin_csv_truncated(_sorted_asins_from_items(aes_items)),
+                pipeline_asins=_asin_csv_truncated(_sorted_asins_from_items(aes_pipeline_rows)),
+                relevant_asins=_asin_csv_truncated(_sorted_asins_from_items(aes_filtered)),
+                scraped_count=len(_sorted_asins_from_items(aes_items)),
+                relevant_count=len(_sorted_asins_from_items(aes_filtered)),
+            )
 
             merged_candidates = merge_search_candidates_by_asin(aes_filtered, amazon_com_filtered)
             search_candidates = exclude_asins_from_candidates(merged_candidates, pdp_watch_set)
@@ -389,13 +425,31 @@ def main() -> None:
             )
             if skipped_reason:
                 log_debug("search_reconcile_skipped", reason=skipped_reason, union_count=len(search_candidates))
-            alerts = state_engine.process_search_candidates(
+            union_asin_list = _sorted_asins_from_items(search_candidates)
+            log_debug(
+                "search_union_asins",
+                asins=_asin_csv_truncated(union_asin_list),
+                count=len(union_asin_list),
+            )
+            alerts, search_run_meta = state_engine.process_search_candidates(
                 search_candidates,
                 reconcile_missing=reconcile_missing,
                 source="main_search",
                 reconcile_exclude_asins=pdp_watch_set,
             )
             all_alerts.extend(alerts)
+            oos_asins = search_run_meta.get("marked_oos_asins") or []
+            log_debug(
+                "search_state_engine",
+                seen_count=search_run_meta.get("seen_count"),
+                new_count=search_run_meta.get("new_count"),
+                back_in_stock_count=search_run_meta.get("back_in_stock_count"),
+                price_drop_count=search_run_meta.get("price_drop_count"),
+                marked_oos_count=search_run_meta.get("marked_oos_count"),
+                marked_oos_asins=_asin_csv_truncated(oos_asins) if isinstance(oos_asins, list) else "",
+                reconcile_missing=search_run_meta.get("reconcile_missing"),
+                search_alerts=len(alerts),
+            )
 
             merged_pipeline = merge_search_candidates_by_asin(aes_pipeline_rows, amazon_com_pipeline_rows)
             pipeline_seen_asins = {
@@ -403,9 +457,15 @@ def main() -> None:
                 for row in merged_pipeline
                 if (row.get("asin") or "").strip()
             }
-            state_engine.touch_tracked_serp_pipeline_presence(
+            touch_rows = state_engine.touch_tracked_serp_pipeline_presence(
                 pipeline_seen_asins,
                 exclude_asins=pdp_watch_set,
+            )
+            log_debug(
+                "serp_pipeline_presence_debug",
+                rows_updated=touch_rows,
+                pipeline_asin_count=len(pipeline_seen_asins),
+                pipeline_asins=_asin_csv_truncated(sorted(pipeline_seen_asins)),
             )
 
             watch_list = sorted(pdp_watch_set)
@@ -441,6 +501,10 @@ def main() -> None:
                 alerts=len(all_alerts),
                 search_candidates=len(search_candidates),
                 pdp_watch=len(watch_list),
+                marked_oos=search_run_meta.get("marked_oos_count", 0),
+                search_new=search_run_meta.get("new_count", 0),
+                search_bis=search_run_meta.get("back_in_stock_count", 0),
+                search_price_drops=search_run_meta.get("price_drop_count", 0),
             )
             mark_job_success("search")
             fx_rate.bump_search_tick(config)

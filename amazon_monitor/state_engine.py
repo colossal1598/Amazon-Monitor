@@ -157,6 +157,7 @@ class StateEngine:
             total,
             len(targets),
             len(excl),
+            extra={"channel": "debug"},
         )
         return total
 
@@ -211,7 +212,7 @@ class StateEngine:
         _source: str,
         now: str,
         exclude_asins: set[str] | None = None,
-    ) -> int:
+    ) -> tuple[int, list[str]]:
         """Mark tracked ASINs absent from this healthy run as out-of-stock.
 
         Single-tenant DB: scope by ASIN only (seller column holds display names like
@@ -219,19 +220,31 @@ class StateEngine:
 
         ``exclude_asins`` (e.g. PDP watch list): never marked OOS here—stock for those rows
         comes from the PDP pass, not SERP presence.
+
+        Returns ``(rowcount, sorted ASINs that were updated)`` for debug logging.
         """
         if not seen_asins:
-            return 0
+            return 0, []
         excl = {str(a).upper() for a in (exclude_asins or ()) if a}
         seen_sorted = sorted(seen_asins)
         ph_seen = ",".join("?" for _ in seen_sorted)
         params: list[Any] = [now, *seen_sorted]
         extra_not_in = ""
+        select_params: list[Any] = [*seen_sorted]
         if excl:
             ex_sorted = sorted(excl)
             ph_ex = ",".join("?" for _ in ex_sorted)
             extra_not_in = f" AND asin NOT IN ({ph_ex})"
             params.extend(ex_sorted)
+            select_params.extend(ex_sorted)
+        select_sql = f"""
+            SELECT asin FROM products
+            WHERE in_stock != 0
+              AND asin NOT IN ({ph_seen})
+              {extra_not_in}
+            """
+        pre_rows = self.conn.execute(select_sql, select_params).fetchall()
+        marked_list = sorted({str(r[0]).upper() for r in pre_rows if r and r[0]})
         cursor = self.conn.execute(
             f"""
             UPDATE products
@@ -243,7 +256,7 @@ class StateEngine:
             """,
             params,
         )
-        return cursor.rowcount
+        return cursor.rowcount or 0, marked_list
 
     # Update the database from search-page results and generate alerts for new items, back-in-stock, and price drops.
     def process_search_candidates(
@@ -252,13 +265,15 @@ class StateEngine:
         reconcile_missing: bool = False,
         source: str = "amazon_export",
         reconcile_exclude_asins: set[str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Process scraped search candidates and emit new/stock/price alerts.
 
         When `reconcile_missing` is true, any tracked ASIN for the same source
         that is absent from this successful run is marked out-of-stock.
 
         ``reconcile_exclude_asins``: ASINs not subject to that absence rule (e.g. PDP-only watches).
+
+        Returns ``(alerts, run_meta)`` where ``run_meta`` includes counts and ASIN lists for debug logs.
         """
         alerts: list[dict[str, Any]] = []
         seen_asins: set[str] = set()
@@ -312,6 +327,7 @@ class StateEngine:
                             asin,
                             new_stock,
                             new_price,
+                            extra={"channel": "debug"},
                         )
                     continue
 
@@ -357,6 +373,26 @@ class StateEngine:
                         self.price_drop_percent,
                         self._price_alert_cooldown,
                     )
+                    if (
+                        not price_decision.emit
+                        and old_price is not None
+                        and new_price is not None
+                        and old_price > 0
+                        and new_price < old_price
+                    ):
+                        pct = ((old_price - new_price) / old_price) * 100
+                        LOGGER.info(
+                            "price_drop_skipped where=search asin=%s old_price=%s new_price=%s "
+                            "pct_drop=%.2f threshold_pct=%s skip=%s last_price_alert=%s",
+                            asin,
+                            old_price,
+                            new_price,
+                            pct,
+                            self.price_drop_percent,
+                            price_decision.skip_reason,
+                            row["last_price_alert"],
+                            extra={"channel": "debug"},
+                        )
                     if price_decision.emit:
                         alert = self._build_alert(
                             "price_drop",
@@ -374,8 +410,9 @@ class StateEngine:
                         self.conn.execute("UPDATE products SET last_price_alert = ? WHERE asin = ?", (now, asin))
                         price_drop_count += 1
             marked_oos_count = 0
+            marked_oos_asins: list[str] = []
             if reconcile_missing:
-                marked_oos_count = self._mark_missing_asins_out_of_stock(
+                marked_oos_count, marked_oos_asins = self._mark_missing_asins_out_of_stock(
                     seen_asins, source, utc_iso(), reconcile_exclude_asins
                 )
             LOGGER.info(
@@ -388,9 +425,20 @@ class StateEngine:
                 price_drop_count,
                 reconcile_missing,
                 len(reconcile_exclude_asins or ()),
+                extra={"channel": "debug"},
             )
             self.conn.commit()
-        return alerts
+        run_meta: dict[str, Any] = {
+            "seen_count": len(seen_asins),
+            "seen_asins": sorted(seen_asins),
+            "new_count": new_count,
+            "back_in_stock_count": back_in_stock_count,
+            "price_drop_count": price_drop_count,
+            "marked_oos_count": marked_oos_count,
+            "marked_oos_asins": marked_oos_asins,
+            "reconcile_missing": reconcile_missing,
+        }
+        return alerts, run_meta
 
     # Update the database from watched product-page checks and generate alerts, while skipping updates for pages that failed to scrape.
     def process_pdp_watch_candidates(
@@ -474,6 +522,7 @@ class StateEngine:
                             asin,
                             new_stock,
                             new_price,
+                            extra={"channel": "debug"},
                         )
                     continue
 
@@ -519,6 +568,26 @@ class StateEngine:
                         self.price_drop_percent,
                         self._price_alert_cooldown,
                     )
+                    if (
+                        not price_decision.emit
+                        and old_price is not None
+                        and new_price is not None
+                        and old_price > 0
+                        and new_price < old_price
+                    ):
+                        pct = ((old_price - new_price) / old_price) * 100
+                        LOGGER.info(
+                            "price_drop_skipped where=pdp_watch asin=%s old_price=%s new_price=%s "
+                            "pct_drop=%.2f threshold_pct=%s skip=%s last_price_alert=%s",
+                            asin,
+                            old_price,
+                            new_price,
+                            pct,
+                            self.price_drop_percent,
+                            price_decision.skip_reason,
+                            row["last_price_alert"],
+                            extra={"channel": "debug"},
+                        )
                     if price_decision.emit:
                         alert = self._build_alert(
                             "price_drop",
@@ -547,6 +616,7 @@ class StateEngine:
                 price_drop_count,
                 skipped_update_count,
                 missing_candidates,
+                extra={"channel": "debug"},
             )
             self.conn.commit()
         return alerts

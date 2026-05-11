@@ -33,7 +33,7 @@ class TestStateEngineSearchStock(unittest.TestCase):
                         }
                     ],
                     reconcile_missing=False,
-                )
+                )[0]
                 row = se.conn.execute("SELECT in_stock FROM products WHERE asin = ?", ("B0123456789",)).fetchone()
                 self.assertEqual(int(row[0]), 0)
             finally:
@@ -46,7 +46,7 @@ class TestStateEngineSearchStock(unittest.TestCase):
             se = StateEngine(str(db), price_drop_percent=10)
             try:
                 now = "2020-01-01T00:00:00+00:00"
-                alerts = se.process_search_candidates(
+                alerts, _meta = se.process_search_candidates(
                     [
                         {
                             "asin": "B033333333",
@@ -111,7 +111,7 @@ class TestStateEngineSearchStock(unittest.TestCase):
                     ],
                     reconcile_missing=True,
                     reconcile_exclude_asins={"B022222222"},
-                )
+                )[0]
                 r1 = se.conn.execute("SELECT in_stock FROM products WHERE asin = ?", ("B011111111",)).fetchone()
                 r2 = se.conn.execute("SELECT in_stock FROM products WHERE asin = ?", ("B022222222",)).fetchone()
                 self.assertEqual(int(r1[0]), 1)
@@ -147,7 +147,7 @@ class TestStateEngineSearchStock(unittest.TestCase):
                     ),
                 )
                 se.conn.commit()
-                se.process_search_candidates(
+                _alerts, meta = se.process_search_candidates(
                     [
                         {
                             "asin": "B011111111",
@@ -161,6 +161,8 @@ class TestStateEngineSearchStock(unittest.TestCase):
                     ],
                     reconcile_missing=True,
                 )
+                self.assertEqual(meta.get("marked_oos_count"), 1)
+                self.assertEqual(meta.get("marked_oos_asins"), ["B022222222"])
                 visible = se.conn.execute("SELECT in_stock FROM products WHERE asin = ?", ("B011111111",)).fetchone()
                 missing = se.conn.execute("SELECT in_stock FROM products WHERE asin = ?", ("B022222222",)).fetchone()
                 self.assertEqual(int(visible[0]), 1)
@@ -182,7 +184,7 @@ class TestStateEngineSearchStock(unittest.TestCase):
                     ("B0999999999", "Pokemon Item", "search", 100.0, now, now),
                 )
                 se.conn.commit()
-                alerts = se.process_search_candidates(
+                alerts, _meta = se.process_search_candidates(
                     [
                         {
                             "asin": "B0999999999",
