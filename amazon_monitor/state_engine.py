@@ -111,6 +111,55 @@ class StateEngine:
             rows = self.conn.execute("SELECT asin FROM products").fetchall()
         return {str(r[0]).upper() for r in rows if r and r[0]}
 
+    _SERP_PRESENCE_CHUNK = 400
+
+    # Refresh last_seen / in_stock for ASINs that passed the search filter pipeline (no alerts, no INSERT).
+    def touch_tracked_serp_pipeline_presence(
+        self,
+        asins: set[str],
+        *,
+        exclude_asins: set[str] | None = None,
+    ) -> int:
+        """Set in_stock=1 and last_seen for existing rows whose ASINs appear in the pipeline merge.
+
+        Used after ``process_search_candidates`` so tracked listings that pass Pokémon/stage1/keywords
+        but not the free-shipping alert path still show fresh presence. PDP-watch ASINs should be
+        passed in ``exclude_asins`` so SERP does not overwrite PDP-owned stock.
+
+        SQLite ``UPDATE`` only affects rows that exist; unknown ASINs are ignored. Chunked IN lists
+        stay under typical SQLite variable limits.
+        """
+        normalized = {str(a).strip().upper() for a in asins if a and str(a).strip()}
+        excl = {str(a).strip().upper() for a in (exclude_asins or ()) if a}
+        targets = sorted(normalized - excl)
+        if not targets:
+            return 0
+        now = utc_iso()
+        total = 0
+        chunk_size = self._SERP_PRESENCE_CHUNK
+        with self.lock:
+            for i in range(0, len(targets), chunk_size):
+                chunk = targets[i : i + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                cur = self.conn.execute(
+                    f"""
+                    UPDATE products
+                    SET in_stock = 1,
+                        last_seen = ?
+                    WHERE asin IN ({placeholders})
+                    """,
+                    [now, *chunk],
+                )
+                total += cur.rowcount or 0
+            self.conn.commit()
+        LOGGER.info(
+            "serp_pipeline_presence_touch rows=%s asins_requested=%s excluded=%s",
+            total,
+            len(targets),
+            len(excl),
+        )
+        return total
+
     # Save an alert record into the database so you have a history of what was sent and when.
     def _record_alert(self, alert: dict[str, Any]) -> None:
         self.conn.execute(

@@ -200,3 +200,95 @@ class TestStateEngineSearchStock(unittest.TestCase):
                 self.assertEqual(types, ["back_in_stock"])
             finally:
                 se.conn.close()
+
+    def test_touch_pipeline_presence_updates_existing_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "m.db"
+            se = StateEngine(str(db), price_drop_percent=10)
+            try:
+                old = "2019-01-01T00:00:00+00:00"
+                se.conn.execute(
+                    """
+                    INSERT INTO products (asin, title, seller, price, in_stock, first_seen, last_seen)
+                    VALUES (?, ?, ?, ?, 0, ?, ?), (?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    ("B0AAAAAAAA", "x", "s", 1.0, old, old, "B0BBBBBBBB", "y", "s", 2.0, old, old),
+                )
+                se.conn.commit()
+                n = se.touch_tracked_serp_pipeline_presence({"B0AAAAAAAA", "B0BBBBBBBB"})
+                self.assertEqual(n, 2)
+                r_a = se.conn.execute(
+                    "SELECT in_stock, last_seen FROM products WHERE asin = ?", ("B0AAAAAAAA",)
+                ).fetchone()
+                r_b = se.conn.execute(
+                    "SELECT in_stock, last_seen FROM products WHERE asin = ?", ("B0BBBBBBBB",)
+                ).fetchone()
+                self.assertEqual(int(r_a[0]), 1)
+                self.assertEqual(int(r_b[0]), 1)
+                self.assertNotEqual(str(r_a[1]), old)
+                self.assertNotEqual(str(r_b[1]), old)
+            finally:
+                se.conn.close()
+
+    def test_touch_pipeline_presence_excludes_asins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "m.db"
+            se = StateEngine(str(db), price_drop_percent=10)
+            try:
+                old = "2019-01-01T00:00:00+00:00"
+                se.conn.execute(
+                    """
+                    INSERT INTO products (asin, title, seller, price, in_stock, first_seen, last_seen)
+                    VALUES (?, ?, ?, ?, 0, ?, ?), (?, ?, ?, ?, 0, ?, ?)
+                    """,
+                    ("B0AAAAAAAA", "x", "s", 1.0, old, old, "B0BBBBBBBB", "y", "s", 2.0, old, old),
+                )
+                se.conn.commit()
+                se.touch_tracked_serp_pipeline_presence(
+                    {"B0AAAAAAAA", "B0BBBBBBBB"},
+                    exclude_asins={"B0BBBBBBBB"},
+                )
+                r_a = se.conn.execute(
+                    "SELECT in_stock, last_seen FROM products WHERE asin = ?", ("B0AAAAAAAA",)
+                ).fetchone()
+                r_b = se.conn.execute(
+                    "SELECT in_stock, last_seen FROM products WHERE asin = ?", ("B0BBBBBBBB",)
+                ).fetchone()
+                self.assertEqual(int(r_a[0]), 1)
+                self.assertNotEqual(str(r_a[1]), old)
+                self.assertEqual(int(r_b[0]), 0)
+                self.assertEqual(str(r_b[1]), old)
+            finally:
+                se.conn.close()
+
+    def test_touch_pipeline_presence_chunking(self) -> None:
+        prev_chunk = StateEngine._SERP_PRESENCE_CHUNK
+        StateEngine._SERP_PRESENCE_CHUNK = 2
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                db = Path(tmp) / "m.db"
+                se = StateEngine(str(db), price_drop_percent=10)
+                try:
+                    old = "2019-01-01T00:00:00+00:00"
+                    for i in range(5):
+                        asin = f"B{100000000 + i}"
+                        se.conn.execute(
+                            """
+                            INSERT INTO products (asin, title, seller, price, in_stock, first_seen, last_seen)
+                            VALUES (?, ?, ?, ?, 0, ?, ?)
+                            """,
+                            (asin, "t", "s", 1.0, old, old),
+                        )
+                    se.conn.commit()
+                    asins = {f"B{100000000 + j}" for j in range(5)}
+                    n = se.touch_tracked_serp_pipeline_presence(asins)
+                    self.assertEqual(n, 5)
+                    cnt = se.conn.execute(
+                        "SELECT COUNT(*) FROM products WHERE in_stock = 1 AND last_seen != ?",
+                        (old,),
+                    ).fetchone()[0]
+                    self.assertEqual(cnt, 5)
+                finally:
+                    se.conn.close()
+        finally:
+            StateEngine._SERP_PRESENCE_CHUNK = prev_chunk

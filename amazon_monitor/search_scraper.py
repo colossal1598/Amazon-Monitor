@@ -320,6 +320,42 @@ def _valid_asin(value: str | None) -> bool:
     return bool(value and _ASIN_RE.match(value.strip().upper()))
 
 
+# Scroll the “More results” heading into view so lazy blocks below the first fold mount (AES / dense SERPs).
+def _scroll_serp_more_results_into_view(page, scroll_delay_range: tuple[float, float]) -> None:
+    try:
+        page.locator('h2:has-text("More results")').first.scroll_into_view_if_needed(timeout=5000)
+        time.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+    except Exception as exc:
+        LOGGER.debug("serp_more_results_scroll skipped: %s", exc)
+
+
+# Extra organic row roots under the main slot (same ASINs as s-search-result when Amazon splits sections).
+def _fallback_main_slot_asin_roots(page) -> list[Any]:
+    roots: list[Any] = []
+    seen_id: set[int] = set()
+    for sel in (
+        "div.s-main-slot div.s-result-item.s-asin[data-asin]",
+        "div.s-main-slot div[role='listitem'][data-asin]",
+    ):
+        try:
+            nodes = page.query_selector_all(sel)
+        except Exception:
+            nodes = []
+        for node in nodes:
+            try:
+                kid = id(node)
+            except Exception:
+                continue
+            if kid in seen_id:
+                continue
+            asin = (node.get_attribute("data-asin") or "").strip()
+            if not _valid_asin(asin):
+                continue
+            seen_id.add(kid)
+            roots.append(node)
+    return roots
+
+
 # Slowly scroll the results page until it settles so lazy-loaded cards and tiles have a chance to appear before we collect them.
 def _scroll_serp_to_settle(page, scroll_delay_range: tuple[float, float], max_steps: int = 10) -> None:
     """Step-scroll the results page so lazy-loaded rows/carousel tiles attach before querying."""
@@ -561,6 +597,8 @@ def _scrape_single_attempt(
                 serp_inner_retries=serp_inner_retries,
             )
             _scroll_serp_to_settle(page, scroll_delay_range)
+            _scroll_serp_more_results_into_view(page, scroll_delay_range)
+            _scroll_serp_to_settle(page, scroll_delay_range, max_steps=6)
 
             html = page.content()
             if page_num == 1:
@@ -605,6 +643,7 @@ def _scrape_single_attempt(
 
             seen_asins_page: set[str] = set()
             cards = page.query_selector_all("div[data-component-type='s-search-result']")
+            n_primary = 0
             for card in cards:
                 row = _collect_product_row(card, source=source, current_url=current_url)
                 if not row:
@@ -612,9 +651,31 @@ def _scrape_single_attempt(
                 if row["asin"] in seen_asins_page:
                     continue
                 seen_asins_page.add(row["asin"])
+                n_primary += 1
                 if collect_debug:
                     _append_debug_for_row(debug_data, row)
                 all_products.append(_strip_debug(dict(row)))
+
+            n_fallback = 0
+            for card in _fallback_main_slot_asin_roots(page):
+                a = (card.get_attribute("data-asin") or "").strip().upper()
+                if a in seen_asins_page:
+                    continue
+                row = _collect_product_row(card, source=source, current_url=current_url)
+                if not row:
+                    continue
+                seen_asins_page.add(row["asin"])
+                n_fallback += 1
+                if collect_debug:
+                    _append_debug_for_row(debug_data, row)
+                all_products.append(_strip_debug(dict(row)))
+            LOGGER.debug(
+                "serp_card_counts source=%s page=%s primary=%s fallback_added=%s",
+                source,
+                page_num,
+                n_primary,
+                n_fallback,
+            )
 
             for card in _carousel_tile_roots(page):
                 a = (card.get_attribute("data-asin") or "").strip().upper()

@@ -73,6 +73,8 @@ def _english_head(event: str, fields: dict[str, Any]) -> str:
         return "Scraping PDP watch list."
     if event == "search_cycle_done":
         return "Cycle done."
+    if event == "search_serp_candidate_counts":
+        return "SERP candidate counts."
     # Debug
     if event == "search_amazon_com_counts":
         return "Amazon.com SERP counts."
@@ -317,9 +319,16 @@ def main() -> None:
                 pagination_delay_range=page_r,
                 serp_inner_retries=serp_inner_retries,
             )
-            amazon_com_filtered, amazon_com_meta = run_search_filter_pipeline(amazon_com_items, config)
-            amazon_com_filtered_before_free = len(amazon_com_filtered)
-            amazon_com_filtered = filter_free_shipping_candidates(amazon_com_filtered)
+            amazon_com_pipeline_rows, amazon_com_meta = run_search_filter_pipeline(amazon_com_items, config)
+            amazon_com_filtered_before_free = len(amazon_com_pipeline_rows)
+            amazon_com_filtered = filter_free_shipping_candidates(amazon_com_pipeline_rows)
+            log_lifecycle(
+                "search_serp_candidate_counts",
+                source=amazon_com_src,
+                raw_serp_cards=len(amazon_com_items),
+                pipeline_candidates=amazon_com_filtered_before_free,
+                after_free_shipping=len(amazon_com_filtered),
+            )
             log_debug(
                 "search_amazon_com_counts",
                 raw=len(amazon_com_items),
@@ -347,9 +356,16 @@ def main() -> None:
                 pagination_delay_range=page_r,
                 serp_inner_retries=serp_inner_retries,
             )
-            aes_filtered, aes_meta = run_search_filter_pipeline(aes_items, config)
-            aes_filtered_before_free = len(aes_filtered)
-            aes_filtered = filter_free_shipping_candidates(aes_filtered)
+            aes_pipeline_rows, aes_meta = run_search_filter_pipeline(aes_items, config)
+            aes_filtered_before_free = len(aes_pipeline_rows)
+            aes_filtered = filter_free_shipping_candidates(aes_pipeline_rows)
+            log_lifecycle(
+                "search_serp_candidate_counts",
+                source=aes_llc_src,
+                raw_serp_cards=len(aes_items),
+                pipeline_candidates=aes_filtered_before_free,
+                after_free_shipping=len(aes_filtered),
+            )
             log_debug(
                 "search_aes_llc_counts",
                 raw=len(aes_items),
@@ -379,6 +395,17 @@ def main() -> None:
                 reconcile_exclude_asins=pdp_watch_set,
             )
             all_alerts.extend(alerts)
+
+            merged_pipeline = merge_search_candidates_by_asin(amazon_com_pipeline_rows, aes_pipeline_rows)
+            pipeline_seen_asins = {
+                (row.get("asin") or "").strip().upper()
+                for row in merged_pipeline
+                if (row.get("asin") or "").strip()
+            }
+            state_engine.touch_tracked_serp_pipeline_presence(
+                pipeline_seen_asins,
+                exclude_asins=pdp_watch_set,
+            )
 
             watch_list = sorted(pdp_watch_set)
             if watch_list:
