@@ -358,7 +358,8 @@ def main() -> None:
             )
             aes_pipeline_rows, aes_meta = run_search_filter_pipeline(aes_items, config)
             aes_filtered_before_free = len(aes_pipeline_rows)
-            aes_filtered = filter_free_shipping_candidates(aes_pipeline_rows)
+            # AES LLC SERP: skip free-shipping filter (seller-scoped page; delivery line often differs from amazon.com SERP).
+            aes_filtered = aes_pipeline_rows
             log_lifecycle(
                 "search_serp_candidate_counts",
                 source=aes_llc_src,
@@ -374,7 +375,7 @@ def main() -> None:
                 filtered_free_shipping=len(aes_filtered),
             )
 
-            merged_candidates = merge_search_candidates_by_asin(amazon_com_filtered, aes_filtered)
+            merged_candidates = merge_search_candidates_by_asin(aes_filtered, amazon_com_filtered)
             search_candidates = exclude_asins_from_candidates(merged_candidates, pdp_watch_set)
             pdp_excluded_from_search = len(merged_candidates) - len(search_candidates)
             reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(search_candidates))
@@ -396,7 +397,7 @@ def main() -> None:
             )
             all_alerts.extend(alerts)
 
-            merged_pipeline = merge_search_candidates_by_asin(amazon_com_pipeline_rows, aes_pipeline_rows)
+            merged_pipeline = merge_search_candidates_by_asin(aes_pipeline_rows, amazon_com_pipeline_rows)
             pipeline_seen_asins = {
                 (row.get("asin") or "").strip().upper()
                 for row in merged_pipeline
