@@ -52,6 +52,29 @@ class TestMainSearchUnion(unittest.TestCase):
         self.assertEqual(rows[0]["price"], 21.99)
         self.assertTrue(rows[0]["in_stock"])
 
+    def test_merge_prefers_amazon_com_price_when_both_in_stock(self) -> None:
+        rows = merge_search_candidates_by_asin(
+            [
+                {
+                    "asin": "B012345678",
+                    "title": "Amazon.com Row",
+                    "price": 100.0,
+                    "in_stock": True,
+                }
+            ],
+            [
+                {
+                    "asin": "B012345678",
+                    "title": "AES Row",
+                    "price": 80.0,
+                    "in_stock": True,
+                }
+            ],
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["price"], 100.0)
+        self.assertEqual(rows[0]["title"], "Amazon.com Row")
+
     def test_pdp_watch_asins_are_excluded_from_serp_candidates(self) -> None:
         merged = merge_search_candidates_by_asin(
             [

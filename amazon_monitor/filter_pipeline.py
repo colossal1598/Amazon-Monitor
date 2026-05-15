@@ -221,7 +221,11 @@ def _merge_whitelist_raw(
 
 
 # Explain why an item fails the first filtering gate so you can see what’s being dropped and why.
-def stage1_reject_reason(item: dict[str, Any]) -> str | None:
+def stage1_reject_reason(
+    item: dict[str, Any],
+    *,
+    require_shipping_signal: bool = True,
+) -> str | None:
     """If this row fails Stage 1, return a short machine reason; if it passes, return None."""
     title = item.get("title") or ""
     if not _has_pokemon_tcg_title(title):
@@ -233,28 +237,36 @@ def stage1_reject_reason(item: dict[str, Any]) -> str | None:
         if "see price" in pt:
             return "see_price_placeholder"
         return "invalid_price_value"
-    if not _has_shipping_qualifier_on_card(item):
+    if require_shipping_signal and not _has_shipping_qualifier_on_card(item):
         return "no_shipping_or_delivery_signal"
     return None
 
 
 # Run the first “basic quality” filter over raw search results and keep only the rows that look usable.
-def filter_stage1_candidates(raw_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Pokémon TCG title + valid price + any scraped shipping/delivery signal on the card."""
+def filter_stage1_candidates(
+    raw_items: list[dict[str, Any]],
+    *,
+    require_shipping_signal: bool = True,
+) -> list[dict[str, Any]]:
+    """Pokémon TCG title + valid price + optional scraped shipping/delivery signal on the card."""
     out: list[dict[str, Any]] = []
     for item in raw_items:
-        if stage1_reject_reason(item) is None:
+        if stage1_reject_reason(item, require_shipping_signal=require_shipping_signal) is None:
             out.append(dict(item))
     return out
 
 
 # Build a small report of what got rejected in stage 1 so logs can show the breakdown and examples.
-def stage1_reject_report(raw_items: list[dict[str, Any]]) -> tuple[dict[str, int], list[dict[str, Any]]]:
+def stage1_reject_report(
+    raw_items: list[dict[str, Any]],
+    *,
+    require_shipping_signal: bool = True,
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
     """Per-item reject reasons plus aggregate counts (for logs / meta)."""
     counts: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
     for item in raw_items:
-        reason = stage1_reject_reason(item)
+        reason = stage1_reject_reason(item, require_shipping_signal=require_shipping_signal)
         if reason is None:
             continue
         counts[reason] = counts.get(reason, 0) + 1
@@ -405,19 +417,25 @@ def _rows_for_state_engine(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def run_search_filter_pipeline(
     raw_items: list[dict[str, Any]],
     config: dict[str, Any],
+    *,
+    require_shipping_signal: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Stage1 gates + whitelist merge + YAML blacklist + required_keywords -> state-engine rows."""
-    meta: dict[str, Any] = {"pipeline": "search"}
+    meta: dict[str, Any] = {"pipeline": "search", "require_shipping_signal": require_shipping_signal}
     whitelist_set = _config_asin_set(config, "whitelist")
     blacklist_set = _config_asin_set(config, "blacklist")
     meta["whitelist_count"] = len(whitelist_set)
     meta["yaml_blacklist_count"] = len(blacklist_set)
     _maybe_warn_incompatible_url_facets(raw_items, meta)
-    reject_counts, reject_rows = stage1_reject_report(raw_items)
+    reject_counts, reject_rows = stage1_reject_report(
+        raw_items, require_shipping_signal=require_shipping_signal
+    )
     meta["stage1_reject_counts"] = reject_counts
     meta["stage1_rejects"] = reject_rows
     meta["stage1_pass_title_price_shipping"] = len(raw_items) - sum(reject_counts.values())
-    stage1_core = filter_stage1_candidates(raw_items)
+    stage1_core = filter_stage1_candidates(
+        raw_items, require_shipping_signal=require_shipping_signal
+    )
     meta["stage1_core_count"] = len(stage1_core)
     merged = _merge_whitelist_raw(raw_items, stage1_core, whitelist_set)
     meta["stage1_after_whitelist_merge"] = len(merged)

@@ -5,7 +5,7 @@ Local Python monitor for Pokemon TCG listings on Amazon.com: Playwright search s
 ## What This Project Does
 
 - **`search_urls.amazon_com`** — scrapes the full Amazon.com–scoped result set (dynamic pagination from Amazon `s-metadata`, capped by `max_search_pages` and `max_cycle_seconds`). Drives catalog updates, price drops, back-in-stock, and optional missing-ASIN reconciliation.
-- **`search_urls.aes_llc`** — Amazon Export Sales LLC (`me=` scope), **page 1 only**. After the same filters as the Amazon.com pass, only ASINs **not already in the database** are processed, with **no** missing-ASIN reconcile (avoids false OOS from a partial page).
+- **`search_urls.aes_llc`** — Amazon Export Sales LLC (`me=` scope), **page 1 only**. Uses the same Pokémon TCG / price / keyword pipeline as Amazon.com, but **skips** the stage-1 shipping/delivery-line gate and the post-pipeline **free-delivery-only** filter (AES cards often lack a delivery block). Merged with the Amazon.com pass (Amazon.com wins when both list the same in-stock ASIN). For **`pdp_watch_asins`**, if the PDP scrape fails or shows the wrong seller, the same-cycle AES SERP row is used as a fallback (no false OOS).
 - Sends alerts to your local WhatsApp API server.
 
 ## Configuration
@@ -14,7 +14,7 @@ Edit `config.yaml`:
 
 - `search_urls.amazon_com` — Amazon.com slot SERP URL (filters/sort embedded in the link).
 - `search_urls.aes_llc` — Amazon Export Sales LLC seller-scoped URL.
-- **Do not rely on combining** free-shipping refines (`p_n_is_free_shipping` in `rh`) **with** seller refines (`p_6` / `emi`) in one Amazon search URL—Amazon often does not honor both. Stage1 only needs a **visible shipping/delivery line** on the card: non-empty **`shipping_text`** (from `div[data-cy="delivery-block"]` / `.udm-primary-delivery-message` when present), or **`delivery` / `shipping`** in the scraped blob, or **free** phrasing (`free delivery` / `free shipping`, or **חינם** on the line). No currency parsing.
+- **Do not rely on combining** free-shipping refines (`p_n_is_free_shipping` in `rh`) **with** seller refines (`p_6` / `emi`) in one Amazon search URL—Amazon often does not honor both. On **Amazon.com**, stage 1 requires a **visible shipping/delivery line** on the card (non-empty **`shipping_text`**, or **`delivery` / `shipping`** in the blob, or free phrasing). **AES LLC** skips that shipping gate. No currency parsing.
 - **WhatsApp templates** — `{shipping}` is built in code (`filter_pipeline.shipping_display_hebrew`): **`משלוח חינם`** when free, else **`משלוח: 54₪`**-style (amount + ₪ when the line has **₪** or **ILS** + digits; otherwise **`משלוח:`** + the full scraped line). Edit that function to change wording or `$` handling.
 - `pagination_mode`: `auto` (derive page count from `totalResultCount` / `asinOnPageCount`) or `fixed` (use `search_pages`).
 - `max_search_pages`, `max_cycle_seconds`, `search_pages`, `required_keywords`, `whitelist` / `blacklist` (ASIN lists in YAML), WhatsApp fields, `db_path`, etc.
@@ -28,10 +28,10 @@ Legacy keys `search_urls.featured` / `search_urls.newest_arrivals` / `search_url
 ## Architecture
 
 - `search_scraper.py` — Playwright search only; metadata pagination.
-- `filter_pipeline.py` — stage1 (Pokemon TCG + **shipping/delivery line present on card** + price), optional YAML **whitelist** / **blacklist** ASINs, `required_keywords` for non-whitelist rows → rows for the state engine.
-- `state_engine.py` — SQLite + alerts; `list_known_asins()` for the AES LLC pass.
+- `filter_pipeline.py` — stage1 (Pokemon TCG + price; shipping line on **Amazon.com** only), optional YAML **whitelist** / **blacklist** ASINs, `required_keywords` for non-whitelist rows → rows for the state engine.
+- `state_engine.py` — SQLite + alerts.
 - `webhook_sender.py` — WhatsApp API posts.
-- `main.py` — APScheduler: Amazon.com scrape → process → AES LLC scrape → new ASINs only → process.
+- `main.py` — APScheduler: Amazon.com scrape → filter → AES LLC scrape → merge → state engine → PDP watch.
 
 ## Prerequisites
 

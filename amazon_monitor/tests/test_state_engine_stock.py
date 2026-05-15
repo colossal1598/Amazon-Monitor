@@ -203,6 +203,103 @@ class TestStateEngineSearchStock(unittest.TestCase):
             finally:
                 se.conn.close()
 
+    def test_price_increase_persisted_without_alert(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "m.db"
+            se = StateEngine(str(db), price_drop_percent=10)
+            try:
+                now = "2020-01-01T00:00:00+00:00"
+                se.conn.execute(
+                    """
+                    INSERT INTO products (asin, title, seller, price, in_stock, first_seen, last_seen)
+                    VALUES (?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    ("B088888888", "Pokemon Item", "search", 80.0, now, now),
+                )
+                se.conn.commit()
+                alerts, _meta = se.process_search_candidates(
+                    [
+                        {
+                            "asin": "B088888888",
+                            "title": "Pokemon Item",
+                            "price": 100.0,
+                            "in_stock": True,
+                            "shipping_text": "FREE delivery",
+                            "image_url": None,
+                            "seller": "search",
+                        }
+                    ],
+                    reconcile_missing=False,
+                )
+                self.assertEqual(alerts, [])
+                row = se.conn.execute(
+                    "SELECT price FROM products WHERE asin = ?", ("B088888888",)
+                ).fetchone()
+                self.assertEqual(float(row[0]), 100.0)
+            finally:
+                se.conn.close()
+
+    def test_null_scrape_preserves_price_on_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "m.db"
+            se = StateEngine(str(db), price_drop_percent=10)
+            try:
+                now = "2020-01-01T00:00:00+00:00"
+                se.conn.execute(
+                    """
+                    INSERT INTO products (asin, title, seller, price, in_stock, first_seen, last_seen)
+                    VALUES (?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    ("B077777777", "Pokemon Card", "search", 19.99, now, now),
+                )
+                se.conn.commit()
+                se.process_search_candidates(
+                    [
+                        {
+                            "asin": "B077777777",
+                            "title": "Pokemon Card",
+                            "price": None,
+                            "in_stock": True,
+                            "shipping_text": "FREE delivery",
+                            "image_url": None,
+                            "seller": "search",
+                        }
+                    ],
+                    reconcile_missing=False,
+                )[0]
+                row = se.conn.execute(
+                    "SELECT price FROM products WHERE asin = ?", ("B077777777",)
+                ).fetchone()
+                self.assertEqual(float(row[0]), 19.99)
+            finally:
+                se.conn.close()
+
+    def test_touch_pipeline_presence_updates_price_from_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "m.db"
+            se = StateEngine(str(db), price_drop_percent=10)
+            try:
+                old = "2019-01-01T00:00:00+00:00"
+                se.conn.execute(
+                    """
+                    INSERT INTO products (asin, title, seller, price, in_stock, first_seen, last_seen)
+                    VALUES (?, ?, ?, ?, 0, ?, ?)
+                    """,
+                    ("B0CCCCCCCC", "x", "s", 50.0, old, old),
+                )
+                se.conn.commit()
+                se.touch_tracked_serp_pipeline_presence(
+                    {"B0CCCCCCCC"},
+                    pipeline_rows=[{"asin": "B0CCCCCCCC", "price": 75.0, "in_stock": True}],
+                )
+                row = se.conn.execute(
+                    "SELECT price, in_stock FROM products WHERE asin = ?", ("B0CCCCCCCC",)
+                ).fetchone()
+                self.assertEqual(float(row[0]), 75.0)
+                self.assertEqual(int(row[1]), 1)
+            finally:
+                se.conn.close()
+
     def test_touch_pipeline_presence_updates_existing_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "m.db"

@@ -17,6 +17,7 @@ from filter_pipeline import filter_free_shipping_candidates, run_search_filter_p
 from alert_dedupe import dedupe_alerts_by_asin
 import fx_rate
 from pdp_scraper import scrape_pdp_watch
+from pdp_serp_fallback import build_aes_fallback_index, resolve_pdp_watch_observations
 from search_scraper import _valid_asin, scrape_search
 from search_union import (
     exclude_asins_from_candidates,
@@ -384,23 +385,25 @@ def main() -> None:
                 pagination_delay_range=page_r,
                 serp_inner_retries=serp_inner_retries,
             )
-            aes_pipeline_rows, aes_meta = run_search_filter_pipeline(aes_items, config)
-            aes_filtered_before_free = len(aes_pipeline_rows)
-            # AES LLC SERP: skip free-shipping filter (seller-scoped page; delivery line often differs from amazon.com SERP).
+            aes_pipeline_rows, aes_meta = run_search_filter_pipeline(
+                aes_items, config, require_shipping_signal=False
+            )
+            aes_after_pipeline = len(aes_pipeline_rows)
+            # AES LLC SERP: skip free-shipping filter and stage-1 shipping gate (seller-scoped page).
             aes_filtered = aes_pipeline_rows
             log_lifecycle(
                 "search_serp_candidate_counts",
                 source=aes_llc_src,
                 raw_serp_cards=len(aes_items),
-                pipeline_candidates=aes_filtered_before_free,
-                after_free_shipping=len(aes_filtered),
+                pipeline_candidates=aes_after_pipeline,
+                after_pipeline=len(aes_filtered),
             )
             log_debug(
                 "search_aes_llc_counts",
                 raw=len(aes_items),
                 stage1=aes_meta.get("stage1_count"),
-                filtered_before_free_shipping=aes_filtered_before_free,
-                filtered_free_shipping=len(aes_filtered),
+                pipeline_candidates=aes_after_pipeline,
+                after_pipeline=len(aes_filtered),
             )
             log_debug(
                 "aes_llc_asin_debug",
@@ -411,7 +414,9 @@ def main() -> None:
                 relevant_count=len(_sorted_asins_from_items(aes_filtered)),
             )
 
-            merged_candidates = merge_search_candidates_by_asin(aes_filtered, amazon_com_filtered)
+            merged_candidates = merge_search_candidates_by_asin(
+                amazon_com_filtered, aes_filtered
+            )
             search_candidates = exclude_asins_from_candidates(merged_candidates, pdp_watch_set)
             pdp_excluded_from_search = len(merged_candidates) - len(search_candidates)
             reconcile_missing, skipped_reason = should_reconcile_missing_asins(config, len(search_candidates))
@@ -451,7 +456,9 @@ def main() -> None:
                 search_alerts=len(alerts),
             )
 
-            merged_pipeline = merge_search_candidates_by_asin(aes_pipeline_rows, amazon_com_pipeline_rows)
+            merged_pipeline = merge_search_candidates_by_asin(
+                amazon_com_pipeline_rows, aes_pipeline_rows
+            )
             pipeline_seen_asins = {
                 (row.get("asin") or "").strip().upper()
                 for row in merged_pipeline
@@ -459,6 +466,7 @@ def main() -> None:
             }
             touch_rows = state_engine.touch_tracked_serp_pipeline_presence(
                 pipeline_seen_asins,
+                pipeline_rows=merged_pipeline,
                 exclude_asins=pdp_watch_set,
             )
             log_debug(
@@ -485,8 +493,22 @@ def main() -> None:
                     max_concurrent_tabs=int(config.get("pdp_watch_max_concurrent_tabs", 2)),
                     tab_jitter_seconds=config.get("pdp_watch_tab_jitter_seconds"),
                 )
+                aes_fallback_index = build_aes_fallback_index(aes_filtered, pdp_watch_set)
+                pdp_rows, fallback_stats = resolve_pdp_watch_observations(
+                    pdp_rows,
+                    aes_fallback_index,
+                    allowed_subs,
+                )
                 skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
-                log_debug("pdp_watch_counts", watch=len(watch_list), rows=len(pdp_rows), skip_update=skip_rows)
+                log_debug(
+                    "pdp_watch_counts",
+                    watch=len(watch_list),
+                    rows=len(pdp_rows),
+                    skip_update=skip_rows,
+                    pdp_used=fallback_stats.get("pdp_used", 0),
+                    aes_fallback=fallback_stats.get("aes_fallback", 0),
+                    skip_no_fallback=fallback_stats.get("skip_no_fallback", 0),
+                )
                 pdp_alerts = state_engine.process_pdp_watch_candidates(
                     pdp_rows,
                     set(watch_list),

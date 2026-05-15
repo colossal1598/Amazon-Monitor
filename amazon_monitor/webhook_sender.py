@@ -113,25 +113,9 @@ def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> st
     price = alert_payload.get("price")
     old_price = alert_payload.get("old_price")
     new_price = alert_payload.get("new_price")
-    if alert_type == "price_drop" and old_price is not None:
-        left_full, usd_l, ils_l = _price_line_parts(old_price, config)
-        right_full, usd_r, ils_r = _price_line_parts(
-            new_price if new_price is not None else price, config
-        )
-        price_text = f"{left_full} -> {right_full}"
-        price_text_usd_only = f"{usd_l} -> {usd_r}"
-        if ils_l and ils_r:
-            price_text_ils_suffix = f"{ils_l} -> {ils_r}"
-        elif ils_l:
-            price_text_ils_suffix = ils_l
-        elif ils_r:
-            price_text_ils_suffix = ils_r
-        else:
-            price_text_ils_suffix = ""
-    else:
-        price_text, price_text_usd_only, price_text_ils_suffix = _price_line_parts(
-            new_price if new_price is not None else price, config
-        )
+    price_text, price_text_usd_only, price_text_ils_suffix = _price_line_parts(
+        new_price if new_price is not None else price, config
+    )
 
     templates = DEFAULT_MESSAGE_TEMPLATES.copy()
     user_templates = config.get("wa_message_templates")

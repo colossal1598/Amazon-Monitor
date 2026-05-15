@@ -118,6 +118,7 @@ class StateEngine:
         self,
         asins: set[str],
         *,
+        pipeline_rows: list[dict[str, Any]] | None = None,
         exclude_asins: set[str] | None = None,
     ) -> int:
         """Set in_stock=1 and last_seen for existing rows whose ASINs appear in the pipeline merge.
@@ -125,6 +126,9 @@ class StateEngine:
         Used after ``process_search_candidates`` so tracked listings that pass Pokémon/stage1/keywords
         but not the free-shipping alert path still show fresh presence. PDP-watch ASINs should be
         passed in ``exclude_asins`` so SERP does not overwrite PDP-owned stock.
+
+        When ``pipeline_rows`` is provided, also updates ``price`` from scraped values
+        (``COALESCE(?, price)``) for rows with a parsed price.
 
         SQLite ``UPDATE`` only affects rows that exist; unknown ASINs are ignored. Chunked IN lists
         stay under typical SQLite variable limits.
@@ -135,6 +139,15 @@ class StateEngine:
         if not targets:
             return 0
         now = utc_iso()
+        price_by_asin: dict[str, float] = {}
+        if pipeline_rows:
+            for row in pipeline_rows:
+                asin = (row.get("asin") or "").strip().upper()
+                if not asin or asin in excl:
+                    continue
+                parsed = _as_float(row.get("price"))
+                if parsed is not None and parsed > 0:
+                    price_by_asin[asin] = parsed
         total = 0
         chunk_size = self._SERP_PRESENCE_CHUNK
         with self.lock:
@@ -149,6 +162,18 @@ class StateEngine:
                     WHERE asin IN ({placeholders})
                     """,
                     [now, *chunk],
+                )
+                total += cur.rowcount or 0
+            for asin, scraped_price in price_by_asin.items():
+                if asin not in targets:
+                    continue
+                cur = self.conn.execute(
+                    """
+                    UPDATE products
+                    SET price = COALESCE(?, price)
+                    WHERE asin = ?
+                    """,
+                    (scraped_price, asin),
                 )
                 total += cur.rowcount or 0
             self.conn.commit()
@@ -338,7 +363,7 @@ class StateEngine:
                     UPDATE products
                     SET title = COALESCE(?, title),
                         seller = COALESCE(?, seller),
-                        price = ?,
+                        price = COALESCE(?, price),
                         in_stock = ?,
                         last_seen = ?
                     WHERE asin = ?
@@ -482,8 +507,9 @@ class StateEngine:
                     )
                     skipped_update_count += 1
                     continue
+                row_source = str(item.get("source") or source)
                 title = normalize_title_line(item.get("title"))
-                seller = item.get("seller") or source
+                seller = item.get("seller") or row_source
                 image_url = item.get("image_url")
                 new_price = _as_float(item.get("price"))
                 ship_line = shipping_display_hebrew(item.get("shipping_text"))
@@ -506,7 +532,7 @@ class StateEngine:
                         assert nd.emit and nd.alert_type is not None
                         alert = self._build_alert(
                             nd.alert_type,
-                            source,
+                            row_source,
                             asin,
                             title,
                             new_price,
@@ -533,7 +559,7 @@ class StateEngine:
                     UPDATE products
                     SET title = COALESCE(?, title),
                         seller = COALESCE(?, seller),
-                        price = ?,
+                        price = COALESCE(?, price),
                         in_stock = ?,
                         last_seen = ?
                     WHERE asin = ?
@@ -546,7 +572,7 @@ class StateEngine:
                 if stock_decision.emit:
                     alert = self._build_alert(
                         "back_in_stock",
-                        source,
+                        row_source,
                         asin,
                         title,
                         new_price,
@@ -577,8 +603,9 @@ class StateEngine:
                     ):
                         pct = ((old_price - new_price) / old_price) * 100
                         LOGGER.info(
-                            "price_drop_skipped where=pdp_watch asin=%s old_price=%s new_price=%s "
+                            "price_drop_skipped where=%s asin=%s old_price=%s new_price=%s "
                             "pct_drop=%.2f threshold_pct=%s skip=%s last_price_alert=%s",
+                            row_source,
                             asin,
                             old_price,
                             new_price,
@@ -591,7 +618,7 @@ class StateEngine:
                     if price_decision.emit:
                         alert = self._build_alert(
                             "price_drop",
-                            source,
+                            row_source,
                             asin,
                             title,
                             new_price,

@@ -81,8 +81,9 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
                     {"B011111111"},
                 )
                 self.assertEqual(alerts, [])
-                stock, _ = _stock_and_price(se, "B011111111")
+                stock, price = _stock_and_price(se, "B011111111")
                 self.assertEqual(stock, 0)
+                self.assertEqual(price, 19.99)
             finally:
                 se.conn.close()
 

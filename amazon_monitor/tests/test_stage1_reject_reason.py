@@ -36,6 +36,12 @@ class Stage1RejectReasonTests(unittest.TestCase):
         row["availability_text"] = ""
         self.assertEqual(stage1_reject_reason(row), "no_shipping_or_delivery_signal")
 
+    def test_no_shipping_signal_optional(self) -> None:
+        row = self._base()
+        row["shipping_text"] = ""
+        row["availability_text"] = ""
+        self.assertIsNone(stage1_reject_reason(row, require_shipping_signal=False))
+
 
 if __name__ == "__main__":
     unittest.main()

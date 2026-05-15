@@ -52,8 +52,8 @@ class TestPriceLineParts(unittest.TestCase):
         cfg = {"fx_enabled": True}
         full, usd_only, ils = webhook_sender._price_line_parts(100.0, cfg)
         self.assertEqual(usd_only, "$100.00")
-        self.assertEqual(ils, " (~₪365 est)")
-        self.assertEqual(full, "$100.00 (~₪365 est)")
+        self.assertEqual(ils, " (כ- 365₪)")
+        self.assertEqual(full, "$100.00 (כ- 365₪)")
 
 
 class TestFormatMessagePriceDrop(unittest.TestCase):
@@ -61,7 +61,7 @@ class TestFormatMessagePriceDrop(unittest.TestCase):
         _reset_fx_globals()
 
     @patch.object(fx_rate, "get_usd_ils", return_value=3.65)
-    def test_price_drop_arrow(self, _mock: object) -> None:
+    def test_price_drop_shows_new_price_only(self, _mock: object) -> None:
         cfg = {"fx_enabled": True}
         msg = webhook_sender._format_message(
             {
@@ -73,7 +73,9 @@ class TestFormatMessagePriceDrop(unittest.TestCase):
             },
             cfg,
         )
-        self.assertIn("$100.00 (~₪365 est) -> $80.00 (~₪292 est)", msg)
+        self.assertIn("$80.00 (כ- 292₪)", msg)
+        self.assertNotIn("->", msg)
+        self.assertNotIn("$100.00", msg)
 
 
 class TestBumpSearchTickRefreshCadence(unittest.TestCase):
