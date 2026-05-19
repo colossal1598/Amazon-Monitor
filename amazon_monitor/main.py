@@ -243,6 +243,7 @@ def main() -> None:
                     max_concurrent_tabs=int(config.get("pdp_watch_max_concurrent_tabs", 2)),
                     tab_jitter_seconds=config.get("pdp_watch_tab_jitter_seconds"),
                     max_attempts=int(config.get("pdp_watch_max_attempts", 3)),
+                    headless=bool(config.get("playwright_headless", True)),
                 )
                 skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
                 in_stock_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("in_stock"))

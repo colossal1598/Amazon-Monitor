@@ -454,6 +454,7 @@ async def _run_pdp_watch_async(
     max_concurrent: int,
     jitter_range: tuple[float, float],
     max_attempts: int,
+    headless: bool = True,
 ) -> list[dict[str, Any]]:
     from playwright.async_api import async_playwright
 
@@ -472,7 +473,7 @@ async def _run_pdp_watch_async(
 
     async with async_playwright() as pw:
         proxy_url = os.getenv("PROXY_URL")
-        launch_kwargs: dict[str, Any] = {"channel": "chrome", "headless": True}
+        launch_kwargs: dict[str, Any] = {"channel": "chrome", "headless": headless}
         if proxy_url:
             launch_kwargs["proxy"] = {"server": proxy_url}
 
@@ -707,6 +708,7 @@ def scrape_pdp_watch(
     max_concurrent_tabs: int = 2,
     tab_jitter_seconds: tuple[float, float] | list[float] | None = None,
     max_attempts: int = _PDP_MAX_ATTEMPTS,
+    headless: bool = True,
 ) -> list[dict[str, Any]]:
     """Visit each watch ASIN on amazon.com PDP; return exactly one dict per unique valid ASIN (order preserved).
 
@@ -752,5 +754,6 @@ def scrape_pdp_watch(
             max_concurrent=conc,
             jitter_range=jitter,
             max_attempts=max(1, int(max_attempts)),
+            headless=headless,
         )
     )
