@@ -30,7 +30,8 @@ echo.
 echo === pm2 list ===
 call pm2 list
 echo.
-echo Startup on boot (run once as Admin if you want): pm2 startup
+echo IMPORTANT: Run "pm2 startup" once as Administrator to enable boot startup.
+echo Then run "pm2 save" after any process-list changes.
 echo.
 pause
 endlocal

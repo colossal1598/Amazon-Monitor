@@ -1,28 +1,9 @@
 $ErrorActionPreference = "Stop"
 
-$projectRoot = Split-Path -Parent $PSScriptRoot
-$pythonExe = Join-Path $projectRoot ".venv\Scripts\python.exe"
-$mainFile = Join-Path $projectRoot "main.py"
+. (Join-Path $PSScriptRoot "pm2-stack.ps1")
 
-if (-not (Test-Path $pythonExe)) {
-    throw "Python virtual environment not found. Expected: $pythonExe"
-}
-if (-not (Test-Path $mainFile)) {
-    throw "main.py not found. Expected: $mainFile"
-}
+Write-Host "Restarting amazon-monitor via PM2..."
+Restart-Monitor
+Save-Pm2State
 
-$monitorProcesses = Get-CimInstance Win32_Process | Where-Object {
-    $_.Name -match '^python(\.exe)?$' -and
-    $_.CommandLine -like "*main.py*" -and
-    $_.CommandLine -like "*amazon_monitor*"
-}
-
-if ($monitorProcesses) {
-    foreach ($proc in $monitorProcesses) {
-        Stop-Process -Id $proc.ProcessId -Force
-    }
-    Write-Host "Stopped existing monitor PID(s): $($monitorProcesses.ProcessId -join ', ')"
-}
-
-Start-Process -FilePath $pythonExe -ArgumentList "main.py" -WorkingDirectory $projectRoot | Out-Null
-Write-Host "Monitor started."
+Write-Host "amazon-monitor restarted through PM2."

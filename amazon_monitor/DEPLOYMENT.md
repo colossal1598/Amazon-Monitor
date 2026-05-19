@@ -1,15 +1,51 @@
-# Deployment (Simple Version)
+# Deployment (PM2 Only)
 
-This is the easiest way to update the bot on the client machine.
+This deployment keeps PM2 as the only process manager for:
 
-## How updates work
+- `amazon-monitor`
+- `wa-server`
+- `monitor-healthcheck`
 
-You edit code on your machine and push to GitHub.
-Client machine pulls latest code and restarts bot.
+No script should start or kill Python directly anymore.
 
-No manual file copy is needed.
+## One-time setup on the Windows client machine
 
-## One command to update client machine
+Run these commands from `amazon_monitor`:
+
+```powershell
+npm install -g pm2
+.\start-pm2-stack.bat
+pm2 save
+```
+
+Then open an **Administrator PowerShell** and run:
+
+```powershell
+pm2 startup
+```
+
+Run the command that `pm2 startup` prints, then run:
+
+```powershell
+pm2 save
+```
+
+## One-time migration from old scripts
+
+If this machine previously used the old scheduled updater or direct Python process control, run:
+
+```powershell
+Disable-ScheduledTask -TaskName AmazonMonitorUpdate -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName AmazonMonitorUpdate -Confirm:$false -ErrorAction SilentlyContinue
+pm2 stop amazon-monitor
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*main.py*amazon_monitor*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+pm2 start amazon-monitor
+pm2 save
+```
+
+This removes orphan monitor processes and leaves PM2 as the single owner.
+
+## Manual update command
 
 Run this inside `amazon_monitor` on the client machine:
 
@@ -17,44 +53,34 @@ Run this inside `amazon_monitor` on the client machine:
 powershell -ExecutionPolicy Bypass -File .\scripts\update_and_restart.ps1
 ```
 
-That one command does everything:
+That command now does:
 
-1. Stops the bot
-2. Pulls latest code from GitHub
-3. Installs updated dependencies
-4. Starts the bot again
+1. `pm2 stop amazon-monitor`
+2. `git pull`
+3. `pip install -r requirements.txt`
+4. `pm2 start amazon-monitor`
+5. `pm2 save`
 
-## Optional: auto-update every day
+## Optional auto-update every day
 
-Run once on client machine:
+Run once on the client machine:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install_update_task.ps1 -DailyAt "02:00"
 ```
 
-This creates a scheduled task called `AmazonMonitorUpdate`.
-It will run the update script every day at 02:00.
+This creates `AmazonMonitorUpdate`, which runs `update_and_restart.ps1` (PM2-only flow).
 
-## Scripts included
+## Daily operations
 
-- `scripts\update_and_restart.ps1` -> stop + pull + install + restart
-- `scripts\start_monitor.ps1` -> start bot
-- `scripts\stop_monitor.ps1` -> stop bot
-- `scripts\install_update_task.ps1` -> install daily auto-update task
-
-## If update fails
-
-1. Open PowerShell in `amazon_monitor`
-2. Run:
-
-```powershell
-git pull
-```
-
-3. If Git shows conflict/error, fix it first before restarting bot.
+- Stop monitor: `pm2 stop amazon-monitor`
+- Start monitor: `pm2 start amazon-monitor`
+- Restart monitor: `pm2 restart amazon-monitor`
+- Stop entire stack: `pm2 stop all`
+- Check status: `pm2 list`
 
 ## Important
 
-- Keep `.env` only on client machine.
+- Keep `.env` only on the client machine.
 - Do not commit client secrets to GitHub.
 

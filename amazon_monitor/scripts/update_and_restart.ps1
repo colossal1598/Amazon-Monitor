@@ -3,15 +3,15 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonExe = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $requirementsFile = Join-Path $projectRoot "requirements.txt"
-$stopScript = Join-Path $PSScriptRoot "stop_monitor.ps1"
-$startScript = Join-Path $PSScriptRoot "start_monitor.ps1"
+
+. (Join-Path $PSScriptRoot "pm2-stack.ps1")
 
 if (-not (Test-Path $pythonExe)) {
     throw "Python virtual environment not found. Expected: $pythonExe"
 }
 
-Write-Host "Stopping monitor (if running)..."
-& $stopScript
+Write-Host "Stopping amazon-monitor via PM2..."
+Stop-Monitor
 
 Write-Host "Pulling latest code..."
 git -C $projectRoot pull
@@ -25,7 +25,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "Dependency installation failed."
 }
 
-Write-Host "Starting monitor..."
-& $startScript
+Write-Host "Starting amazon-monitor via PM2..."
+Start-Monitor
+Save-Pm2State
 
-Write-Host "Update + restart completed successfully."
+Write-Host "Update + PM2 restart completed successfully."

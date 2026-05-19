@@ -1,18 +1,9 @@
 $ErrorActionPreference = "Stop"
 
-$monitorProcesses = Get-CimInstance Win32_Process | Where-Object {
-    $_.Name -match '^python(\.exe)?$' -and
-    $_.CommandLine -like "*main.py*" -and
-    $_.CommandLine -like "*amazon_monitor*"
-}
+. (Join-Path $PSScriptRoot "pm2-stack.ps1")
 
-if (-not $monitorProcesses) {
-    Write-Host "Monitor is not running."
-    exit 0
-}
+Write-Host "Stopping amazon-monitor via PM2..."
+Stop-Monitor
+Save-Pm2State
 
-foreach ($proc in $monitorProcesses) {
-    Stop-Process -Id $proc.ProcessId -Force
-}
-
-Write-Host "Monitor stopped. PID(s): $($monitorProcesses.ProcessId -join ', ')"
+Write-Host "amazon-monitor stopped through PM2."

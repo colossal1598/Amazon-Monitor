@@ -22,7 +22,7 @@ Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `
     -Trigger $trigger `
-    -Description "Pull latest monitor code, install deps, and restart monitor." `
+    -Description "Pull latest monitor code, install deps, and restart monitor via PM2." `
     -Force | Out-Null
 
 Write-Host "Scheduled task '$TaskName' installed to run daily at $DailyAt."

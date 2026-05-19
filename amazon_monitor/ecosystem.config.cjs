@@ -9,6 +9,7 @@ const path = require("path");
 
 const monitorRoot = __dirname;
 const waServerRoot = process.env.WA_SERVER_ROOT || path.join(monitorRoot, "..", "..", "wa-server");
+const monitorPython = path.join(monitorRoot, ".venv", "Scripts", "python.exe");
 
 module.exports = {
   apps: [
@@ -16,7 +17,7 @@ module.exports = {
       name: "amazon-monitor",
       cwd: monitorRoot,
       script: "main.py",
-      interpreter: "C:\\amazon-monitor\\amazon_monitor\\.venv\\Scripts\\python.exe",
+      interpreter: monitorPython,
       autorestart: true,
       max_restarts: 20,
       exp_backoff_restart_delay: 3000,
@@ -37,7 +38,7 @@ module.exports = {
       name: "monitor-healthcheck",
       cwd: monitorRoot,
       script: "tools/healthcheck.py",
-      interpreter: "python",
+      interpreter: monitorPython,
       autorestart: false,
       watch: false,
       // Run check every 10 minutes (process exits; PM2 starts again on schedule).

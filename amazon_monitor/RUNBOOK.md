@@ -7,19 +7,39 @@
 - Google Chrome
 - Local WhatsApp API server
 - Stable internet or configured `PROXY_URL`
+- PM2 installed and stack registered (`pm2 start ecosystem.config.cjs`)
 
 ## Start
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python main.py
+pm2 start amazon-monitor
 ```
 
 The scheduler runs one PDP cycle immediately, then every `pdp_poll_minutes`.
 
 ## Stop
 
-Press `Ctrl+C`, or use the existing stop/restart scripts if running under the deployed setup.
+```powershell
+pm2 stop amazon-monitor
+```
+
+For the whole stack:
+
+```powershell
+pm2 stop all
+```
+
+## Restart
+
+```powershell
+pm2 restart amazon-monitor
+```
+
+For the whole stack:
+
+```powershell
+pm2 restart all
+```
 
 ## Daily Check
 
@@ -32,6 +52,7 @@ Also check:
 - `logs/monitor.log` for lifecycle events.
 - `logs/monitor.debug.log` for per-cycle counts and skipped PDP rows.
 - `data/health.json` for last `pdp` and `heartbeat` success times.
+- `pm2 list` for PM2 process status.
 
 ## CAPTCHA Or Network Block
 
