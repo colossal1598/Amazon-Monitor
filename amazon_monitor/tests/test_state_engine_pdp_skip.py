@@ -17,6 +17,18 @@ def _seed_row(se: StateEngine, asin: str, in_stock: int, price: float = 19.99) -
     se.conn.commit()
 
 
+def _pdp_row(asin: str, price: float) -> dict:
+    return {
+        "asin": asin,
+        "title": "Pokemon Card",
+        "price": price,
+        "in_stock": True,
+        "shipping_text": "$12.44 delivery",
+        "image_url": None,
+        "seller": "pdp_watch",
+    }
+
+
 def _stock_and_price(se: StateEngine, asin: str) -> tuple[int, float | None]:
     row = se.conn.execute(
         "SELECT in_stock, price FROM products WHERE asin = ?", (asin,)
@@ -36,6 +48,52 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
                             "asin": "B011111111",
                             "_skip_update": True,
                             "skip_reason": "goto_failed",
+                            "source": "pdp_watch",
+                        }
+                    ],
+                    {"B011111111"},
+                )
+                self.assertEqual(alerts, [])
+                stock, price = _stock_and_price(se, "B011111111")
+                self.assertEqual(stock, 1)
+                self.assertEqual(price, 19.99)
+            finally:
+                se.conn.close()
+
+    def test_captcha_skip_update_preserves_db_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=1, price=19.99)
+                alerts = se.process_pdp_watch_candidates(
+                    [
+                        {
+                            "asin": "B011111111",
+                            "_skip_update": True,
+                            "skip_reason": "captcha",
+                            "source": "pdp_watch",
+                        }
+                    ],
+                    {"B011111111"},
+                )
+                self.assertEqual(alerts, [])
+                stock, price = _stock_and_price(se, "B011111111")
+                self.assertEqual(stock, 1)
+                self.assertEqual(price, 19.99)
+            finally:
+                se.conn.close()
+
+    def test_captcha_abort_skip_update_preserves_db_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=1, price=19.99)
+                alerts = se.process_pdp_watch_candidates(
+                    [
+                        {
+                            "asin": "B011111111",
+                            "_skip_update": True,
+                            "skip_reason": "captcha_run_aborted",
                             "source": "pdp_watch",
                         }
                     ],
@@ -111,6 +169,26 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
                 stock, price = _stock_and_price(se, "B011111111")
                 self.assertEqual(stock, 1)
                 self.assertEqual(price, 21.99)
+            finally:
+                se.conn.close()
+
+    def test_drop_then_recovery_then_drop_alerts_again_same_day(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=1, price=100.0)
+
+                first = se.process_pdp_watch_candidates([_pdp_row("B011111111", 80.0)], {"B011111111"})
+                self.assertEqual([a["type"] for a in first], ["price_drop"])
+                self.assertEqual(_stock_and_price(se, "B011111111"), (1, 80.0))
+
+                recovery = se.process_pdp_watch_candidates([_pdp_row("B011111111", 120.0)], {"B011111111"})
+                self.assertEqual(recovery, [])
+                self.assertEqual(_stock_and_price(se, "B011111111"), (1, 120.0))
+
+                second = se.process_pdp_watch_candidates([_pdp_row("B011111111", 90.0)], {"B011111111"})
+                self.assertEqual([a["type"] for a in second], ["price_drop"])
+                self.assertEqual(_stock_and_price(se, "B011111111"), (1, 90.0))
             finally:
                 se.conn.close()
 

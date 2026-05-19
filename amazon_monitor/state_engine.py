@@ -1,14 +1,14 @@
-"""SQLite-backed state management for search monitoring."""
+"""SQLite-backed state management for the PDP monitor."""
 
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from alert_decisions import decide_back_in_stock, decide_new_product, decide_price_drop
-from filter_pipeline import normalize_title_line, shipping_display_hebrew
+from pdp_helpers import normalize_title_line, shipping_display_hebrew
 
 LOGGER = logging.getLogger(__name__)
 
@@ -21,16 +21,6 @@ def utc_now() -> datetime:
 # Turn a datetime into a standard text timestamp (or use the current time if none was given).
 def utc_iso(dt: datetime | None = None) -> str:
     return (dt or utc_now()).isoformat()
-
-
-# Convert a stored timestamp string back into a datetime so we can compare times like cooldown windows.
-def parse_dt(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
 
 
 # Safely turn something into a number we can compare as a price, returning None when it’s missing or invalid.
@@ -68,7 +58,6 @@ class StateEngine:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.init_db()
-        self._price_alert_cooldown = timedelta(hours=24)
 
     # Create the tables we need (products + alerts) so the monitor can remember what it saw between runs.
     def init_db(self) -> None:
@@ -104,87 +93,12 @@ class StateEngine:
     def _fetch_product(self, asin: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM products WHERE asin = ?", (asin,)).fetchone()
 
-    # List all ASINs we’re already tracking so other parts of the pipeline can avoid re-seeding duplicates.
+    # List all ASINs we’re already tracking.
     def list_known_asins(self) -> set[str]:
         """All ASINs currently in the products table (uppercase)."""
         with self.lock:
             rows = self.conn.execute("SELECT asin FROM products").fetchall()
         return {str(r[0]).upper() for r in rows if r and r[0]}
-
-    _SERP_PRESENCE_CHUNK = 400
-
-    # Refresh last_seen / in_stock for ASINs that passed the search filter pipeline (no alerts, no INSERT).
-    def touch_tracked_serp_pipeline_presence(
-        self,
-        asins: set[str],
-        *,
-        pipeline_rows: list[dict[str, Any]] | None = None,
-        exclude_asins: set[str] | None = None,
-    ) -> int:
-        """Set in_stock=1 and last_seen for existing rows whose ASINs appear in the pipeline merge.
-
-        Used after ``process_search_candidates`` so tracked listings that pass Pokémon/stage1/keywords
-        but not the free-shipping alert path still show fresh presence. PDP-watch ASINs should be
-        passed in ``exclude_asins`` so SERP does not overwrite PDP-owned stock.
-
-        When ``pipeline_rows`` is provided, also updates ``price`` from scraped values
-        (``COALESCE(?, price)``) for rows with a parsed price.
-
-        SQLite ``UPDATE`` only affects rows that exist; unknown ASINs are ignored. Chunked IN lists
-        stay under typical SQLite variable limits.
-        """
-        normalized = {str(a).strip().upper() for a in asins if a and str(a).strip()}
-        excl = {str(a).strip().upper() for a in (exclude_asins or ()) if a}
-        targets = sorted(normalized - excl)
-        if not targets:
-            return 0
-        now = utc_iso()
-        price_by_asin: dict[str, float] = {}
-        if pipeline_rows:
-            for row in pipeline_rows:
-                asin = (row.get("asin") or "").strip().upper()
-                if not asin or asin in excl:
-                    continue
-                parsed = _as_float(row.get("price"))
-                if parsed is not None and parsed > 0:
-                    price_by_asin[asin] = parsed
-        total = 0
-        chunk_size = self._SERP_PRESENCE_CHUNK
-        with self.lock:
-            for i in range(0, len(targets), chunk_size):
-                chunk = targets[i : i + chunk_size]
-                placeholders = ",".join("?" for _ in chunk)
-                cur = self.conn.execute(
-                    f"""
-                    UPDATE products
-                    SET in_stock = 1,
-                        last_seen = ?
-                    WHERE asin IN ({placeholders})
-                    """,
-                    [now, *chunk],
-                )
-                total += cur.rowcount or 0
-            for asin, scraped_price in price_by_asin.items():
-                if asin not in targets:
-                    continue
-                cur = self.conn.execute(
-                    """
-                    UPDATE products
-                    SET price = COALESCE(?, price)
-                    WHERE asin = ?
-                    """,
-                    (scraped_price, asin),
-                )
-                total += cur.rowcount or 0
-            self.conn.commit()
-        LOGGER.info(
-            "serp_pipeline_presence_touch rows=%s asins_requested=%s excluded=%s",
-            total,
-            len(targets),
-            len(excl),
-            extra={"channel": "debug"},
-        )
-        return total
 
     # Save an alert record into the database so you have a history of what was sent and when.
     def _record_alert(self, alert: dict[str, Any]) -> None:
@@ -230,241 +144,6 @@ class StateEngine:
             "shipping": shipping,
         }
 
-    # Mark tracked products as out of stock when they don’t show up in a healthy run, unless they’re excluded (like PDP-watch items).
-    def _mark_missing_asins_out_of_stock(
-        self,
-        seen_asins: set[str],
-        _source: str,
-        now: str,
-        exclude_asins: set[str] | None = None,
-    ) -> tuple[int, list[str]]:
-        """Mark tracked ASINs absent from this healthy run as out-of-stock.
-
-        Single-tenant DB: scope by ASIN only (seller column holds display names like
-        'Amazon.com', not a shared bucket string).
-
-        ``exclude_asins`` (e.g. PDP watch list): never marked OOS here—stock for those rows
-        comes from the PDP pass, not SERP presence.
-
-        Returns ``(rowcount, sorted ASINs that were updated)`` for debug logging.
-        """
-        if not seen_asins:
-            return 0, []
-        excl = {str(a).upper() for a in (exclude_asins or ()) if a}
-        seen_sorted = sorted(seen_asins)
-        ph_seen = ",".join("?" for _ in seen_sorted)
-        params: list[Any] = [now, *seen_sorted]
-        extra_not_in = ""
-        select_params: list[Any] = [*seen_sorted]
-        if excl:
-            ex_sorted = sorted(excl)
-            ph_ex = ",".join("?" for _ in ex_sorted)
-            extra_not_in = f" AND asin NOT IN ({ph_ex})"
-            params.extend(ex_sorted)
-            select_params.extend(ex_sorted)
-        select_sql = f"""
-            SELECT asin FROM products
-            WHERE in_stock != 0
-              AND asin NOT IN ({ph_seen})
-              {extra_not_in}
-            """
-        pre_rows = self.conn.execute(select_sql, select_params).fetchall()
-        marked_list = sorted({str(r[0]).upper() for r in pre_rows if r and r[0]})
-        cursor = self.conn.execute(
-            f"""
-            UPDATE products
-            SET in_stock = 0,
-                last_seen = ?
-            WHERE in_stock != 0
-              AND asin NOT IN ({ph_seen})
-              {extra_not_in}
-            """,
-            params,
-        )
-        return cursor.rowcount or 0, marked_list
-
-    # Update the database from search-page results and generate alerts for new items, back-in-stock, and price drops.
-    def process_search_candidates(
-        self,
-        candidates: list[dict[str, Any]],
-        reconcile_missing: bool = False,
-        source: str = "amazon_export",
-        reconcile_exclude_asins: set[str] | None = None,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Process scraped search candidates and emit new/stock/price alerts.
-
-        When `reconcile_missing` is true, any tracked ASIN for the same source
-        that is absent from this successful run is marked out-of-stock.
-
-        ``reconcile_exclude_asins``: ASINs not subject to that absence rule (e.g. PDP-only watches).
-
-        Returns ``(alerts, run_meta)`` where ``run_meta`` includes counts and ASIN lists for debug logs.
-        """
-        alerts: list[dict[str, Any]] = []
-        seen_asins: set[str] = set()
-        new_count = 0
-        back_in_stock_count = 0
-        price_drop_count = 0
-        with self.lock:
-            for item in candidates:
-                asin = (item.get("asin") or "").upper()
-                if not asin:
-                    continue
-                seen_asins.add(asin)
-                title = normalize_title_line(item.get("title"))
-                seller = item.get("seller") or source
-                image_url = item.get("image_url")
-                new_price = _as_float(item.get("price"))
-                ship_line = shipping_display_hebrew(item.get("shipping_text"))
-                # SERP card `in_stock` from scraper; reconcile_missing still marks DB ASINs absent from this run as OOS.
-                new_stock = 1 if bool(item.get("in_stock")) else 0
-                now = utc_iso()
-                now_dt = utc_now()
-
-                row = self._fetch_product(asin)
-                if row is None:
-                    self.conn.execute(
-                        """
-                        INSERT INTO products
-                        (asin, title, seller, price, in_stock, first_seen, last_seen)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (asin, title, seller, new_price, new_stock, now, now),
-                    )
-                    if _should_emit_new_product_alert(new_stock, new_price):
-                        nd = decide_new_product(is_first_observation=True)
-                        assert nd.emit and nd.alert_type is not None
-                        alert = self._build_alert(
-                            nd.alert_type,
-                            "search",
-                            asin,
-                            title,
-                            new_price,
-                            image_url=image_url,
-                            shipping=ship_line,
-                        )
-                        alerts.append(alert)
-                        self._record_alert(alert)
-                        new_count += 1
-                    else:
-                        LOGGER.info(
-                            "product_seeded_no_new_alert asin=%s in_stock=%s price=%s",
-                            asin,
-                            new_stock,
-                            new_price,
-                            extra={"channel": "debug"},
-                        )
-                    continue
-
-                old_price = _as_float(row["price"])
-                old_stock = int(row["in_stock"] or 0)
-                self.conn.execute(
-                    """
-                    UPDATE products
-                    SET title = COALESCE(?, title),
-                        seller = COALESCE(?, seller),
-                        price = COALESCE(?, price),
-                        in_stock = ?,
-                        last_seen = ?
-                    WHERE asin = ?
-                    """,
-                    (title, seller, new_price, new_stock, now, asin),
-                )
-
-                stock_decision = decide_back_in_stock(old_stock, new_stock)
-                emitted_back_in_stock = False
-                if stock_decision.emit:
-                    alert = self._build_alert(
-                        "back_in_stock",
-                        "search",
-                        asin,
-                        title,
-                        new_price,
-                        image_url=image_url,
-                        shipping=ship_line,
-                    )
-                    alerts.append(alert)
-                    self._record_alert(alert)
-                    self.conn.execute("UPDATE products SET last_stock_alert = ? WHERE asin = ?", (now, asin))
-                    back_in_stock_count += 1
-                    emitted_back_in_stock = True
-                if not emitted_back_in_stock:
-                    last_price_alert = parse_dt(row["last_price_alert"])
-                    price_decision = decide_price_drop(
-                        old_price,
-                        new_price,
-                        last_price_alert,
-                        now_dt,
-                        self.price_drop_percent,
-                        self._price_alert_cooldown,
-                    )
-                    if (
-                        not price_decision.emit
-                        and old_price is not None
-                        and new_price is not None
-                        and old_price > 0
-                        and new_price < old_price
-                    ):
-                        pct = ((old_price - new_price) / old_price) * 100
-                        LOGGER.info(
-                            "price_drop_skipped where=search asin=%s old_price=%s new_price=%s "
-                            "pct_drop=%.2f threshold_pct=%s skip=%s last_price_alert=%s",
-                            asin,
-                            old_price,
-                            new_price,
-                            pct,
-                            self.price_drop_percent,
-                            price_decision.skip_reason,
-                            row["last_price_alert"],
-                            extra={"channel": "debug"},
-                        )
-                    if price_decision.emit:
-                        alert = self._build_alert(
-                            "price_drop",
-                            "search",
-                            asin,
-                            title,
-                            new_price,
-                            old_price=old_price,
-                            new_price=new_price,
-                            image_url=image_url,
-                            shipping=ship_line,
-                        )
-                        alerts.append(alert)
-                        self._record_alert(alert)
-                        self.conn.execute("UPDATE products SET last_price_alert = ? WHERE asin = ?", (now, asin))
-                        price_drop_count += 1
-            marked_oos_count = 0
-            marked_oos_asins: list[str] = []
-            if reconcile_missing:
-                marked_oos_count, marked_oos_asins = self._mark_missing_asins_out_of_stock(
-                    seen_asins, source, utc_iso(), reconcile_exclude_asins
-                )
-            LOGGER.info(
-                "search_reconcile seen_count=%s new_count=%s marked_oos_count=%s "
-                "back_in_stock_count=%s price_drop_count=%s reconcile_missing=%s reconcile_excluded=%s",
-                len(seen_asins),
-                new_count,
-                marked_oos_count,
-                back_in_stock_count,
-                price_drop_count,
-                reconcile_missing,
-                len(reconcile_exclude_asins or ()),
-                extra={"channel": "debug"},
-            )
-            self.conn.commit()
-        run_meta: dict[str, Any] = {
-            "seen_count": len(seen_asins),
-            "seen_asins": sorted(seen_asins),
-            "new_count": new_count,
-            "back_in_stock_count": back_in_stock_count,
-            "price_drop_count": price_drop_count,
-            "marked_oos_count": marked_oos_count,
-            "marked_oos_asins": marked_oos_asins,
-            "reconcile_missing": reconcile_missing,
-        }
-        return alerts, run_meta
-
     # Update the database from watched product-page checks and generate alerts, while skipping updates for pages that failed to scrape.
     def process_pdp_watch_candidates(
         self,
@@ -473,7 +152,7 @@ class StateEngine:
         *,
         source: str = "pdp_watch",
     ) -> list[dict[str, Any]]:
-        """Apply PDP watch scrape rows: same alert rules as search, no global SERP reconcile.
+        """Apply PDP watch scrape rows with no global absence reconcile.
 
         Per-ASIN PDP failures are surfaced as ``_skip_update=True`` markers and intentionally
         leave the existing DB row untouched. Watched ASINs missing entirely from ``candidates``
@@ -515,7 +194,6 @@ class StateEngine:
                 ship_line = shipping_display_hebrew(item.get("shipping_text"))
                 new_stock = 1 if bool(item.get("in_stock")) else 0
                 now = utc_iso()
-                now_dt = utc_now()
 
                 row = self._fetch_product(asin)
                 if row is None:
@@ -585,14 +263,10 @@ class StateEngine:
                     back_in_stock_count += 1
                     emitted_back_in_stock = True
                 if not emitted_back_in_stock:
-                    last_price_alert = parse_dt(row["last_price_alert"])
                     price_decision = decide_price_drop(
                         old_price,
                         new_price,
-                        last_price_alert,
-                        now_dt,
                         self.price_drop_percent,
-                        self._price_alert_cooldown,
                     )
                     if (
                         not price_decision.emit
@@ -629,7 +303,6 @@ class StateEngine:
                         )
                         alerts.append(alert)
                         self._record_alert(alert)
-                        self.conn.execute("UPDATE products SET last_price_alert = ? WHERE asin = ?", (now, asin))
                         price_drop_count += 1
 
             missing_candidates = len(watch_upper - set(by_asin.keys()))

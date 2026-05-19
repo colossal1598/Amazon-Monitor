@@ -1,163 +1,62 @@
-# Runbook: Remote Machine Setup and Operations
+# PDP Monitor Runbook
 
-This runbook is the current, functional guide for running the **search-only** monitor on the client remote machine.
-
-## 1) Remote Machine Requirements
-
-Set up the remote machine with:
+## Requirements
 
 - Windows 10/11
-- Python 3.10+ (`python --version`)
-- Google Chrome installed
-- Git installed (`git --version`)
-- Internet access stable enough for Amazon browsing
-- Local WhatsApp API server running and reachable from this machine
+- Python 3.10+
+- Google Chrome
+- Local WhatsApp API server
+- Stable internet or configured `PROXY_URL`
 
-## 2) One-Time Install
+## Start
 
-From `amazon_monitor/`:
+```powershell
+.\.venv\Scripts\Activate.ps1
+python main.py
+```
 
-1. `python -m venv .venv`
-2. `.\\.venv\\Scripts\\Activate.ps1`
-3. `pip install -r requirements.txt`
-4. `playwright install chrome`
+The scheduler runs one PDP cycle immediately, then every `pdp_poll_minutes`.
 
-If PowerShell blocks activation:
+## Stop
 
-1. `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`
-2. `.\\.venv\\Scripts\\Activate.ps1`
+Press `Ctrl+C`, or use the existing stop/restart scripts if running under the deployed setup.
 
-## 3) Required Configuration
+## Daily Check
 
-### `.env`
+```powershell
+python tools/healthcheck.py
+```
 
-Set:
+Also check:
 
-- `PROXY_URL` (optional)
+- `logs/monitor.log` for lifecycle events.
+- `logs/monitor.debug.log` for per-cycle counts and skipped PDP rows.
+- `data/health.json` for last `pdp` and `heartbeat` success times.
 
-### `config.yaml`
+## CAPTCHA Or Network Block
 
-Set and verify:
+Expected behavior:
 
-- `wa_api_url`
-- `wa_api_key`
-- `wa_group_id`
-- optional `wa_client_to` (used for heartbeat/error routing when set)
-- `wa_message_templates`
-- `affiliate_tag`
-- `search_urls.amazon_com` and `search_urls.aes_llc` (required; legacy `featured` / `newest_arrivals` still supported)
-- `pagination_mode`, `max_search_pages`, `max_cycle_seconds`, `required_keywords`, optional YAML `whitelist` / `blacklist` ASIN lists
+- Operational WhatsApp error is sent with `pdp_error`.
+- PDP job pauses for `captcha_recovery_pause_seconds`.
+- Scheduler resumes automatically.
 
-Note: search-only scraping (no PDP). Featured URL uses dynamic or fixed pagination; newest URL is page 1 only for ASINs not yet in SQLite.
+If it repeats:
 
-## 4) First-Time WhatsApp API Test
+- Increase `pdp_poll_minutes`.
+- Lower `pdp_watch_max_concurrent_tabs`.
+- Check proxy/IP quality.
 
-Run:
+## Timeout Or Slow Product Page
 
-- `python first_time_setup.py`
+Each ASIN gets `pdp_watch_max_attempts` navigation attempts. If all attempts fail, the row is emitted as `_skip_update`, and the database is left unchanged for that ASIN.
 
-Complete:
+## Seller And Delivery Rules
 
-1. Run the setup script.
-2. Confirm setup test alert reaches WhatsApp.
+An ASIN is considered in stock only when:
 
-Optional client settings UI:
+- A product price is parsed.
+- Seller/shipper text contains an allowed substring such as `amazon.com` or `amazon export`.
+- The delivery text does not say the item cannot ship to the selected location.
 
-1. `python tools/config_editor_backend.py`
-2. Open `http://127.0.0.1:8765`
-
-## 5) Start / Stop
-
-Start:
-
-1. `.\\.venv\\Scripts\\Activate.ps1`
-2. `python main.py` (on a fresh DB you may get many “new product” alerts until the catalog is seeded—tune filters/poll interval as needed)
-
-Stop:
-
-- `Ctrl + C`
-
-## 6) What Must Be Running
-
-For production operation:
-
-- `main.py` process running
-- WhatsApp API service running
-
-If any of these are down, alerts stop.
-
-## 7) Daily Operations Check (1 minute)
-
-1. Confirm `main.py` is running.
-2. Run `python tools/healthcheck.py` and confirm `PASS`.
-3. Check `logs/monitor.log` has recent entries.
-4. Confirm expected heartbeat alert behavior (if enabled).
-
-## 8) Manual Validation Commands
-
-- Syntax check:
-  - `python -m compileall .`
-- Public IP:
-  - `python tools/check_ip.py`
-- Health:
-  - `python tools/healthcheck.py`
-
-## 9) Recovery Playbooks
-
-### Captcha or anti-bot block
-
-Expected:
-
-- scraper pauses ~120s then resumes (no modem rotation).
-
-Action:
-
-1. Check latest errors in `logs/monitor.log`.
-2. Reduce `search_poll_minutes` or narrow URLs if blocks repeat.
-
-## 10) Updating Client Machine from Your Commits (No Manual Copy)
-
-One-command update + restart:
-
-1. `powershell -ExecutionPolicy Bypass -File .\scripts\update_and_restart.ps1`
-
-Manual equivalent on client machine in project folder:
-
-1. `git pull`
-2. `.\\.venv\\Scripts\\Activate.ps1`
-3. `pip install -r requirements.txt`
-4. Restart bot (`python main.py`)
-
-This is enough for most updates.
-
-## 11) Optional Auto-Start on Reboot
-
-Use Task Scheduler to run at startup:
-
-Program/script:
-
-- `powershell.exe`
-
-Arguments:
-
-- `-ExecutionPolicy Bypass -File "<full-path>\\start_monitor.ps1"`
-
-Where `start_monitor.ps1` activates venv and starts `python main.py`.
-
-## 12) Optional Scheduled Auto-Update
-
-Install daily update task:
-
-1. `powershell -ExecutionPolicy Bypass -File .\scripts\install_update_task.ps1 -DailyAt "02:00"`
-
-This creates Task Scheduler job `AmazonMonitorUpdate` that runs:
-
-- `scripts\update_and_restart.ps1`
-
-## 13) Production Readiness Checklist
-
-- [ ] `first_time_setup.py` completed successfully
-- [ ] WhatsApp API receives alert messages
-- [ ] WhatsApp heartbeat alert behavior verified (if enabled)
-- [ ] `python tools/healthcheck.py` returns PASS
-- [ ] `logs/monitor.log` updates continuously
+Paid delivery is allowed and appears in the WhatsApp `{shipping}` line when Amazon exposes it.

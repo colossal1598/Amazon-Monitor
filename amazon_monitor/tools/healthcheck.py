@@ -27,7 +27,7 @@ def main() -> int:
     now = datetime.now(timezone.utc)
 
     limits = {
-        "search": timedelta(minutes=10),
+        "pdp": timedelta(minutes=10),
         "heartbeat": timedelta(minutes=40),
     }
 
@@ -35,13 +35,14 @@ def main() -> int:
     for job, max_age in limits.items():
         info = jobs.get(job, {})
         success = parse_dt(info.get("last_success_at"))
+        error_at = parse_dt(info.get("last_error_at"))
         error = info.get("last_error_message")
         if success is None:
             failed.append(f"{job}: never succeeded")
             continue
         if now - success > max_age:
             failed.append(f"{job}: stale success ({success.isoformat()})")
-        if error:
+        if error and (error_at is None or error_at > success):
             failed.append(f"{job}: last error present ({error})")
 
     if failed:

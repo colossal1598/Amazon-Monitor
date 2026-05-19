@@ -23,7 +23,7 @@ def _post_wa(config: dict[str, Any], payload: dict[str, Any]) -> None:
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         response.raise_for_status()
     except Exception as exc:
-        LOGGER.warning("WhatsApp API call failed (%s): %s", url, exc)
+        LOGGER.error("WhatsApp API call failed (%s): %s", url, exc)
 
 
 # YAML may only override these product-facing templates; operational alerts always use strings below.
@@ -67,7 +67,7 @@ DEFAULT_MESSAGE_TEMPLATES = {
     ),
     "heartbeat_ok": "Heartbeat OK: {timestamp}",
     "heartbeat_error": "Heartbeat failed: {error_message}\nTime: {timestamp}",
-    "search_error": "Search loop error: {error_message}\nTime: {timestamp}",
+    "pdp_error": "PDP loop error: {error_message}\nTime: {timestamp}",
     "modem_error": "Modem job error: {error_message}\nTime: {timestamp}",
     "modem_trigger": "Modem recovery trigger fired.\nTime: {timestamp}",
 }

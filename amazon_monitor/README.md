@@ -1,55 +1,65 @@
-# Pokemon TCG Amazon Monitor
+# Amazon PDP Monitor
 
-Local Python monitor for Pokemon TCG listings on Amazon.com: Playwright search scraping (no product-detail pages), dual search URLs, SQLite state, title/keyword filters plus optional YAML ASIN whitelist/blacklist, and alerts via a local WhatsApp API.
+Python monitor for watched Amazon product-detail pages. It visits configured ASINs on `amazon.com`, accepts offers sold by Amazon.com or Amazon Export LLC, stores state in SQLite, and sends WhatsApp alerts for new, back-in-stock, and price-drop events.
 
-## What This Project Does
+## What It Does
 
-- **`search_urls.amazon_com`** — scrapes the full Amazon.com–scoped result set (dynamic pagination from Amazon `s-metadata`, capped by `max_search_pages` and `max_cycle_seconds`). Drives catalog updates, price drops, back-in-stock, and optional missing-ASIN reconciliation.
-- **`search_urls.aes_llc`** — Amazon Export Sales LLC (`me=` scope), **page 1 only**. Uses the same Pokémon TCG / price / keyword pipeline as Amazon.com, but **skips** the stage-1 shipping/delivery-line gate and the post-pipeline **free-delivery-only** filter (AES cards often lack a delivery block). Merged with the Amazon.com pass (Amazon.com wins when both list the same in-stock ASIN). For **`pdp_watch_asins`**, if the PDP scrape fails or shows the wrong seller, the same-cycle AES SERP row is used as a fallback (no false OOS).
-- Sends alerts to your local WhatsApp API server.
+- Watches only `pdp_watch_asins` from `config.yaml`.
+- Extracts title, buy-box price, seller/shipper text, product image, and delivery details.
+- Accepts paid delivery as long as the seller matches the allowlist and Amazon does not say the item cannot ship to the selected location.
+- Skips DB updates on per-page failures/timeouts so one bad PDP does not falsely mark a product out of stock.
+- Pauses and resumes the PDP job when Amazon shows CAPTCHA or a global network block.
+
+## Key Files
+
+- `main.py` — APScheduler runtime: PDP scrape, state update, alert send, heartbeat.
+- `pdp_scraper.py` — Playwright PDP extraction, seller matching, retry/CAPTCHA handling.
+- `pdp_helpers.py` — ASIN validation, title cleanup, WhatsApp delivery-line formatting.
+- `state_engine.py` — SQLite products/alerts and PDP alert decisions.
+- `webhook_sender.py` — WhatsApp API payloads.
+- `browser_factory.py` — user agents, rate limiter, Amazon locale/currency cookie helpers.
 
 ## Configuration
 
 Edit `config.yaml`:
 
-- `search_urls.amazon_com` — Amazon.com slot SERP URL (filters/sort embedded in the link).
-- `search_urls.aes_llc` — Amazon Export Sales LLC seller-scoped URL.
-- **Do not rely on combining** free-shipping refines (`p_n_is_free_shipping` in `rh`) **with** seller refines (`p_6` / `emi`) in one Amazon search URL—Amazon often does not honor both. On **Amazon.com**, stage 1 requires a **visible shipping/delivery line** on the card (non-empty **`shipping_text`**, or **`delivery` / `shipping`** in the blob, or free phrasing). **AES LLC** skips that shipping gate. No currency parsing.
-- **WhatsApp templates** — `{shipping}` is built in code (`filter_pipeline.shipping_display_hebrew`): **`משלוח חינם`** when free, else **`משלוח: 54₪`**-style (amount + ₪ when the line has **₪** or **ILS** + digits; otherwise **`משלוח:`** + the full scraped line). Edit that function to change wording or `$` handling.
-- `pagination_mode`: `auto` (derive page count from `totalResultCount` / `asinOnPageCount`) or `fixed` (use `search_pages`).
-- `max_search_pages`, `max_cycle_seconds`, `search_pages`, `required_keywords`, `whitelist` / `blacklist` (ASIN lists in YAML), WhatsApp fields, `db_path`, etc.
+- `pdp_watch_asins` — ASINs to visit every cycle.
+- `pdp_allowed_seller_substrings` — default: `amazon.com`, `amazon export`.
+- `pdp_poll_minutes`, `max_cycle_seconds`, `max_requests_per_minute`.
+- `pdp_watch_max_concurrent_tabs`, `pdp_watch_max_attempts`, jitter/delay ranges.
+- WhatsApp fields: `wa_api_url`, `wa_api_key`, `wa_group_id`, optional `wa_client_to`.
+- `affiliate_tag`, `db_path`, `log_dir`, optional FX settings.
 
-Legacy keys `search_urls.featured` / `search_urls.newest_arrivals` / `search_urls.main_search` and top-level `search_url` are still read as fallbacks for the Amazon.com URL only; prefer `amazon_com` and `aes_llc`.
+Delivery text in alerts is produced by `pdp_helpers.shipping_display_hebrew`:
 
-## Price and stock logic
-
-- SQLite `products`, `alert_decisions` for new / back-in-stock / price-drop, optional `enable_missing_asin_oos` on the **Amazon.com** pass only.
-
-## Architecture
-
-- `search_scraper.py` — Playwright search only; metadata pagination.
-- `filter_pipeline.py` — stage1 (Pokemon TCG + price; shipping line on **Amazon.com** only), optional YAML **whitelist** / **blacklist** ASINs, `required_keywords` for non-whitelist rows → rows for the state engine.
-- `state_engine.py` — SQLite + alerts.
-- `webhook_sender.py` — WhatsApp API posts.
-- `main.py` — APScheduler: Amazon.com scrape → filter → AES LLC scrape → merge → state engine → PDP watch.
-
-## Prerequisites
-
-- Windows (typical), Python 3.10+, Google Chrome, `pip install -r requirements.txt`, `playwright install chrome`.
+- Free delivery: `משלוח חינם`
+- Paid delivery: `משלוח: <delivery price or line>`
 
 ## Run
 
 ```powershell
-cd amazon_monitor
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+playwright install chrome
+python main.py
+```
+
+Optional proxy:
+
+```powershell
+$env:PROXY_URL = "http://user:pass@host:port"
 python main.py
 ```
 
 ## Health
 
-- `logs/monitor.log`, `data/health.json` (search + heartbeat jobs).
-- `python tools/healthcheck.py` — exit `0` healthy, `1` stale/errors, `2` missing health file.
+- Logs: `logs/monitor.log`, `logs/monitor.debug.log`
+- Health snapshot: `data/health.json`
+- Check command: `python tools/healthcheck.py`
 
 ## Troubleshooting
 
-- **Captcha** — search job pauses ~120s and resumes; no modem rotation. Check logs and consider running less often or from a stable residential IP.
-- **No alerts** — verify WA API settings, `search_urls`, and filter lists (`required_keywords`, YAML `whitelist` / `blacklist`). If hits exist on Amazon but not in logs, check stage1: the SERP should populate **`shipping_text`** (delivery block) or otherwise contain **delivery/shipping** text on the card scrape.
+- CAPTCHA: the PDP job pauses for `captcha_recovery_pause_seconds`, sends an operational WhatsApp error, then resumes.
+- Timeouts: each PDP navigation gets bounded retries. If all attempts fail, the existing DB row is left unchanged.
+- No alerts: confirm `pdp_watch_asins`, seller allowlist, WhatsApp settings, and `logs/monitor.debug.log`.

@@ -8,28 +8,31 @@ import os
 import random
 import re
 import time
-import unicodedata
 from typing import Any
 
 import browser_factory
 from browser_factory import USER_AGENTS, STEALTH
-from exceptions import CaptchaBlocked, NetworkAccessDenied
-from filter_pipeline import row_has_free_shipping
-from search_scraper import _valid_asin
+from exceptions import NetworkAccessDenied
+from pdp_helpers import normalize_ascii, valid_asin
 
 LOGGER = logging.getLogger(__name__)
 
-# ~15s worst-case per ASIN (goto + title wait); odd PDPs must not block search_loop.
+# ~15s per attempt (goto + title wait); odd PDPs must not block the scheduler loop.
 _PDP_GOTO_TIMEOUT_MS = 12_000
 _PDP_TITLE_WAIT_MS = 8_000
+_PDP_MAX_ATTEMPTS = 3
+_PDP_RETRY_BACKOFF_SECONDS = (1.5, 3.0)
 
 _PRICE_RE = re.compile(r"\$?\s*([0-9][0-9,]*)(?:\.(\d{2}))?")
+_DELIVERY_RELEVANT_RE = re.compile(
+    r"delivery|shipping|ship to|ships to|arrives|import charges|^\$[\d,.]+\s*delivery|₪|ils",
+    re.IGNORECASE,
+)
 
 
 # Simplify text into an easy-to-compare form so seller and shipping wording matches even when formatting differs.
 def _normalize_for_match(value: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", (value or "").lower().strip())
-    return decomposed.encode("ascii", "ignore").decode("ascii")
+    return normalize_ascii(value)
 
 
 # Check if the product’s seller/shipping text includes any of the allowed seller hints you configured.
@@ -94,6 +97,8 @@ def _extract_pdp_price(page) -> float | None:
         "#corePrice_feature_div .a-price .a-offscreen",
         "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
         ".reinventPricePriceToPayMargin .a-price .a-offscreen",
+        ".apex-pricetopay-value .a-offscreen",
+        "#apex-pricetopay-accessibility-label",
         "#tp_price_block_total_price_ww .a-offscreen",
         "span.a-price.a-text-price .a-offscreen",
     ):
@@ -107,16 +112,20 @@ def _extract_pdp_price(page) -> float | None:
         p = _parse_price_text(raw)
         if p is not None:
             return p
-    try:
-        whole = page.query_selector(".a-price-whole")
-        frac = page.query_selector(".a-price-fraction")
-        if whole and frac:
-            w = (whole.inner_text() or "").strip().replace(",", "")
-            f = (frac.inner_text() or "").strip()
-            if w.isdigit() and f.isdigit():
-                return float(f"{w}.{f}")
-    except Exception:
-        return None
+    for root_sel in ("#desktop_buybox", "#buybox", "#offerDisplayFeature_feature_div", "body"):
+        try:
+            root = page.query_selector(root_sel)
+            if not root:
+                continue
+            whole = root.query_selector(".a-price-whole")
+            frac = root.query_selector(".a-price-fraction")
+            if whole and frac:
+                w = (whole.inner_text() or "").strip().replace(",", "").replace(".", "")
+                f = (frac.inner_text() or "").strip()
+                if w.isdigit() and f.isdigit():
+                    return float(f"{w}.{f}")
+        except Exception:
+            continue
     return None
 
 
@@ -148,9 +157,33 @@ def _extract_pdp_image(page) -> str | None:
 
 # Extract the delivery/shipping message from the product page so alerts can show whether it ships to your location.
 def _extract_pdp_shipping(page) -> str:
+    lines: list[str] = []
+
+    def add_line(value: str | None) -> None:
+        if not value:
+            return
+        for part in re.split(r"[\r\n]+", value):
+            line = " ".join(part.split())
+            if line and line not in lines:
+                lines.append(line)
+
+    for root_sel in ("#qualifiedBuybox", "#desktop_buybox", "#buybox", "#offerDisplayFeature_feature_div"):
+        try:
+            root = page.query_selector(root_sel)
+            if not root:
+                continue
+            for el in root.query_selector_all("span.a-color-secondary"):
+                text = (el.inner_text() or "").strip()
+                if text and _DELIVERY_RELEVANT_RE.search(text):
+                    add_line(text)
+        except Exception:
+            continue
+
     for sel in (
+        "[id^='mir-layout-DELIVERY_BLOCK-slot-']",
         "#deliveryBlockMessage",
         "#mir-layout-DELIVERY_BLOCK-slot-PRIMARYDELIVERYBLOCKLARGE",
+        "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",
         "#ddmDeliveryMessage",
         "[data-cy='delivery-recipe']",
     ):
@@ -160,15 +193,36 @@ def _extract_pdp_shipping(page) -> str:
                 continue
             t = (el.inner_text() or "").strip()
             if t:
-                return t
+                add_line(t)
         except Exception:
             continue
-    return ""
+
+    try:
+        for el in page.query_selector_all("[data-csa-c-delivery-price]"):
+            price = (el.get_attribute("data-csa-c-delivery-price") or "").strip()
+            text = (el.inner_text() or "").strip()
+            add_line(" ".join(x for x in (price, text) if x))
+    except Exception:
+        pass
+
+    return "\n".join(lines)
 
 
 # Collect the page’s merchant and buy-box text into one blob so we can confirm the seller matches what you allow.
 def _pdp_merchant_blob(page) -> str:
     parts: list[str] = []
+    for feature_name in ("desktop-merchant-info", "desktop-fulfiller-info"):
+        try:
+            root = page.query_selector(
+                f'.offer-display-feature-text[offer-display-feature-name="{feature_name}"]'
+            )
+            if not root:
+                continue
+            text = (root.inner_text() or "").strip()
+            if text and text not in parts:
+                parts.append(text)
+        except Exception:
+            continue
     for sel in (
         "#merchantInfoFeature_feature_div",
         "#tabular-buybox",
@@ -217,8 +271,6 @@ def _pdp_row(
     qualifies = price is not None and merchant_matches_allowed(merchant_blob, allowed)
     if _is_not_shippable(shipping_text):
         qualifies = False
-    if qualifies and not row_has_free_shipping({"shipping_text": shipping_text}):
-        qualifies = False
     return {
         "asin": asin,
         "title": title,
@@ -261,6 +313,8 @@ async def _extract_pdp_price_async(page: Any) -> float | None:
         "#corePrice_feature_div .a-price .a-offscreen",
         "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
         ".reinventPricePriceToPayMargin .a-price .a-offscreen",
+        ".apex-pricetopay-value .a-offscreen",
+        "#apex-pricetopay-accessibility-label",
         "#tp_price_block_total_price_ww .a-offscreen",
         "span.a-price.a-text-price .a-offscreen",
     ):
@@ -274,16 +328,20 @@ async def _extract_pdp_price_async(page: Any) -> float | None:
         p = _parse_price_text(raw)
         if p is not None:
             return p
-    try:
-        whole = await page.query_selector(".a-price-whole")
-        frac = await page.query_selector(".a-price-fraction")
-        if whole and frac:
-            w = (await whole.inner_text() or "").strip().replace(",", "")
-            f = (await frac.inner_text() or "").strip()
-            if w.isdigit() and f.isdigit():
-                return float(f"{w}.{f}")
-    except Exception:
-        return None
+    for root_sel in ("#desktop_buybox", "#buybox", "#offerDisplayFeature_feature_div", "body"):
+        try:
+            root = await page.query_selector(root_sel)
+            if not root:
+                continue
+            whole = await root.query_selector(".a-price-whole")
+            frac = await root.query_selector(".a-price-fraction")
+            if whole and frac:
+                w = (await whole.inner_text() or "").strip().replace(",", "").replace(".", "")
+                f = (await frac.inner_text() or "").strip()
+                if w.isdigit() and f.isdigit():
+                    return float(f"{w}.{f}")
+        except Exception:
+            continue
     return None
 
 
@@ -302,9 +360,33 @@ async def _extract_pdp_image_async(page: Any) -> str | None:
 
 
 async def _extract_pdp_shipping_async(page: Any) -> str:
+    lines: list[str] = []
+
+    def add_line(value: str | None) -> None:
+        if not value:
+            return
+        for part in re.split(r"[\r\n]+", value):
+            line = " ".join(part.split())
+            if line and line not in lines:
+                lines.append(line)
+
+    for root_sel in ("#qualifiedBuybox", "#desktop_buybox", "#buybox", "#offerDisplayFeature_feature_div"):
+        try:
+            root = await page.query_selector(root_sel)
+            if not root:
+                continue
+            for el in await root.query_selector_all("span.a-color-secondary"):
+                text = (await el.inner_text() or "").strip()
+                if text and _DELIVERY_RELEVANT_RE.search(text):
+                    add_line(text)
+        except Exception:
+            continue
+
     for sel in (
+        "[id^='mir-layout-DELIVERY_BLOCK-slot-']",
         "#deliveryBlockMessage",
         "#mir-layout-DELIVERY_BLOCK-slot-PRIMARYDELIVERYBLOCKLARGE",
+        "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",
         "#ddmDeliveryMessage",
         "[data-cy='delivery-recipe']",
     ):
@@ -314,14 +396,35 @@ async def _extract_pdp_shipping_async(page: Any) -> str:
                 continue
             t = (await el.inner_text() or "").strip()
             if t:
-                return t
+                add_line(t)
         except Exception:
             continue
-    return ""
+
+    try:
+        for el in await page.query_selector_all("[data-csa-c-delivery-price]"):
+            price = (await el.get_attribute("data-csa-c-delivery-price") or "").strip()
+            text = (await el.inner_text() or "").strip()
+            add_line(" ".join(x for x in (price, text) if x))
+    except Exception:
+        pass
+
+    return "\n".join(lines)
 
 
 async def _pdp_merchant_blob_async(page: Any) -> str:
     parts: list[str] = []
+    for feature_name in ("desktop-merchant-info", "desktop-fulfiller-info"):
+        try:
+            root = await page.query_selector(
+                f'.offer-display-feature-text[offer-display-feature-name="{feature_name}"]'
+            )
+            if not root:
+                continue
+            text = (await root.inner_text() or "").strip()
+            if text and text not in parts:
+                parts.append(text)
+        except Exception:
+            continue
     for sel in (
         "#merchantInfoFeature_feature_div",
         "#tabular-buybox",
@@ -350,11 +453,13 @@ async def _run_pdp_watch_async(
     scroll_delay_range: tuple[float, float],
     max_concurrent: int,
     jitter_range: tuple[float, float],
+    max_attempts: int,
 ) -> list[dict[str, Any]]:
     from playwright.async_api import async_playwright
 
     cycle_started = time.monotonic()
     sem = asyncio.Semaphore(max_concurrent)
+    captcha_abort = asyncio.Event()
     stealth_ctx_applied = False
     stealth_page_fallback_warned = False
     LOGGER.info(
@@ -424,81 +529,108 @@ async def _run_pdp_watch_async(
             LOGGER.warning("pdp_watch stealth not applied (continuing): %s", exc)
 
         async def worker(idx: int, asin: str) -> tuple[int, dict[str, Any]]:
+            nonlocal stealth_page_fallback_warned
+            if captcha_abort.is_set():
+                return idx, _pdp_skip_row(asin, "captcha_run_aborted")
             async with sem:
+                if captcha_abort.is_set():
+                    return idx, _pdp_skip_row(asin, "captcha_run_aborted")
                 if time.monotonic() - cycle_started > max_cycle_seconds:
                     return idx, _pdp_skip_row(asin, "cycle_budget_exceeded")
 
                 await asyncio.sleep(random.uniform(jitter_range[0], jitter_range[1]))
+                if captcha_abort.is_set():
+                    return idx, _pdp_skip_row(asin, "captcha_run_aborted")
 
                 if browser_factory.global_rate_limiter:
                     await asyncio.to_thread(browser_factory.global_rate_limiter.acquire)
 
+                if captcha_abort.is_set():
+                    return idx, _pdp_skip_row(asin, "captcha_run_aborted")
                 if time.monotonic() - cycle_started > max_cycle_seconds:
                     return idx, _pdp_skip_row(asin, "cycle_budget_exceeded")
 
-                page = await context.new_page()
-                try:
-                    page.set_default_timeout(2_000)
-                    page.set_default_navigation_timeout(_PDP_GOTO_TIMEOUT_MS)
-                    if not stealth_ctx_applied:
-                        # Best-effort fallback: try existing sync stealth against the page.
-                        # If it fails, warn once per run and proceed.
+                url = f"https://www.amazon.com/dp/{asin}"
+                last_reason = "goto_failed"
+                for attempt in range(1, max_attempts + 1):
+                    if captcha_abort.is_set():
+                        return idx, _pdp_skip_row(asin, "captcha_run_aborted")
+                    page = await context.new_page()
+                    try:
+                        page.set_default_timeout(2_000)
+                        page.set_default_navigation_timeout(_PDP_GOTO_TIMEOUT_MS)
+                        if not stealth_ctx_applied:
+                            # Best-effort fallback: try existing sync stealth against the page.
+                            # If it fails, warn once per run and proceed.
+                            try:
+                                await asyncio.to_thread(STEALTH.apply_stealth_sync, page)
+                            except Exception as exc:
+                                if not stealth_page_fallback_warned:
+                                    stealth_page_fallback_warned = True
+                                    LOGGER.warning("pdp_watch per-page stealth fallback failed (continuing): %s", exc)
+
                         try:
-                            await asyncio.to_thread(STEALTH.apply_stealth_sync, page)
-                        except Exception as exc:
-                            if not stealth_page_fallback_warned:
-                                stealth_page_fallback_warned = True
-                                LOGGER.warning("pdp_watch per-page stealth fallback failed (continuing): %s", exc)
+                            await page.goto(url, wait_until="domcontentloaded", timeout=_PDP_GOTO_TIMEOUT_MS)
+                        except Exception as e:
+                            if _is_network_error(e):
+                                raise NetworkAccessDenied(f"PDP network error for {asin}: {e}", e) from e
+                            last_reason = "goto_failed"
+                            LOGGER.warning(
+                                "PDP goto failed asin=%s attempt=%s/%s: %s",
+                                asin,
+                                attempt,
+                                max_attempts,
+                                e,
+                            )
+                            if attempt < max_attempts:
+                                await asyncio.sleep(random.uniform(*_PDP_RETRY_BACKOFF_SECONDS))
+                                continue
+                            await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                            return idx, _pdp_skip_row(asin, last_reason)
 
-                    url = f"https://www.amazon.com/dp/{asin}"
-                    try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=_PDP_GOTO_TIMEOUT_MS)
-                    except Exception as e:
-                        if _is_network_error(e):
-                            raise NetworkAccessDenied(f"PDP network error for {asin}: {e}", e) from e
-                        LOGGER.warning("PDP goto failed asin=%s: %s (skipping update)", asin, e)
-                        await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
-                        return idx, _pdp_skip_row(asin, "goto_failed")
+                        title_l = (await page.title() or "").lower()
+                        cap_el = await page.query_selector("form[action*='validateCaptcha']")
+                        if "robot check" in title_l or cap_el:
+                            LOGGER.warning("PDP captcha detected asin=%s (skipping update)", asin)
+                            captcha_abort.set()
+                            await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                            return idx, _pdp_skip_row(asin, "captcha")
 
-                    title_l = (await page.title() or "").lower()
-                    cap_el = await page.query_selector("form[action*='validateCaptcha']")
-                    if "robot check" in title_l or cap_el:
-                        raise CaptchaBlocked(f"Captcha on PDP {asin}")
+                        try:
+                            await page.wait_for_selector(
+                                "#productTitle, #title, h1.a-size-large",
+                                timeout=_PDP_TITLE_WAIT_MS,
+                            )
+                        except Exception:
+                            pass
 
-                    try:
-                        await page.wait_for_selector(
-                            "#productTitle, #title, h1.a-size-large",
-                            timeout=_PDP_TITLE_WAIT_MS,
+                        title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
+                        merchant_blob = await _pdp_merchant_blob_async(page)
+                        price = await _extract_pdp_price_async(page)
+                        shipping = await _extract_pdp_shipping_async(page)
+                        image_url = await _extract_pdp_image_async(page)
+                        row = _pdp_row(
+                            asin,
+                            title=title,
+                            price=price,
+                            shipping_text=shipping,
+                            image_url=image_url,
+                            merchant_blob=merchant_blob,
+                            allowed=allowed,
                         )
-                    except Exception:
-                        pass
+                        await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                        return idx, row
+                    except NetworkAccessDenied:
+                        raise
+                    except Exception as exc:
+                        last_reason = "parse_failed"
+                        LOGGER.warning("PDP row parse failed asin=%s: %s (skipping update)", asin, exc)
+                        await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                        return idx, _pdp_skip_row(asin, last_reason)
+                    finally:
+                        await page.close()
 
-                    title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
-                    merchant_blob = await _pdp_merchant_blob_async(page)
-                    price = await _extract_pdp_price_async(page)
-                    shipping = await _extract_pdp_shipping_async(page)
-                    image_url = await _extract_pdp_image_async(page)
-                    row = _pdp_row(
-                        asin,
-                        title=title,
-                        price=price,
-                        shipping_text=shipping,
-                        image_url=image_url,
-                        merchant_blob=merchant_blob,
-                        allowed=allowed,
-                    )
-                    await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
-                    return idx, row
-                except CaptchaBlocked:
-                    raise
-                except NetworkAccessDenied:
-                    raise
-                except Exception as exc:
-                    LOGGER.warning("PDP row parse failed asin=%s: %s (skipping update)", asin, exc)
-                    await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
-                    return idx, _pdp_skip_row(asin, "parse_failed")
-                finally:
-                    await page.close()
+                return idx, _pdp_skip_row(asin, last_reason)
 
         tasks = [worker(idx, asin) for idx, asin in enumerate(normalized)]
         gathered: list[Any] = []
@@ -508,9 +640,6 @@ async def _run_pdp_watch_async(
             await context.close()
             await browser.close()
 
-    for item in gathered:
-        if isinstance(item, CaptchaBlocked):
-            raise item
     for item in gathered:
         if isinstance(item, NetworkAccessDenied):
             raise item
@@ -536,13 +665,14 @@ async def scrape_pdp_watch_async(
     scroll_delay_range: tuple[float, float] = (0.25, 0.65),
     max_concurrent_tabs: int = 2,
     tab_jitter_seconds: tuple[float, float] | list[float] | None = None,
+    max_attempts: int = _PDP_MAX_ATTEMPTS,
 ) -> list[dict[str, Any]]:
     """Async version of scrape_pdp_watch for callers that already run an event loop."""
     normalized: list[str] = []
     seen: set[str] = set()
     for raw in asins:
         a = (raw or "").strip().upper()
-        if not _valid_asin(a) or a in seen:
+        if not valid_asin(a) or a in seen:
             continue
         seen.add(a)
         normalized.append(a)
@@ -563,6 +693,7 @@ async def scrape_pdp_watch_async(
         scroll_delay_range=scroll_delay_range,
         max_concurrent=conc,
         jitter_range=jitter,
+        max_attempts=max(1, int(max_attempts)),
     )
 
 
@@ -575,10 +706,11 @@ def scrape_pdp_watch(
     scroll_delay_range: tuple[float, float] = (0.25, 0.65),
     max_concurrent_tabs: int = 2,
     tab_jitter_seconds: tuple[float, float] | list[float] | None = None,
+    max_attempts: int = _PDP_MAX_ATTEMPTS,
 ) -> list[dict[str, Any]]:
     """Visit each watch ASIN on amazon.com PDP; return exactly one dict per unique valid ASIN (order preserved).
 
-    Uses concurrent Playwright tabs (async API), capped at 3, sharing the global token bucket with SERP.
+    Uses concurrent Playwright tabs (async API), capped at 3, sharing the global token bucket.
 
     ``in_stock`` is True only when a parseable buy-box price exists and merchant blob matches
     ``allowed_seller_substrings`` (substring match after ASCII normalization).
@@ -587,7 +719,7 @@ def scrape_pdp_watch(
     seen: set[str] = set()
     for raw in asins:
         a = (raw or "").strip().upper()
-        if not _valid_asin(a) or a in seen:
+        if not valid_asin(a) or a in seen:
             continue
         seen.add(a)
         normalized.append(a)
@@ -619,5 +751,6 @@ def scrape_pdp_watch(
             scroll_delay_range=scroll_delay_range,
             max_concurrent=conc,
             jitter_range=jitter,
+            max_attempts=max(1, int(max_attempts)),
         )
     )

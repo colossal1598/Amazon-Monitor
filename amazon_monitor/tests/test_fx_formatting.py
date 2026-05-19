@@ -23,6 +23,7 @@ import webhook_sender  # noqa: E402
 
 def _reset_fx_globals() -> None:
     fx_rate._cached_usd_ils = None  # noqa: SLF001
+    fx_rate._monitor_ticks = 0  # noqa: SLF001
     fx_rate._search_ticks = 0  # noqa: SLF001
 
 

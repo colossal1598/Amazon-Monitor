@@ -1,4 +1,4 @@
-"""Cached USD/ILS rate for WhatsApp price lines (Frankfurter API, refresh every N search ticks)."""
+"""Cached USD/ILS rate for WhatsApp price lines (Frankfurter API, refresh every N monitor ticks)."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ LOGGER = logging.getLogger(__name__)
 FRANKFURTER_URL = "https://api.frankfurter.app/latest?from=USD&to=ILS"
 
 _cached_usd_ils: float | None = None
+_monitor_ticks: int = 0
 _search_ticks: int = 0
 
 
@@ -104,20 +105,26 @@ def _fetch_and_cache(config: dict[str, Any]) -> None:
             LOGGER.info("fx_rate: restored from file usd_ils=%.4f", _cached_usd_ils)
 
 
-# Count successful search cycles and occasionally refresh the exchange rate so alerts don’t go stale without calling the network too often.
-def bump_search_tick(config: dict[str, Any]) -> None:
-    """Call once per successful search_loop. Refreshes FX every ``fx_refresh_every_runs`` ticks."""
-    global _search_ticks, _cached_usd_ils
+# Count successful monitor cycles and occasionally refresh the exchange rate so alerts don’t go stale without calling the network too often.
+def bump_monitor_tick(config: dict[str, Any]) -> None:
+    """Call once per successful monitor cycle. Refreshes FX every ``fx_refresh_every_runs`` ticks."""
+    global _monitor_ticks, _search_ticks, _cached_usd_ils
     if config.get("fx_enabled") is False:
         return
-    _search_ticks += 1
+    _monitor_ticks += 1
+    _search_ticks = _monitor_ticks
     every = max(1, int(config.get("fx_refresh_every_runs", 10) or 10))
     if _cached_usd_ils is None:
         _load_cache_file(config)
     if _cached_usd_ils is None:
         _fetch_and_cache(config)
-    elif _search_ticks % every == 0:
+    elif _monitor_ticks % every == 0:
         _fetch_and_cache(config)
+
+
+def bump_search_tick(config: dict[str, Any]) -> None:
+    """Backward-compatible alias for older tests/config wording."""
+    bump_monitor_tick(config)
 
 
 # Return the best available USD→ILS rate (from memory, disk, or fallback) so message formatting can add an approximate ILS amount.

@@ -1,8 +1,8 @@
-"""Single-line title normalization for SERP / DB."""
+"""Single-line title normalization for PDP alerts / DB."""
 
 import unittest
 
-from filter_pipeline import normalize_title_line
+from pdp_helpers import normalize_title_line
 
 
 class NormalizeTitleLineTests(unittest.TestCase):

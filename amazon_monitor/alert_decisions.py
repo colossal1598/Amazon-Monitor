@@ -1,4 +1,4 @@
-"""Pure alert decision logic for search monitoring (documented, testable).
+"""Pure alert decision logic for PDP monitoring (documented, testable).
 
 Each function returns whether to emit an alert and a machine-readable skip reason
 when not emitting. Reasons are logged by StateEngine; they are not WhatsApp copy.
@@ -7,7 +7,6 @@ when not emitting. Reasons are logged by StateEngine; they are not WhatsApp copy
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from typing import Literal
 
 
@@ -28,7 +27,7 @@ class AlertDecision:
 
 # Decide if we should send a “new product” alert by only allowing it the first time we ever see that ASIN.
 def decide_new_product(is_first_observation: bool) -> AlertDecision:
-    """Whether to emit `new_product` for this search hit.
+    """Whether to emit `new_product` for this PDP observation.
 
     Preconditions: candidate passed filters and has a valid ASIN.
 
@@ -64,24 +63,20 @@ def decide_back_in_stock(old_stock: int, new_stock: int) -> AlertDecision:
     return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_STOCK_UNCHANGED_OTHER")
 
 
-# Decide if we should send a “price drop” alert by comparing the old and new prices and skipping repeats too soon.
+# Decide if we should send a “price drop” alert by comparing the last stored price to the new PDP price.
 def decide_price_drop(
     old_price: float | None,
     new_price: float | None,
-    last_price_alert: datetime | None,
-    now: datetime,
     threshold_pct: float,
-    cooldown: timedelta,
 ) -> AlertDecision:
     """Whether to emit `price_drop`.
 
-    Preconditions: row already existed; prices are from the same scrape pipeline.
+    Preconditions: row already existed; prices are consecutive PDP observations.
 
     Rules:
     - Both old and new price must be known (non-None) and old_price > 0.
     - new_price must be strictly below old_price.
     - Percent drop must be >= threshold_pct.
-    - No alert if last_price_alert is within cooldown of `now`.
     """
     if old_price is None or new_price is None:
         return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_MISSING_PRICE")
@@ -92,6 +87,4 @@ def decide_price_drop(
     pct_drop = ((old_price - new_price) / old_price) * 100
     if pct_drop < threshold_pct:
         return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_BELOW_THRESHOLD")
-    if last_price_alert is not None and now - last_price_alert <= cooldown:
-        return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_COOLDOWN")
     return AlertDecision(emit=True, alert_type="price_drop", skip_reason=None)
