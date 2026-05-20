@@ -36,6 +36,13 @@ def _stock_and_price(se: StateEngine, asin: str) -> tuple[int, float | None]:
     return int(row[0]), (None if row[1] is None else float(row[1]))
 
 
+def _stock_price_seen(se: StateEngine, asin: str) -> tuple[int, float | None, str]:
+    row = se.conn.execute(
+        "SELECT in_stock, price, last_seen FROM products WHERE asin = ?", (asin,)
+    ).fetchone()
+    return int(row[0]), (None if row[1] is None else float(row[1])), str(row[2])
+
+
 class TestProcessPdpWatchSkip(unittest.TestCase):
     def test_skip_update_row_preserves_db_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,9 +146,10 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
                     {"B011111111"},
                 )
                 self.assertEqual(alerts, [])
-                stock, price = _stock_and_price(se, "B011111111")
+                stock, price, last_seen = _stock_price_seen(se, "B011111111")
                 self.assertEqual(stock, 0)
                 self.assertEqual(price, 19.99)
+                self.assertEqual(last_seen, "2020-01-01T00:00:00+00:00")
             finally:
                 se.conn.close()
 
@@ -169,6 +177,37 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
                 stock, price = _stock_and_price(se, "B011111111")
                 self.assertEqual(stock, 1)
                 self.assertEqual(price, 21.99)
+            finally:
+                se.conn.close()
+
+    def test_qualified_row_while_already_in_stock_updates_price_and_last_seen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=1, price=19.99)
+                alerts = se.process_pdp_watch_candidates([_pdp_row("B011111111", 21.99)], {"B011111111"})
+                self.assertEqual(alerts, [])
+                stock, price, last_seen = _stock_price_seen(se, "B011111111")
+                self.assertEqual(stock, 1)
+                self.assertEqual(price, 21.99)
+                self.assertNotEqual(last_seen, "2020-01-01T00:00:00+00:00")
+            finally:
+                se.conn.close()
+
+    def test_two_qualified_cycles_emit_back_in_stock_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=0, price=19.99)
+                first = se.process_pdp_watch_candidates([_pdp_row("B011111111", 21.99)], {"B011111111"})
+                second = se.process_pdp_watch_candidates([_pdp_row("B011111111", 22.99)], {"B011111111"})
+                self.assertEqual([a["type"] for a in first], ["back_in_stock"])
+                self.assertEqual(second, [])
+                rows = se.conn.execute(
+                    "SELECT alert_type FROM alerts WHERE asin = ? ORDER BY id",
+                    ("B011111111",),
+                ).fetchall()
+                self.assertEqual([r[0] for r in rows], ["back_in_stock"])
             finally:
                 se.conn.close()
 

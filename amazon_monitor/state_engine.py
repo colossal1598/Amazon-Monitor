@@ -249,20 +249,34 @@ class StateEngine:
 
                 old_price = _as_float(row["price"])
                 old_stock = int(row["in_stock"] or 0)
-                self.conn.execute(
-                    """
-                    UPDATE products
-                    SET title = COALESCE(?, title),
-                        seller = COALESCE(?, seller),
-                        price = COALESCE(?, price),
-                        in_stock = ?,
-                        last_seen = ?
-                    WHERE asin = ?
-                    """,
-                    (title, seller, new_price, new_stock, now, asin),
-                )
+                if new_stock == 0:
+                    # Non-qualifying PDP row explicitly marks the item out of stock.
+                    self.conn.execute("UPDATE products SET in_stock = 0 WHERE asin = ?", (asin,))
+                    continue
 
-                stock_decision = decide_back_in_stock(old_stock, new_stock)
+                if old_stock == 0:
+                    self.conn.execute(
+                        """
+                        UPDATE products
+                        SET price = COALESCE(?, price),
+                            in_stock = 1,
+                            last_seen = ?
+                        WHERE asin = ?
+                        """,
+                        (new_price, now, asin),
+                    )
+                else:
+                    self.conn.execute(
+                        """
+                        UPDATE products
+                        SET price = COALESCE(?, price),
+                            last_seen = ?
+                        WHERE asin = ?
+                        """,
+                        (new_price, now, asin),
+                    )
+
+                stock_decision = decide_back_in_stock(old_stock, 1)
                 emitted_back_in_stock = False
                 if stock_decision.emit:
                     alert = self._build_alert(
