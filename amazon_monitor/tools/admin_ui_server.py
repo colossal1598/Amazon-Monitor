@@ -443,8 +443,12 @@ def main() -> int:
     admin_user = os.environ.get("ADMIN_UI_USER", "").strip()
     admin_password = os.environ.get("ADMIN_UI_PASSWORD", "").strip()
     if not admin_user or not admin_password:
-        # Security-first default: refuse start until explicit credentials exist in .env.
-        LOG.warning("ADMIN_UI_USER / ADMIN_UI_PASSWORD missing in .env. Refusing to start admin UI server.")
+        msg = (
+            "ADMIN_UI_USER / ADMIN_UI_PASSWORD missing. "
+            "Add both to amazon_monitor/.env then: pm2 restart admin-ui"
+        )
+        LOG.error(msg)
+        print(msg, file=sys.stderr, flush=True)
         return 1
 
     db_path = _resolve_db_path(_load_bootstrap_config())

@@ -25,8 +25,11 @@ if ($LASTEXITCODE -ne 0) {
     throw "Dependency installation failed."
 }
 
-Write-Host "Starting amazon-monitor via PM2..."
-Start-Monitor
+Write-Host "Starting PM2 stack (monitor + admin-ui + wa-server + healthcheck)..."
+Start-Stack
 Save-Pm2State
 
+Write-Host ""
+Write-Host "Admin UI: http://127.0.0.1:8765 (requires ADMIN_UI_USER / ADMIN_UI_PASSWORD in .env)"
+Write-Host "If connection refused, run: .\scripts\check_admin_ui.ps1"
 Write-Host "Update + PM2 restart completed successfully."

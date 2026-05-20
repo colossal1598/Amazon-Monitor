@@ -9,12 +9,38 @@
 - Stable internet or configured `PROXY_URL`
 - PM2 installed and stack registered (`pm2 start ecosystem.config.cjs`)
 
+## Admin UI (local)
+
+**Connection refused?** Nothing is listening on port 8765. Usually one of:
+
+1. `admin-ui` not running in PM2 — run `.\start-pm2-stack.bat` or `pm2 start ecosystem.config.cjs --only admin-ui`
+2. Missing `.env` credentials — server **exits immediately** without `ADMIN_UI_USER` and `ADMIN_UI_PASSWORD`
+
+Diagnose:
+
+```powershell
+cd amazon_monitor
+.\scripts\check_admin_ui.ps1
+pm2 logs admin-ui --lines 30
+```
+
+Add to `.env` (see `.env.example`), then:
+
+```powershell
+pm2 restart admin-ui
+pm2 save
+.\scripts\open_admin_ui.ps1
+```
+
+Open: http://127.0.0.1:8765 — browser prompts for the same user/password as in `.env`.
+
 ## Admin UI + Tailscale Funnel (Hebrew/English)
 
 1. **Start admin-ui locally only**  
    הפעילו את `admin-ui` רק על `127.0.0.1:8765` (local only):
    ```powershell
-   pm2 start admin-ui
+   pm2 start ecosystem.config.cjs --only admin-ui
+   pm2 save
    ```
 2. **Expose through Funnel path**  
    פרסמו דרך Funnel לנתיב `/`:
