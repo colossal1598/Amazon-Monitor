@@ -58,6 +58,10 @@ _sqlite_timer: threading.Timer | None = None
 _sqlite_deadline_mono: float | None = None
 _sqlite_read_only: bool | None = None
 
+_PM2_LOCK = threading.RLock()
+_pm2_last_restart_mono: float = 0.0
+_PM2_RESTART_COOLDOWN_SEC = 30
+
 LOG = logging.getLogger("admin-ui")
 
 
@@ -76,15 +80,19 @@ def _resolve_db_path(cfg: dict[str, Any]) -> Path:
     return db_path.resolve()
 
 
-def _popen_kwargs() -> dict[str, Any]:
-    kwargs: dict[str, Any] = {
-        "cwd": str(ROOT),
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
+def _subprocess_extra_kwargs() -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"cwd": str(ROOT)}
     if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
     return kwargs
+
+
+def _popen_kwargs() -> dict[str, Any]:
+    return {
+        **_subprocess_extra_kwargs(),
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
 
 
 def _stop_sqlite_web_unlocked() -> None:
@@ -204,6 +212,62 @@ def start_sqlite_web(*, db_path: str, read_only: bool) -> dict[str, Any]:
     }
 
 
+def restart_pm2_stack() -> dict[str, Any]:
+    """Run `pm2 restart all` on the host machine (local admin only)."""
+    global _pm2_last_restart_mono
+    now = time.monotonic()
+    with _PM2_LOCK:
+        if now - _pm2_last_restart_mono < _PM2_RESTART_COOLDOWN_SEC:
+            wait = int(_PM2_RESTART_COOLDOWN_SEC - (now - _pm2_last_restart_mono))
+            return {
+                "ok": False,
+                "error": "cooldown",
+                "message": f"נא להמתין {wait} שניות לפני הפעלה מחדש נוספת",
+            }
+        _pm2_last_restart_mono = now
+
+    try:
+        completed = subprocess.run(
+            ["pm2", "restart", "all"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            **_subprocess_extra_kwargs(),
+        )
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "error": "pm2_not_found",
+            "message": "PM2 לא מותקן או לא נמצא ב-PATH",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "error": "timeout",
+            "message": "הפעלה מחדש נמשכה יותר מדי זמן",
+        }
+    except OSError:
+        return {
+            "ok": False,
+            "error": "spawn_failed",
+            "message": "לא ניתן להריץ את PM2",
+        }
+
+    stdout_tail = (completed.stdout or "")[-500:].strip()
+    stderr_tail = (completed.stderr or "")[-500:].strip()
+    ok = completed.returncode == 0
+    payload: dict[str, Any] = {
+        "ok": ok,
+        "exit_code": completed.returncode,
+        "message": "המערכת הופעלה מחדש" if ok else "הפעלה מחדש נכשלה",
+    }
+    if stdout_tail:
+        payload["stdout_tail"] = stdout_tail
+    if stderr_tail:
+        payload["stderr_tail"] = stderr_tail
+    return payload
+
+
 def _settings_for_client(db_path: str) -> dict[str, Any]:
     cfg = load_runtime_config(db_path)
     cfg.pop("wa_api_key", None)
@@ -279,7 +343,7 @@ class AdminUIHandler(BaseHTTPRequestHandler):
         """HTML/JS/CSS load without auth; only /api/* needs credentials."""
         if path in ("", "/"):
             return True
-        return path in {"/index.html", "/app.js", "/styles.css"}
+        return path in {"/index.html", "/help.html", "/app.js", "/styles.css"}
 
     def _serve_static(self, path: str) -> None:
         rel = "index.html" if path in ("", "/") else path.lstrip("/")
@@ -413,6 +477,11 @@ class AdminUIHandler(BaseHTTPRequestHandler):
         if path == "/api/sqlite/stop":
             stop_sqlite_web()
             self._json(200, {"ok": True})
+            return
+
+        if path == "/api/pm2/restart":
+            result = restart_pm2_stack()
+            self._json(200 if result.get("ok") else 400, result)
             return
 
         self._json(404, {"ok": False, "error": "not_found"})

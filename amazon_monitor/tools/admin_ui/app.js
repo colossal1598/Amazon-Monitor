@@ -21,6 +21,23 @@ function isValidAsin(raw) {
   return /^[A-Z0-9]{10}$/.test(String(raw || "").trim().toUpperCase());
 }
 
+function userFacingError(payload, status) {
+  if (payload && payload.message && /[\u0590-\u05FF]/.test(String(payload.message))) {
+    return String(payload.message);
+  }
+  const code = payload && (payload.error || payload.message);
+  if (code === "cooldown" || code === "pm2_not_found") {
+    return payload.message || "לא ניתן להפעיל מחדש כעת";
+  }
+  if (status === 404) {
+    return "הפעולה לא נמצאה";
+  }
+  if (status >= 500) {
+    return "שגיאת שרת — נסו שוב";
+  }
+  return "הפעולה נכשלה";
+}
+
 function getAuthHeader() {
   const token = sessionStorage.getItem(AUTH_KEY);
   if (!token) {
@@ -93,7 +110,7 @@ async function apiJson(url, options = {}) {
     throw new Error("unauthorized");
   }
   if (!res.ok) {
-    const msg = payload.message || payload.error || `HTTP ${res.status}`;
+    const msg = userFacingError(payload, res.status);
     throw new Error(msg);
   }
   return payload;
@@ -123,7 +140,7 @@ function renderAsinTable(role, items) {
     removeBtn.addEventListener("click", async () => {
       try {
         await apiJson(`/api/asins/${encodeURIComponent(item.asin)}/${role}`, { method: "DELETE" });
-        showToast(`ASIN ${item.asin} הוסר`);
+        showToast(`קוד ${item.asin} הוסר`);
         await loadAsins(role);
       } catch (err) {
         if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
@@ -143,10 +160,33 @@ async function loadAsins(role) {
   renderAsinTable(role, payload.items || []);
 }
 
+function parsePositiveInt(raw, fallback) {
+  const n = parseInt(String(raw || "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function parsePercent(raw, fallback) {
+  const n = parseInt(String(raw || "").trim(), 10);
+  if (!Number.isFinite(n)) {
+    return fallback;
+  }
+  return Math.min(99, Math.max(1, n));
+}
+
 function fillSettings(settings) {
-  byId("aes-url").value = ((settings.search_urls || {}).aes_llc) || "";
   byId("pdp-poll-minutes").value = settings.pdp_poll_minutes ?? "";
   byId("max-cycle-seconds").value = settings.max_cycle_seconds ?? "";
+  byId("max-concurrent-tabs").value = settings.pdp_watch_max_concurrent_tabs ?? "";
+  byId("playwright-headless").checked = settings.playwright_headless !== false;
+
+  byId("wa-group-id").value = settings.wa_group_id || "";
+  byId("wa-client-to").value = settings.wa_client_to || "";
+
+  byId("price-drop-percent").value = settings.price_drop_percent ?? "";
+  byId("max-requests-per-minute").value = settings.max_requests_per_minute ?? "";
+  byId("affiliate-tag").value = settings.affiliate_tag || "";
+
+  byId("aes-url").value = ((settings.search_urls || {}).aes_llc) || "";
   byId("required-keywords").value = (settings.required_keywords || []).join("\n");
   byId("title-blacklist-phrases").value = (settings.title_blacklist_phrases || []).join("\n");
   byId("allowed-sellers").value = (settings.pdp_allowed_seller_substrings || []).join("\n");
@@ -169,7 +209,7 @@ async function addAsin(role) {
   const asin = String(asinInput.value || "").trim().toUpperCase();
   const notes = String(notesInput.value || "").trim();
   if (!isValidAsin(asin)) {
-    showToast("יש להזין ASIN תקין באורך 10 תווים", true);
+    showToast("יש להזין קוד מוצר תקין — 10 תווים באנגלית", true);
     asinInput.focus();
     return;
   }
@@ -180,7 +220,7 @@ async function addAsin(role) {
     });
     asinInput.value = "";
     notesInput.value = "";
-    showToast(`ASIN ${asin} נוסף`);
+    showToast(`קוד ${asin} נוסף`);
     await loadAsins(role);
   } catch (err) {
     if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
@@ -192,7 +232,7 @@ async function addAsin(role) {
 function openBulkModal(role) {
   state.bulkRole = role;
   byId("bulk-modal-title").textContent =
-    role === "watch" ? "הדבקה מרובה - מעקב PDP" : "הדבקה מרובה - רשימה שחורה";
+    role === "watch" ? "הדבקה מרובה — מעקב מוצרים" : "הדבקה מרובה — רשימה שחורה";
   byId("bulk-text").value = "";
   byId("bulk-modal").classList.remove("hidden");
 }
@@ -221,7 +261,7 @@ async function applyBulk() {
     }
   }
   if (!valid.length) {
-    showToast("לא נמצאו ASIN תקינים להוספה", true);
+    showToast("לא נמצאו קודי מוצר תקינים להוספה", true);
     return;
   }
 
@@ -239,18 +279,24 @@ async function applyBulk() {
   }
   closeBulkModal();
   await loadAsins(role);
-  showToast(`נוספו ${success} מתוך ${valid.length} ASIN`);
+  showToast(`נוספו ${success} מתוך ${valid.length} מוצרים`);
 }
 
 function collectSettingsPayload() {
-  const pollMinutes = parseInt(byId("pdp-poll-minutes").value || "0", 10);
-  const maxCycleSeconds = parseInt(byId("max-cycle-seconds").value || "0", 10);
+  const tabs = parsePositiveInt(byId("max-concurrent-tabs").value, 2);
   return {
+    pdp_poll_minutes: parsePositiveInt(byId("pdp-poll-minutes").value, 4),
+    max_cycle_seconds: parsePositiveInt(byId("max-cycle-seconds").value, 170),
+    pdp_watch_max_concurrent_tabs: Math.min(10, tabs),
+    playwright_headless: byId("playwright-headless").checked,
+    wa_group_id: String(byId("wa-group-id").value || "").trim(),
+    wa_client_to: String(byId("wa-client-to").value || "").trim(),
+    price_drop_percent: parsePercent(byId("price-drop-percent").value, 10),
+    max_requests_per_minute: parsePositiveInt(byId("max-requests-per-minute").value, 10),
+    affiliate_tag: String(byId("affiliate-tag").value || "").trim(),
     search_urls: {
       aes_llc: String(byId("aes-url").value || "").trim(),
     },
-    pdp_poll_minutes: Number.isFinite(pollMinutes) && pollMinutes > 0 ? pollMinutes : 4,
-    max_cycle_seconds: Number.isFinite(maxCycleSeconds) && maxCycleSeconds > 0 ? maxCycleSeconds : 170,
     required_keywords: toLines(byId("required-keywords").value),
     title_blacklist_phrases: toLines(byId("title-blacklist-phrases").value),
     pdp_allowed_seller_substrings: toLines(byId("allowed-sellers").value),
@@ -310,7 +356,7 @@ async function refreshSqliteStatus() {
   } catch (err) {
     renderSqliteStatus({ running: false });
     if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
-      showToast(`שגיאת סטטוס sqlite-web: ${err.message}`, true);
+      showToast("לא ניתן לבדוק מצב צפייה במסד", true);
     }
   }
 }
@@ -322,11 +368,38 @@ async function startSqlite(readOnly) {
       body: JSON.stringify({ read_only: !!readOnly }),
     });
     renderSqliteStatus(payload);
-    showToast(readOnly ? "sqlite-web הופעל בקריאה בלבד" : "sqlite-web הופעל במצב עריכה");
+    showToast(readOnly ? "נפתחה צפייה במסד (קריאה בלבד)" : "נפתחה עריכת מסד (10 דקות)");
   } catch (err) {
     if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
-      showToast(`הפעלת sqlite-web נכשלה: ${err.message}`, true);
+      showToast("לא ניתן לפתוח צפייה במסד", true);
     }
+  }
+}
+
+async function restartPm2Stack() {
+  const ok = window.confirm(
+    "להפעיל מחדש את כל השירותים?\n\nהדף עלול להתנתק. אחרי כ-20 שניות פתחו שוב את הפאנל."
+  );
+  if (!ok) {
+    return;
+  }
+  const button = byId("pm2-restart-btn");
+  button.disabled = true;
+  const prevText = button.textContent;
+  button.textContent = "מפעיל מחדש...";
+  try {
+    const payload = await apiJson("/api/pm2/restart", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    showToast(payload.message || "המערכת הופעלה מחדש");
+  } catch (err) {
+    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
+      showToast(err.message || "הפעלה מחדש נכשלה", true);
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = prevText;
   }
 }
 
@@ -334,10 +407,10 @@ async function stopSqlite() {
   try {
     await apiJson("/api/sqlite/stop", { method: "POST", body: JSON.stringify({}) });
     await refreshSqliteStatus();
-    showToast("sqlite-web נסגר");
+    showToast("צפייה במסד נסגרה");
   } catch (err) {
     if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
-      showToast(`סגירת sqlite-web נכשלה: ${err.message}`, true);
+      showToast("לא ניתן לסגור צפייה במסד", true);
     }
   }
 }
@@ -366,7 +439,18 @@ function bindEvents() {
   byId("blacklist-bulk-btn").addEventListener("click", () => openBulkModal("blacklist"));
   byId("bulk-cancel-btn").addEventListener("click", closeBulkModal);
   byId("bulk-apply-btn").addEventListener("click", applyBulk);
+  byId("bulk-modal").addEventListener("click", (ev) => {
+    if (ev.target === byId("bulk-modal")) {
+      closeBulkModal();
+    }
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && !byId("bulk-modal").classList.contains("hidden")) {
+      closeBulkModal();
+    }
+  });
   byId("save-btn").addEventListener("click", saveSettings);
+  byId("pm2-restart-btn").addEventListener("click", restartPm2Stack);
   byId("sqlite-ro-btn").addEventListener("click", () => startSqlite(true));
   byId("sqlite-rw-btn").addEventListener("click", () => startSqlite(false));
   byId("sqlite-stop-btn").addEventListener("click", stopSqlite);

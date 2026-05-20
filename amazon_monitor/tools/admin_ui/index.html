@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Amazon Monitor - ניהול</title>
+  <title>פאנל ניהול — מעקב אמזון</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <div id="login-screen" class="login-screen">
     <form id="login-form" class="login-card">
       <h2>התחברות</h2>
-      <p class="muted">אותם ערכים כמו ב־.env: ADMIN_UI_USER ו־ADMIN_UI_PASSWORD</p>
+      <p class="muted">שם משתמש וסיסמה מהגדרות השרת</p>
       <label>משתמש</label>
       <input id="login-user" type="text" autocomplete="username" required>
       <label>סיסמה</label>
@@ -22,20 +22,110 @@
 
   <div id="app-shell" class="hidden">
   <header class="topbar">
-    <h1>Amazon Monitor - פאנל ניהול</h1>
-    <p>ניהול הגדרות, רשימות ASIN וגישה מתקדמת למסד הנתונים.</p>
+    <div class="topbar-inner">
+      <div>
+        <h1>פאנל ניהול — מעקב אמזון</h1>
+        <p class="muted">עדכון הגדרות ורשימות מוצרים</p>
+      </div>
+      <a class="topbar-link" href="/help.html">מדריך קצר</a>
+    </div>
   </header>
 
   <main class="container">
+    <section class="card card-ops">
+      <h2>תפעול</h2>
+      <p class="muted">מפעיל מחדש את כל השירותים במחשב. הדף עלול להתנתק לכמה שניות.</p>
+      <button id="pm2-restart-btn" class="btn btn-danger-wide" type="button">הפעלה מחדש של המערכת</button>
+    </section>
+
+    <section class="card">
+      <h2>זמנים ועומס</h2>
+      <div class="row">
+        <div class="field">
+          <label for="pdp-poll-minutes">כל כמה דקות לבדוק מוצרים</label>
+          <input id="pdp-poll-minutes" type="number" min="1" step="1">
+          <p class="hint">כמה דקות בין סיבוב לסיבוב</p>
+        </div>
+        <div class="field">
+          <label for="max-cycle-seconds">מקסימום זמן לסיבוב אחד (שניות)</label>
+          <input id="max-cycle-seconds" type="number" min="30" step="5">
+          <p class="hint">אם הסיבוב לא נגמר בזמן — נעצר</p>
+        </div>
+        <div class="field">
+          <label for="max-concurrent-tabs">כמה מוצרים לפתוח בו-זמנית</label>
+          <input id="max-concurrent-tabs" type="number" min="1" max="10" step="1">
+          <p class="hint">מספר נמוך = פחות עומס על Amazon</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>הגדרות דפדפן</h2>
+      <div class="switch-row">
+        <label class="switch-label" for="playwright-headless">דפדפן נסתר</label>
+        <label class="switch">
+          <input id="playwright-headless" type="checkbox">
+          <span class="switch-slider" aria-hidden="true"></span>
+        </label>
+      </div>
+      <p class="hint">כבוי = רואים חלון כרום (לפעמים עוזר לתקלות)</p>
+    </section>
+
+    <section class="card">
+      <h2>וואטסאפ</h2>
+      <label for="wa-group-id">קבוצת וואטסאפ להתראות</label>
+      <input id="wa-group-id" type="text" dir="ltr" placeholder="120363...@g.us">
+      <p class="hint">מזהה שמתקבל מהשרת — שורה שמתחילה ב־120…</p>
+
+      <label for="wa-client-to">וואטסאפ ללקוח (הודעות מערכת)</label>
+      <input id="wa-client-to" type="text" dir="ltr" placeholder="972...@c.us">
+      <p class="hint">ריק = משתמשים בקבוצה</p>
+
+      <details class="templates-details">
+        <summary>תבניות הודעה (למתקדמים)</summary>
+        <label for="tpl-new-product">מוצר חדש</label>
+        <textarea id="tpl-new-product" rows="6"></textarea>
+        <label for="tpl-price-drop">ירידת מחיר</label>
+        <textarea id="tpl-price-drop" rows="6"></textarea>
+        <label for="tpl-back-in-stock">חזרה למלאי</label>
+        <textarea id="tpl-back-in-stock" rows="6"></textarea>
+        <label for="tpl-default">ברירת מחדל</label>
+        <textarea id="tpl-default" rows="6"></textarea>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>התראות</h2>
+      <div class="row">
+        <div class="field">
+          <label for="price-drop-percent">אחוז ירידת מחיר להתראה</label>
+          <input id="price-drop-percent" type="number" min="1" max="99" step="1">
+          <p class="hint">למשל 10 = התראה מעל 10% ירידה</p>
+        </div>
+        <div class="field">
+          <label for="max-requests-per-minute">מקסימום פניות לדקה</label>
+          <input id="max-requests-per-minute" type="number" min="1" max="60" step="1">
+          <p class="hint">נמוך יותר = פחות סיכון לחסימה</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>קישורי שותפים</h2>
+      <label for="affiliate-tag">תג שותפים בקישורים</label>
+      <input id="affiliate-tag" type="text" dir="ltr" placeholder="לדוגמה: השותף-20">
+      <p class="hint">הקוד אחרי tag= בלינק Amazon</p>
+    </section>
+
     <section class="card">
       <div class="card-head">
-        <h2>מעקב PDP</h2>
+        <h2>מעקב מוצרים</h2>
         <button id="watch-bulk-btn" class="btn btn-secondary" type="button">הדבקה מרובה</button>
       </div>
       <table class="asin-table">
         <thead>
           <tr>
-            <th>ASIN</th>
+            <th>קוד מוצר</th>
             <th>הערות</th>
             <th>פעולה</th>
           </tr>
@@ -43,7 +133,7 @@
         <tbody id="watch-body"></tbody>
       </table>
       <div class="row add-row">
-        <input id="watch-asin-input" type="text" maxlength="10" placeholder="ASIN (10 תווים)">
+        <input id="watch-asin-input" type="text" maxlength="10" placeholder="10 תווים באנגלית">
         <input id="watch-notes-input" type="text" placeholder="הערות (אופציונלי)">
         <button id="watch-add-btn" class="btn" type="button">הוסף</button>
       </div>
@@ -52,15 +142,15 @@
     <section class="card">
       <div class="card-head">
         <div>
-          <h2>רשימה שחורה (SERP)</h2>
-          <p class="muted">משפיע על גילוי AES בלבד, לא על רשימת מעקב PDP.</p>
+          <h2>רשימה שחורה</h2>
+          <p class="muted">מוצרים שלא יופיעו בחיפוש מהספק</p>
         </div>
         <button id="blacklist-bulk-btn" class="btn btn-secondary" type="button">הדבקה מרובה</button>
       </div>
       <table class="asin-table">
         <thead>
           <tr>
-            <th>ASIN</th>
+            <th>קוד מוצר</th>
             <th>הערות</th>
             <th>פעולה</th>
           </tr>
@@ -68,64 +158,46 @@
         <tbody id="blacklist-body"></tbody>
       </table>
       <div class="row add-row">
-        <input id="blacklist-asin-input" type="text" maxlength="10" placeholder="ASIN (10 תווים)">
+        <input id="blacklist-asin-input" type="text" maxlength="10" placeholder="10 תווים באנגלית">
         <input id="blacklist-notes-input" type="text" placeholder="הערות (אופציונלי)">
         <button id="blacklist-add-btn" class="btn" type="button">הוסף</button>
       </div>
     </section>
 
     <section class="card">
-      <h2>גילוי AES</h2>
-      <label for="aes-url">כתובת URL של AES</label>
+      <h2>חיפוש מהספק</h2>
+      <label for="aes-url">קישור חיפוש מהספק</label>
       <input id="aes-url" type="url" placeholder="https://www.amazon.com/s?...">
-      <div class="row">
-        <div class="field">
-          <label for="pdp-poll-minutes">מרווח ריצה (דקות)</label>
-          <input id="pdp-poll-minutes" type="number" min="1" step="1">
-        </div>
-        <div class="field">
-          <label for="max-cycle-seconds">מקסימום שניות למחזור</label>
-          <input id="max-cycle-seconds" type="number" min="30" step="5">
-        </div>
-      </div>
+      <p class="hint">לא לשנות אלא אם יודעים למה</p>
     </section>
 
     <section class="card">
-      <h2>סינון</h2>
-      <label for="required-keywords">required_keywords (שורה לכל ערך)</label>
+      <h2>סינון כותרות</h2>
+      <label for="required-keywords">מילים שחייבות להופיע בכותרת</label>
+      <p class="hint">שורה אחת לכל מילה</p>
       <textarea id="required-keywords" rows="4"></textarea>
-      <label for="title-blacklist-phrases">title_blacklist_phrases (שורה לכל ביטוי)</label>
+      <label for="title-blacklist-phrases">ביטויים אסורים בכותרת</label>
+      <p class="hint">שורה אחת לכל ביטוי</p>
       <textarea id="title-blacklist-phrases" rows="4"></textarea>
     </section>
 
     <section class="card">
-      <h2>PDP</h2>
-      <label for="allowed-sellers">allowed_seller_substrings (שורה לכל ערך)</label>
+      <h2>מוכרים מותרים</h2>
+      <label for="allowed-sellers">שמות מוכרים מותרים</label>
+      <p class="hint">שורה אחת לכל שם (למשל amazon.com)</p>
       <textarea id="allowed-sellers" rows="4"></textarea>
     </section>
 
     <section class="card">
-      <h2>WhatsApp Templates</h2>
-      <label for="tpl-new-product">new_product</label>
-      <textarea id="tpl-new-product" rows="8"></textarea>
-      <label for="tpl-price-drop">price_drop</label>
-      <textarea id="tpl-price-drop" rows="8"></textarea>
-      <label for="tpl-back-in-stock">back_in_stock</label>
-      <textarea id="tpl-back-in-stock" rows="8"></textarea>
-      <label for="tpl-default">default</label>
-      <textarea id="tpl-default" rows="8"></textarea>
-    </section>
-
-    <section class="card">
-      <h2>מסד נתונים מתקדם</h2>
-      <p class="muted">sqlite-web זמין מקומית בלבד ב־127.0.0.1:8768 למשך 10 דקות.</p>
+      <h2>מסד נתונים (מתקדם)</h2>
+      <p class="muted">לצפייה בטבלאות — רק במחשב המקומי, עד 10 דקות.</p>
       <div class="row">
         <button id="sqlite-ro-btn" class="btn btn-secondary" type="button">קריאה בלבד</button>
         <button id="sqlite-rw-btn" class="btn btn-secondary" type="button">עריכה</button>
         <button id="sqlite-stop-btn" class="btn btn-danger" type="button">סגור</button>
       </div>
       <p id="sqlite-status" class="status-line">מצב: לא פעיל</p>
-      <a id="sqlite-link" class="hidden" href="#" target="_blank" rel="noopener noreferrer">פתח sqlite-web</a>
+      <a id="sqlite-link" class="hidden" href="#" target="_blank" rel="noopener noreferrer">פתח צפייה במסד</a>
     </section>
   </main>
 
@@ -136,8 +208,8 @@
   <div id="bulk-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content">
       <h3 id="bulk-modal-title">הדבקה מרובה</h3>
-      <p class="muted">הדביקו רשימת ASIN, מופרדים ברווח/פסיק/שורה.</p>
-      <textarea id="bulk-text" rows="8" placeholder="B012345678, B098765432"></textarea>
+      <p class="muted">הדביקו רשימת מוצרים, מופרדים ברווח או שורה.</p>
+      <textarea id="bulk-text" rows="8" placeholder="B012345678"></textarea>
       <div class="row">
         <button id="bulk-cancel-btn" class="btn btn-secondary" type="button">ביטול</button>
         <button id="bulk-apply-btn" class="btn btn-primary" type="button">הוסף רשימה</button>
