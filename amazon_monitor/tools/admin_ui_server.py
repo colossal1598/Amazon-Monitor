@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+# PM2 runs this file from tools/ — project root must be on sys.path for imports.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import yaml
 try:
     from dotenv import load_dotenv
@@ -36,7 +41,7 @@ except ImportError:
     _HAVE_SQLITE_WEB = False
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = _ROOT
 CONFIG_PATH = ROOT / "config.yaml"
 STATIC_DIR = ROOT / "tools" / "admin_ui"
 
