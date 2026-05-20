@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Amazon Monitor - ניהול</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Amazon Monitor - פאנל ניהול</h1>
+    <p>ניהול הגדרות, רשימות ASIN וגישה מתקדמת למסד הנתונים.</p>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <div class="card-head">
+        <h2>מעקב PDP</h2>
+        <button id="watch-bulk-btn" class="btn btn-secondary" type="button">הדבקה מרובה</button>
+      </div>
+      <table class="asin-table">
+        <thead>
+          <tr>
+            <th>ASIN</th>
+            <th>הערות</th>
+            <th>פעולה</th>
+          </tr>
+        </thead>
+        <tbody id="watch-body"></tbody>
+      </table>
+      <div class="row add-row">
+        <input id="watch-asin-input" type="text" maxlength="10" placeholder="ASIN (10 תווים)">
+        <input id="watch-notes-input" type="text" placeholder="הערות (אופציונלי)">
+        <button id="watch-add-btn" class="btn" type="button">הוסף</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2>רשימה שחורה (SERP)</h2>
+          <p class="muted">משפיע על גילוי AES בלבד, לא על רשימת מעקב PDP.</p>
+        </div>
+        <button id="blacklist-bulk-btn" class="btn btn-secondary" type="button">הדבקה מרובה</button>
+      </div>
+      <table class="asin-table">
+        <thead>
+          <tr>
+            <th>ASIN</th>
+            <th>הערות</th>
+            <th>פעולה</th>
+          </tr>
+        </thead>
+        <tbody id="blacklist-body"></tbody>
+      </table>
+      <div class="row add-row">
+        <input id="blacklist-asin-input" type="text" maxlength="10" placeholder="ASIN (10 תווים)">
+        <input id="blacklist-notes-input" type="text" placeholder="הערות (אופציונלי)">
+        <button id="blacklist-add-btn" class="btn" type="button">הוסף</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>גילוי AES</h2>
+      <label for="aes-url">כתובת URL של AES</label>
+      <input id="aes-url" type="url" placeholder="https://www.amazon.com/s?...">
+      <div class="row">
+        <div class="field">
+          <label for="pdp-poll-minutes">מרווח ריצה (דקות)</label>
+          <input id="pdp-poll-minutes" type="number" min="1" step="1">
+        </div>
+        <div class="field">
+          <label for="max-cycle-seconds">מקסימום שניות למחזור</label>
+          <input id="max-cycle-seconds" type="number" min="30" step="5">
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>סינון</h2>
+      <label for="required-keywords">required_keywords (שורה לכל ערך)</label>
+      <textarea id="required-keywords" rows="4"></textarea>
+      <label for="title-blacklist-phrases">title_blacklist_phrases (שורה לכל ביטוי)</label>
+      <textarea id="title-blacklist-phrases" rows="4"></textarea>
+    </section>
+
+    <section class="card">
+      <h2>PDP</h2>
+      <label for="allowed-sellers">allowed_seller_substrings (שורה לכל ערך)</label>
+      <textarea id="allowed-sellers" rows="4"></textarea>
+    </section>
+
+    <section class="card">
+      <h2>WhatsApp Templates</h2>
+      <label for="tpl-new-product">new_product</label>
+      <textarea id="tpl-new-product" rows="8"></textarea>
+      <label for="tpl-price-drop">price_drop</label>
+      <textarea id="tpl-price-drop" rows="8"></textarea>
+      <label for="tpl-back-in-stock">back_in_stock</label>
+      <textarea id="tpl-back-in-stock" rows="8"></textarea>
+      <label for="tpl-default">default</label>
+      <textarea id="tpl-default" rows="8"></textarea>
+    </section>
+
+    <section class="card">
+      <h2>מסד נתונים מתקדם</h2>
+      <p class="muted">sqlite-web זמין מקומית בלבד ב־127.0.0.1:8768 למשך 10 דקות.</p>
+      <div class="row">
+        <button id="sqlite-ro-btn" class="btn btn-secondary" type="button">קריאה בלבד</button>
+        <button id="sqlite-rw-btn" class="btn btn-secondary" type="button">עריכה</button>
+        <button id="sqlite-stop-btn" class="btn btn-danger" type="button">סגור</button>
+      </div>
+      <p id="sqlite-status" class="status-line">מצב: לא פעיל</p>
+      <a id="sqlite-link" class="hidden" href="#" target="_blank" rel="noopener noreferrer">פתח sqlite-web</a>
+    </section>
+  </main>
+
+  <footer class="sticky-footer">
+    <button id="save-btn" class="btn btn-primary" type="button">שמור</button>
+  </footer>
+
+  <div id="bulk-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h3 id="bulk-modal-title">הדבקה מרובה</h3>
+      <p class="muted">הדביקו רשימת ASIN, מופרדים ברווח/פסיק/שורה.</p>
+      <textarea id="bulk-text" rows="8" placeholder="B012345678, B098765432"></textarea>
+      <div class="row">
+        <button id="bulk-cancel-btn" class="btn btn-secondary" type="button">ביטול</button>
+        <button id="bulk-apply-btn" class="btn btn-primary" type="button">הוסף רשימה</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

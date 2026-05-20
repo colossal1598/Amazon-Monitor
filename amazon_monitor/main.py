@@ -12,11 +12,13 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 import fx_rate
-from alert_dedupe import dedupe_alerts_by_asin
 from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, NetworkAccessDenied
+from filter_pipeline import run_search_filter_pipeline
 from pdp_helpers import valid_asin
 from pdp_scraper import scrape_pdp_watch
+from search_scraper import scrape_search
+from settings_store import list_asins, load_runtime_config, migrate_yaml_to_db
 from state_engine import StateEngine
 from webhook_sender import send_alert, send_heartbeat, send_operational_error
 
@@ -161,19 +163,42 @@ def _allowed_seller_substrings(config: dict[str, Any]) -> list[str]:
     return ["amazon.com", "amazon export"]
 
 
+def resolve_aes_llc_url(config: dict[str, Any]) -> str:
+    raw_urls = config.get("search_urls")
+    if isinstance(raw_urls, dict):
+        url = str(raw_urls.get("aes_llc") or raw_urls.get("newest_arrivals") or "").strip()
+        if url:
+            return url
+    raise ValueError("Set search_urls.aes_llc in DB settings (admin UI or settings table)")
+
+
+def _blacklist_asins(config: dict[str, Any]) -> set[str]:
+    raw = config.get("blacklist")
+    if not isinstance(raw, list):
+        return set()
+    out: set[str] = set()
+    for value in raw:
+        asin = str(value).strip().upper()
+        if valid_asin(asin):
+            out.add(asin)
+    return out
+
+
 def main() -> None:
     load_dotenv()
-    config = load_config()
-    setup_logging(str(config.get("log_dir", "logs")))
-    Path(config.get("auth_dir", "auth")).mkdir(parents=True, exist_ok=True)
-    db_path = str(config.get("db_path", "data/monitor.db"))
+    bootstrap_config = load_config()
+    setup_logging(str(bootstrap_config.get("log_dir", "logs")))
+    Path(bootstrap_config.get("auth_dir", "auth")).mkdir(parents=True, exist_ok=True)
+    db_path = str(bootstrap_config.get("db_path", "data/monitor.db"))
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    migrate_yaml_to_db("config.yaml", db_path)
+    startup_config = load_runtime_config(db_path)
 
     state_engine = StateEngine(
         db_path=db_path,
-        price_drop_percent=float(config.get("price_drop_percent", 10)),
+        price_drop_percent=float(startup_config.get("price_drop_percent", 10)),
     )
-    init_global_rate_limiter(int(config.get("max_requests_per_minute", 10)))
+    init_global_rate_limiter(int(startup_config.get("max_requests_per_minute", 10)))
 
     scheduler = BackgroundScheduler()
     scraping_paused = {"value": False}
@@ -207,7 +232,7 @@ def main() -> None:
         health_state[job]["last_error_message"] = str(exc)
         write_health()
 
-    def handle_captcha_or_network_pause() -> None:
+    def handle_captcha_or_network_pause(config: dict[str, Any]) -> None:
         pause_s = max(0, int(config.get("captcha_recovery_pause_seconds", 120)))
         LOGGER.warning("Captcha or network recovery: pausing PDP job %ss", pause_s)
         scraping_paused["value"] = True
@@ -219,17 +244,51 @@ def main() -> None:
         scraping_paused["value"] = False
         LOGGER.info("PDP job resumed")
 
+    def aes_discovery_loop(config: dict[str, Any]) -> tuple[int, int, int]:
+        aes_llc_url = resolve_aes_llc_url(config)
+        aes_items, _ = scrape_search(
+            aes_llc_url,
+            source="aes_llc",
+            scrape_mode="newest_front",
+            pagination_mode="fixed",
+            fixed_pages=1,
+            max_search_pages=1,
+            collect_debug=False,
+            max_cycle_seconds=int(config.get("max_cycle_seconds", 170)),
+        )
+        aes_pipeline_rows, _aes_meta = run_search_filter_pipeline(
+            aes_items,
+            config,
+            require_shipping_signal=False,
+        )
+        blocked_asins = _blacklist_asins(config)
+        aes_candidates = [
+            row for row in aes_pipeline_rows if (row.get("asin") or "").strip().upper() not in blocked_asins
+        ]
+        aes_alerts = state_engine.process_aes_discovery_candidates(aes_candidates, source="aes_llc")
+        for alert in aes_alerts:
+            send_alert(alert, config)
+        return len(aes_items), len(aes_candidates), len(aes_alerts)
+
     def pdp_loop() -> None:
         if scraping_paused["value"]:
             return
+        config = load_runtime_config(db_path)
+        config["pdp_watch_asins"] = list_asins(db_path, "watch")
+        config["blacklist"] = list_asins(db_path, "blacklist")
+        state_engine.price_drop_percent = float(config.get("price_drop_percent", 10))
+        init_global_rate_limiter(int(config.get("max_requests_per_minute", 10)))
         mark_job_started("pdp")
         try:
             watch_list = _normalize_pdp_watch_asins(config.get("pdp_watch_asins"))
             _log("lifecycle", "cycle_start", cycle_stamp=True, watch=len(watch_list))
-            all_alerts: list[dict[str, Any]] = []
             pdp_rows: list[dict[str, Any]] = []
             captcha_rows = 0
             captcha_aborted_rows = 0
+            sent_alerts = 0
+            aes_raw_count = 0
+            aes_pipeline_count = 0
+            aes_alert_count = 0
 
             if watch_list:
                 allowed_subs = _allowed_seller_substrings(config)
@@ -268,20 +327,13 @@ def main() -> None:
                     captcha_skip=captcha_rows,
                     captcha_aborted=captcha_aborted_rows,
                 )
-                all_alerts.extend(state_engine.process_pdp_watch_candidates(pdp_rows, set(watch_list)))
+                pdp_alerts = state_engine.process_pdp_watch_candidates(pdp_rows, set(watch_list))
+                for alert in pdp_alerts:
+                    send_alert(alert, config)
+                sent_alerts += len(pdp_alerts)
             else:
                 LOGGER.warning("No pdp_watch_asins configured; PDP cycle did nothing.")
 
-            outbound = dedupe_alerts_by_asin(all_alerts)
-            for alert in outbound:
-                send_alert(alert, config)
-
-            log_lifecycle(
-                "pdp_cycle_done",
-                alerts=len(outbound),
-                captcha_aborted=bool(captcha_rows),
-                pdp_watch=len(watch_list),
-            )
             if captcha_rows:
                 captcha_asins = sorted(
                     {
@@ -304,25 +356,38 @@ def main() -> None:
                 )
                 mark_job_error("pdp", msg)
                 send_operational_error("pdp_error", msg, config)
-                handle_captcha_or_network_pause()
+                handle_captcha_or_network_pause(config)
                 return
+
+            aes_raw_count, aes_pipeline_count, aes_alert_count = aes_discovery_loop(config)
+            sent_alerts += aes_alert_count
+            log_lifecycle(
+                "pdp_cycle_done",
+                alerts=sent_alerts,
+                captcha_aborted=bool(captcha_rows),
+                pdp_watch=len(watch_list),
+                aes_raw=aes_raw_count,
+                aes_candidates=aes_pipeline_count,
+                aes_alerts=aes_alert_count,
+            )
             mark_job_success("pdp")
             fx_rate.bump_monitor_tick(config)
         except CaptchaBlocked:
             mark_job_error("pdp", "CaptchaBlocked")
             send_operational_error("pdp_error", "CaptchaBlocked: PDP scraping paused then resumed", config)
-            handle_captcha_or_network_pause()
+            handle_captcha_or_network_pause(config)
         except NetworkAccessDenied as exc:
             mark_job_error("pdp", f"NetworkAccessDenied: {exc}")
             LOGGER.error("Network access denied: %s", exc)
             send_operational_error("pdp_error", str(exc), config)
-            handle_captcha_or_network_pause()
+            handle_captcha_or_network_pause(config)
         except Exception as exc:
             LOGGER.exception("pdp_loop failed: %s", exc)
             mark_job_error("pdp", exc)
             send_operational_error("pdp_error", str(exc), config)
 
     def heartbeat_loop() -> None:
+        config = load_runtime_config(db_path)
         mark_job_started("heartbeat")
         try:
             send_heartbeat(config)
@@ -335,7 +400,7 @@ def main() -> None:
     scheduler.add_job(
         pdp_loop,
         "interval",
-        minutes=int(config.get("pdp_poll_minutes", 4)),
+        minutes=int(startup_config.get("pdp_poll_minutes", 4)),
         jitter=60,
         next_run_time=datetime.now(timezone.utc),
         id="pdp_loop",

@@ -85,6 +85,23 @@ class StateEngine:
                     new_price REAL,
                     sent_at TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS asins (
+                    asin TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('watch', 'blacklist')),
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (asin, role)
+                );
+                CREATE INDEX IF NOT EXISTS idx_asins_role ON asins(role, enabled);
                 """
             )
             self.conn.commit()
@@ -319,4 +336,87 @@ class StateEngine:
                 extra={"channel": "debug"},
             )
             self.conn.commit()
+        return alerts
+
+    def process_aes_discovery_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        source: str = "aes_llc",
+    ) -> list[dict[str, Any]]:
+        """Apply AES SERP discovery rows.
+
+        Unknown ASINs are inserted and may emit ``new_product``.
+        Known ASINs are silently refreshed (title/price/last_seen/in_stock only).
+        """
+        alerts: list[dict[str, Any]] = []
+        inserted_count = 0
+        updated_count = 0
+        new_count = 0
+
+        with self.lock:
+            for item in candidates:
+                asin = (item.get("asin") or "").strip().upper()
+                if not asin:
+                    continue
+
+                title = normalize_title_line(item.get("title"))
+                seller = item.get("seller") or source
+                image_url = item.get("image_url")
+                new_price = _as_float(item.get("price"))
+                ship_line = shipping_display_hebrew(item.get("shipping_text"))
+                new_stock = 1 if bool(item.get("in_stock")) else 0
+                now = utc_iso()
+
+                row = self._fetch_product(asin)
+                if row is None:
+                    self.conn.execute(
+                        """
+                        INSERT INTO products
+                        (asin, title, seller, price, in_stock, first_seen, last_seen)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (asin, title, seller, new_price, new_stock, now, now),
+                    )
+                    inserted_count += 1
+                    if _should_emit_new_product_alert(new_stock, new_price):
+                        nd = decide_new_product(is_first_observation=True)
+                        assert nd.emit and nd.alert_type is not None
+                        alert = self._build_alert(
+                            nd.alert_type,
+                            source,
+                            asin,
+                            title,
+                            new_price,
+                            image_url=image_url,
+                            shipping=ship_line,
+                        )
+                        alerts.append(alert)
+                        self._record_alert(alert)
+                        new_count += 1
+                    continue
+
+                self.conn.execute(
+                    """
+                    UPDATE products
+                    SET title = COALESCE(?, title),
+                        price = COALESCE(?, price),
+                        in_stock = ?,
+                        last_seen = ?
+                    WHERE asin = ?
+                    """,
+                    (title, new_price, new_stock, now, asin),
+                )
+                updated_count += 1
+
+            LOGGER.info(
+                "aes_discovery candidate_rows=%s inserted_count=%s updated_count=%s new_count=%s",
+                len(candidates),
+                inserted_count,
+                updated_count,
+                new_count,
+                extra={"channel": "debug"},
+            )
+            self.conn.commit()
+
         return alerts

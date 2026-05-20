@@ -24,6 +24,16 @@ module.exports = {
       watch: false,
     },
     {
+      name: "admin-ui",
+      cwd: monitorRoot,
+      script: "tools/admin_ui_server.py",
+      interpreter: monitorPython,
+      autorestart: true,
+      max_restarts: 20,
+      exp_backoff_restart_delay: 3000,
+      watch: false,
+    },
+    {
       name: "wa-server",
       cwd: waServerRoot,
       script: "server.js",

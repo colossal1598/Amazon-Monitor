@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-echo === PM2 stack: amazon-monitor, wa-server, monitor-healthcheck ===
+echo === PM2 stack: amazon-monitor, admin-ui, wa-server, monitor-healthcheck ===
 
 where pm2 >nul 2>nul
 if errorlevel 1 (
@@ -14,6 +14,7 @@ if errorlevel 1 (
 
 REM Start/reload apps from ecosystem (idempotent: delete old names then start fresh)
 call pm2 delete amazon-monitor >nul 2>&1
+call pm2 delete admin-ui >nul 2>&1
 call pm2 delete wa-server >nul 2>&1
 call pm2 delete monitor-healthcheck >nul 2>&1
 

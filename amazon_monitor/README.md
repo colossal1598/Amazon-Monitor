@@ -1,65 +1,56 @@
-# Amazon PDP Monitor
+# Amazon PDP + AES Discovery Monitor
 
-Python monitor for watched Amazon product-detail pages. It visits configured ASINs on `amazon.com`, accepts offers sold by Amazon.com or Amazon Export LLC, stores state in SQLite, and sends WhatsApp alerts for new, back-in-stock, and price-drop events.
+Python monitor for Amazon product pages and Amazon Export Sales LLC SERP discovery.
 
-## What It Does
+## What it does
 
-- Watches only `pdp_watch_asins` from `config.yaml`.
-- Extracts title, buy-box price, seller/shipper text, product image, and delivery details.
-- Accepts paid delivery as long as the seller matches the allowlist and Amazon does not say the item cannot ship to the selected location.
-- Skips DB updates on per-page failures/timeouts so one bad PDP does not falsely mark a product out of stock.
-- Pauses and resumes the PDP job when Amazon shows CAPTCHA or a global network block.
+- **PDP watch** — visits ASINs in the `watch` list (SQLite `asins` table). Alerts on new, back-in-stock, and price-drop. Seller must match `pdp_allowed_seller_substrings` (Amazon.com / Amazon Export).
+- **AES LLC SERP** — scrapes page 1 of the configured Amazon Export seller URL after each PDP cycle. Pokémon TCG filter pipeline applies. Alerts **only** when a new ASIN is inserted into the database (`new_product`).
+- **Blacklist** — ASINs in `blacklist` role are ignored during AES discovery.
+- Settings and ASIN lists live in **SQLite** (`settings` + `asins` tables). Bootstrap [`config.yaml`](config.yaml) only has `db_path`, `log_dir`, `auth_dir`.
 
-## Key Files
+## Key files
 
-- `main.py` — APScheduler runtime: PDP scrape, state update, alert send, heartbeat.
-- `pdp_scraper.py` — Playwright PDP extraction, seller matching, retry/CAPTCHA handling.
-- `pdp_helpers.py` — ASIN validation, title cleanup, WhatsApp delivery-line formatting.
-- `state_engine.py` — SQLite products/alerts and PDP alert decisions.
-- `webhook_sender.py` — WhatsApp API payloads.
-- `browser_factory.py` — user agents, rate limiter, Amazon locale/currency cookie helpers.
+- `main.py` — scheduler: PDP scrape → AES discovery → alerts
+- `pdp_scraper.py` — PDP extraction (unchanged behavior)
+- `search_scraper.py` / `filter_pipeline.py` — AES SERP scrape + filters
+- `state_engine.py` — SQLite products/alerts
+- `settings_store.py` — load/save runtime config and ASIN roles
+- `tools/admin_ui_server.py` + `tools/admin_ui/` — Hebrew admin UI
+- `webhook_sender.py` — WhatsApp API
 
-## Configuration
-
-Edit `config.yaml`:
-
-- `pdp_watch_asins` — ASINs to visit every cycle.
-- `pdp_allowed_seller_substrings` — default: `amazon.com`, `amazon export`.
-- `pdp_poll_minutes`, `max_cycle_seconds`, `max_requests_per_minute`.
-- `pdp_watch_max_concurrent_tabs`, `pdp_watch_max_attempts`, jitter/delay ranges.
-- WhatsApp fields: `wa_api_url`, `wa_api_key`, `wa_group_id`, optional `wa_client_to`.
-- `affiliate_tag`, `db_path`, `log_dir`, optional FX settings.
-
-Delivery text in alerts is produced by `pdp_helpers.shipping_display_hebrew`:
-
-- Free delivery: `משלוח חינם`
-- Paid delivery: `משלוח: <delivery price or line>`
-
-## Run
+## Run locally
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+cd amazon_monitor
 pip install -r requirements.txt
 playwright install chrome
 python main.py
 ```
 
-Optional proxy:
+## Admin UI
 
 ```powershell
-$env:PROXY_URL = "http://user:pass@host:port"
-python main.py
+# Set in .env: ADMIN_UI_USER, ADMIN_UI_PASSWORD
+.\scripts\open_admin_ui.ps1
+# http://127.0.0.1:8765
 ```
+
+Or via PM2 stack: `admin-ui` app in `ecosystem.config.cjs`.
+
+Remote access: see [RUNBOOK.md](RUNBOOK.md) (Tailscale Funnel + basic auth).
+
+## Migrate legacy YAML
+
+If you have a full old `config.yaml` backup, restore it once and run:
+
+```powershell
+python tools/migrate_yaml_to_db.py
+```
+
+(Only imports when the `settings` table is empty.)
 
 ## Health
 
-- Logs: `logs/monitor.log`, `logs/monitor.debug.log`
-- Health snapshot: `data/health.json`
-- Check command: `python tools/healthcheck.py`
-
-## Troubleshooting
-
-- CAPTCHA: the PDP job pauses for `captcha_recovery_pause_seconds`, sends an operational WhatsApp error, then resumes.
-- Timeouts: each PDP navigation gets bounded retries. If all attempts fail, the existing DB row is left unchanged.
-- No alerts: confirm `pdp_watch_asins`, seller allowlist, WhatsApp settings, and `logs/monitor.debug.log`.
+- `logs/monitor.log`, `data/health.json`
+- `python tools/healthcheck.py`

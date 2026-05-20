@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
 $script:EcosystemFile = Join-Path $script:ProjectRoot "ecosystem.config.cjs"
-$script:StackApps = @("amazon-monitor", "wa-server", "monitor-healthcheck")
+$script:StackApps = @("amazon-monitor", "admin-ui", "wa-server", "monitor-healthcheck")
 
 function Ensure-Pm2Available {
     if (-not (Get-Command pm2 -ErrorAction SilentlyContinue)) {

@@ -3,6 +3,7 @@
 This deployment keeps PM2 as the only process manager for:
 
 - `amazon-monitor`
+- `admin-ui`
 - `wa-server`
 - `monitor-healthcheck`
 
@@ -76,8 +77,32 @@ This creates `AmazonMonitorUpdate`, which runs `update_and_restart.ps1` (PM2-onl
 - Stop monitor: `pm2 stop amazon-monitor`
 - Start monitor: `pm2 start amazon-monitor`
 - Restart monitor: `pm2 restart amazon-monitor`
+- Start admin UI: `pm2 start admin-ui`
+- Stop admin UI: `pm2 stop admin-ui`
 - Stop entire stack: `pm2 stop all`
 - Check status: `pm2 list`
+
+## Tailscale Funnel for Admin UI (EN + HE)
+
+1. **Run admin-ui locally** / הפעילו מקומית בלבד:
+   ```powershell
+   pm2 start admin-ui
+   ```
+   The service listens on `127.0.0.1:8765` only.
+2. **Create Funnel path** / חשפו דרך Funnel:
+   ```powershell
+   tailscale funnel --bg --set-path / http://127.0.0.1:8765
+   ```
+3. **Use in-app Basic Auth** / התחברות עם Basic Auth מתוך האפליקציה  
+   `.env` must include `ADMIN_UI_USER` and `ADMIN_UI_PASSWORD`.
+4. **Do not expose sqlite-web** / אין לחשוף את `8768`  
+   Never run funnel to `127.0.0.1:8768`.
+5. **Disable Funnel after work** / בסיום מבטלים:
+   ```powershell
+   tailscale funnel reset
+   ```
+6. **Client workflow** / תהליך לקוח  
+   Open Funnel URL -> authenticate -> edit settings/ASIN lists -> close Funnel.
 
 ## Important
 
