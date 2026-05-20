@@ -37,12 +37,17 @@ async function apiJson(url, options = {}) {
     headers["Content-Type"] = "application/json; charset=utf-8";
   }
   opts.headers = headers;
+  // Browser does not attach HTTP Basic Auth to fetch unless credentials are included.
+  opts.credentials = "include";
   const res = await fetch(url, opts);
   let payload = {};
   try {
     payload = await res.json();
   } catch (_err) {
     payload = {};
+  }
+  if (res.status === 401) {
+    throw new Error("ההתחברות נדחתה — רענן את הדף והזן שוב משתמש/סיסמה");
   }
   if (!res.ok) {
     const msg = payload.message || payload.error || `HTTP ${res.status}`;
