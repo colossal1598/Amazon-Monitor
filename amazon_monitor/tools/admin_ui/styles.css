@@ -22,6 +22,49 @@ body {
   line-height: 1.45;
 }
 
+.login-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.login-card {
+  width: min(400px, 100%);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.login-card h2 {
+  margin: 0 0 4px;
+}
+
+.login-card label {
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.login-card input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 1rem;
+}
+
+.login-error {
+  color: var(--danger);
+  margin: 0;
+  font-size: 0.95rem;
+}
+
 .topbar {
   padding: 24px 18px 12px;
   text-align: center;

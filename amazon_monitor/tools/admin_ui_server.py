@@ -274,6 +274,13 @@ class AdminUIHandler(BaseHTTPRequestHandler):
         self._send_unauthorized()
         return False
 
+    @staticmethod
+    def _is_public_static(path: str) -> bool:
+        """HTML/JS/CSS load without auth; only /api/* needs credentials."""
+        if path in ("", "/"):
+            return True
+        return path in {"/index.html", "/app.js", "/styles.css"}
+
     def _serve_static(self, path: str) -> None:
         rel = "index.html" if path in ("", "/") else path.lstrip("/")
         target = (STATIC_DIR / rel).resolve()
@@ -299,10 +306,18 @@ class AdminUIHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
-        if not self._require_auth():
-            return
         parsed = urlparse(self.path)
         path = parsed.path
+
+        if self._is_public_static(path):
+            if path in ("", "/"):
+                self._serve_static("/index.html")
+            else:
+                self._serve_static(path)
+            return
+
+        if not self._require_auth():
+            return
 
         if path == "/api/settings":
             self._json(200, {"ok": True, "settings": _settings_for_client(self.db_path)})
@@ -318,10 +333,7 @@ class AdminUIHandler(BaseHTTPRequestHandler):
             self._json(200, sqlite_web_status())
             return
 
-        if path == "/":
-            self._serve_static("/index.html")
-            return
-        self._serve_static(path)
+        self._json(404, {"ok": False, "error": "not_found"})
 
     def do_PUT(self) -> None:  # noqa: N802
         if not self._require_auth():

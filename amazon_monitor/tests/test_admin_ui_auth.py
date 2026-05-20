@@ -39,6 +39,15 @@ class AdminUIAuthTests(unittest.TestCase):
         response.read()
         conn.close()
 
+    def test_index_html_without_auth_ok(self) -> None:
+        conn = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.request("GET", "/")
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        body = response.read().decode("utf-8")
+        self.assertIn("login-form", body)
+        conn.close()
+
     def test_api_settings_with_basic_auth_ok(self) -> None:
         token = base64.b64encode(b"admin:secret").decode("ascii")
         conn = HTTPConnection("127.0.0.1", self.port, timeout=5)

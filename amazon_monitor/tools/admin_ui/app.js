@@ -1,3 +1,5 @@
+const AUTH_KEY = "admin_ui_auth";
+
 const state = {
   sqlitePollId: null,
   bulkRole: null,
@@ -19,6 +21,39 @@ function isValidAsin(raw) {
   return /^[A-Z0-9]{10}$/.test(String(raw || "").trim().toUpperCase());
 }
 
+function getAuthHeader() {
+  const token = sessionStorage.getItem(AUTH_KEY);
+  if (!token) {
+    return null;
+  }
+  return `Basic ${token}`;
+}
+
+function setAuth(user, pass) {
+  sessionStorage.setItem(AUTH_KEY, btoa(`${user}:${pass}`));
+}
+
+function clearAuth() {
+  sessionStorage.removeItem(AUTH_KEY);
+}
+
+function showLogin(errMsg) {
+  byId("app-shell").classList.add("hidden");
+  byId("login-screen").classList.remove("hidden");
+  const err = byId("login-error");
+  if (errMsg) {
+    err.textContent = errMsg;
+    err.classList.remove("hidden");
+  } else {
+    err.classList.add("hidden");
+  }
+}
+
+function showApp() {
+  byId("login-screen").classList.add("hidden");
+  byId("app-shell").classList.remove("hidden");
+}
+
 function showToast(message, isError = false) {
   const toast = byId("toast");
   toast.textContent = message;
@@ -27,18 +62,23 @@ function showToast(message, isError = false) {
   if (state.toastTimer) {
     window.clearTimeout(state.toastTimer);
   }
-  state.toastTimer = window.setTimeout(() => toast.classList.add("hidden"), 2800);
+  state.toastTimer = window.setTimeout(() => toast.classList.add("hidden"), 4000);
 }
 
 async function apiJson(url, options = {}) {
+  const auth = getAuthHeader();
+  if (!auth) {
+    showLogin("יש להתחברות קודם");
+    throw new Error("not_logged_in");
+  }
+
   const opts = { ...options };
-  const headers = { ...(opts.headers || {}) };
+  const headers = { ...(opts.headers || {}), Authorization: auth };
   if (opts.body && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json; charset=utf-8";
   }
   opts.headers = headers;
-  // Browser does not attach HTTP Basic Auth to fetch unless credentials are included.
-  opts.credentials = "include";
+
   const res = await fetch(url, opts);
   let payload = {};
   try {
@@ -46,8 +86,11 @@ async function apiJson(url, options = {}) {
   } catch (_err) {
     payload = {};
   }
+
   if (res.status === 401) {
-    throw new Error("ההתחברות נדחתה — רענן את הדף והזן שוב משתמש/סיסמה");
+    clearAuth();
+    showLogin("שם משתמש או סיסמה שגויים");
+    throw new Error("unauthorized");
   }
   if (!res.ok) {
     const msg = payload.message || payload.error || `HTTP ${res.status}`;
@@ -83,7 +126,9 @@ function renderAsinTable(role, items) {
         showToast(`ASIN ${item.asin} הוסר`);
         await loadAsins(role);
       } catch (err) {
-        showToast(`שגיאה בהסרה: ${err.message}`, true);
+        if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
+          showToast(`שגיאה בהסרה: ${err.message}`, true);
+        }
       }
     });
     actionTd.appendChild(removeBtn);
@@ -99,7 +144,7 @@ async function loadAsins(role) {
 }
 
 function fillSettings(settings) {
-  byId("aes-url").value = (((settings.search_urls || {}).aes_llc) || "");
+  byId("aes-url").value = ((settings.search_urls || {}).aes_llc) || "";
   byId("pdp-poll-minutes").value = settings.pdp_poll_minutes ?? "";
   byId("max-cycle-seconds").value = settings.max_cycle_seconds ?? "";
   byId("required-keywords").value = (settings.required_keywords || []).join("\n");
@@ -138,13 +183,16 @@ async function addAsin(role) {
     showToast(`ASIN ${asin} נוסף`);
     await loadAsins(role);
   } catch (err) {
-    showToast(`שגיאה בהוספה: ${err.message}`, true);
+    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
+      showToast(`שגיאה בהוספה: ${err.message}`, true);
+    }
   }
 }
 
 function openBulkModal(role) {
   state.bulkRole = role;
-  byId("bulk-modal-title").textContent = role === "watch" ? "הדבקה מרובה - מעקב PDP" : "הדבקה מרובה - רשימה שחורה";
+  byId("bulk-modal-title").textContent =
+    role === "watch" ? "הדבקה מרובה - מעקב PDP" : "הדבקה מרובה - רשימה שחורה";
   byId("bulk-text").value = "";
   byId("bulk-modal").classList.remove("hidden");
 }
@@ -160,7 +208,10 @@ async function applyBulk() {
     return;
   }
   const raw = byId("bulk-text").value;
-  const parts = raw.split(/[^A-Za-z0-9]+/g).map((x) => x.trim().toUpperCase()).filter(Boolean);
+  const parts = raw
+    .split(/[^A-Za-z0-9]+/g)
+    .map((x) => x.trim().toUpperCase())
+    .filter(Boolean);
   const seen = new Set();
   const valid = [];
   for (const value of parts) {
@@ -183,7 +234,7 @@ async function applyBulk() {
       });
       success += 1;
     } catch (_err) {
-      // Continue adding remaining values, then refresh once.
+      // continue
     }
   }
   closeBulkModal();
@@ -224,7 +275,9 @@ async function saveSettings() {
     });
     showToast("ההגדרות נשמרו בהצלחה");
   } catch (err) {
-    showToast(`שמירה נכשלה: ${err.message}`, true);
+    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
+      showToast(`שמירה נכשלה: ${err.message}`, true);
+    }
   } finally {
     button.disabled = false;
     button.textContent = "שמור";
@@ -256,7 +309,9 @@ async function refreshSqliteStatus() {
     renderSqliteStatus(status);
   } catch (err) {
     renderSqliteStatus({ running: false });
-    showToast(`שגיאת סטטוס sqlite-web: ${err.message}`, true);
+    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
+      showToast(`שגיאת סטטוס sqlite-web: ${err.message}`, true);
+    }
   }
 }
 
@@ -269,7 +324,9 @@ async function startSqlite(readOnly) {
     renderSqliteStatus(payload);
     showToast(readOnly ? "sqlite-web הופעל בקריאה בלבד" : "sqlite-web הופעל במצב עריכה");
   } catch (err) {
-    showToast(`הפעלת sqlite-web נכשלה: ${err.message}`, true);
+    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
+      showToast(`הפעלת sqlite-web נכשלה: ${err.message}`, true);
+    }
   }
 }
 
@@ -279,11 +336,30 @@ async function stopSqlite() {
     await refreshSqliteStatus();
     showToast("sqlite-web נסגר");
   } catch (err) {
-    showToast(`סגירת sqlite-web נכשלה: ${err.message}`, true);
+    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
+      showToast(`סגירת sqlite-web נכשלה: ${err.message}`, true);
+    }
   }
 }
 
 function bindEvents() {
+  byId("login-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const user = String(byId("login-user").value || "").trim();
+    const pass = String(byId("login-pass").value || "");
+    setAuth(user, pass);
+    try {
+      await loadAppData();
+      showApp();
+    } catch (err) {
+      clearAuth();
+      if (err.message === "unauthorized") {
+        return;
+      }
+      showLogin(err.message === "not_logged_in" ? "יש להתחברות" : `שגיאה: ${err.message}`);
+    }
+  });
+
   byId("watch-add-btn").addEventListener("click", () => addAsin("watch"));
   byId("blacklist-add-btn").addEventListener("click", () => addAsin("blacklist"));
   byId("watch-bulk-btn").addEventListener("click", () => openBulkModal("watch"));
@@ -296,15 +372,27 @@ function bindEvents() {
   byId("sqlite-stop-btn").addEventListener("click", stopSqlite);
 }
 
+async function loadAppData() {
+  await loadSettings();
+  await Promise.all([loadAsins("watch"), loadAsins("blacklist"), refreshSqliteStatus()]);
+}
+
 async function init() {
   bindEvents();
-  try {
-    await loadSettings();
-    await Promise.all([loadAsins("watch"), loadAsins("blacklist"), refreshSqliteStatus()]);
-  } catch (err) {
-    showToast(`טעינת נתונים נכשלה: ${err.message}`, true);
+  if (getAuthHeader()) {
+    try {
+      await loadAppData();
+      showApp();
+      state.sqlitePollId = window.setInterval(refreshSqliteStatus, 1000);
+      return;
+    } catch (err) {
+      clearAuth();
+      if (err.message === "unauthorized") {
+        return;
+      }
+    }
   }
-  state.sqlitePollId = window.setInterval(refreshSqliteStatus, 1000);
+  showLogin();
 }
 
 window.addEventListener("beforeunload", () => {
