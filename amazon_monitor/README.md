@@ -5,7 +5,7 @@ Python monitor for Amazon product pages and Amazon Export Sales LLC SERP discove
 ## What it does
 
 - **PDP watch** — visits ASINs in the `watch` list (SQLite `asins` table). Alerts on new, back-in-stock, and price-drop. Seller must match `pdp_allowed_seller_substrings` (Amazon.com / Amazon Export).
-- **AES LLC SERP** — scrapes page 1 of the configured Amazon Export seller URL after each PDP cycle. Pokémon TCG filter pipeline applies. Alerts **only** when a new ASIN is inserted into the database (`new_product`).
+- **AES LLC SERP** — scrapes page 1 of the configured Amazon Export seller URL after each PDP cycle. Pokémon TCG filter pipeline applies. Inserts **only new** ASINs into the database; existing rows are not updated (stock/price for known ASINs come from PDP watch). Alerts **only** on insert (`new_product`).
 - **Blacklist** — ASINs in `blacklist` role are ignored during AES discovery.
 - Settings and ASIN lists live in **SQLite** (`settings` + `asins` tables). Bootstrap [`config.yaml`](config.yaml) only has `db_path`, `log_dir`, `auth_dir`.
 

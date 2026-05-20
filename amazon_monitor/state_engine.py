@@ -346,12 +346,13 @@ class StateEngine:
     ) -> list[dict[str, Any]]:
         """Apply AES SERP discovery rows.
 
-        Unknown ASINs are inserted and may emit ``new_product``.
-        Known ASINs are silently refreshed (title/price/last_seen/in_stock only).
+        AES locates new products only. Unknown ASINs are inserted and may emit
+        ``new_product``. Known ASINs are skipped entirely — stock and other fields
+        for existing rows are updated only by ``process_pdp_watch_candidates``.
         """
         alerts: list[dict[str, Any]] = []
         inserted_count = 0
-        updated_count = 0
+        skipped_count = 0
         new_count = 0
 
         with self.lock:
@@ -396,24 +397,13 @@ class StateEngine:
                         new_count += 1
                     continue
 
-                self.conn.execute(
-                    """
-                    UPDATE products
-                    SET title = COALESCE(?, title),
-                        price = COALESCE(?, price),
-                        in_stock = ?,
-                        last_seen = ?
-                    WHERE asin = ?
-                    """,
-                    (title, new_price, new_stock, now, asin),
-                )
-                updated_count += 1
+                skipped_count += 1
 
             LOGGER.info(
-                "aes_discovery candidate_rows=%s inserted_count=%s updated_count=%s new_count=%s",
+                "aes_discovery candidate_rows=%s inserted_count=%s skipped_count=%s new_count=%s",
                 len(candidates),
                 inserted_count,
-                updated_count,
+                skipped_count,
                 new_count,
                 extra={"channel": "debug"},
             )
