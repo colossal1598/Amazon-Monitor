@@ -76,6 +76,17 @@ class StateEngine:
                     last_stock_alert TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS aes_products (
+                    asin TEXT PRIMARY KEY,
+                    title TEXT,
+                    price REAL,
+                    in_stock INTEGER,
+                    first_seen TEXT,
+                    last_seen TEXT,
+                    last_price_alert TEXT,
+                    last_stock_alert TEXT
+                );
+
                 CREATE TABLE IF NOT EXISTS alerts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     asin TEXT,
@@ -352,46 +363,50 @@ class StateEngine:
             self.conn.commit()
         return alerts
 
-    def process_aes_discovery_candidates(
+    def process_aes_serp_mirror(
         self,
         candidates: list[dict[str, Any]],
         *,
         source: str = "aes_llc",
+        reconcile_absence: bool = True,
     ) -> list[dict[str, Any]]:
-        """Apply AES SERP discovery rows.
+        """Apply AES SERP rows into dedicated mirror state.
 
-        AES locates new products only. Unknown ASINs are inserted and may emit
-        ``new_product``. Known ASINs are skipped entirely — stock and other fields
-        for existing rows are updated only by ``process_pdp_watch_candidates``.
+        Rows are persisted in ``aes_products`` only; ``products`` remains PDP-owned.
+        Alerts mirror PDP semantics: ``new_product`` on first in-stock sighting,
+        ``back_in_stock`` on 0->1 transition, and ``price_drop`` when still in stock.
         """
         alerts: list[dict[str, Any]] = []
         inserted_count = 0
-        skipped_count = 0
         new_count = 0
+        back_in_stock_count = 0
+        price_drop_count = 0
+        reconciled_oos_count = 0
+        seen_asins: set[str] = set()
 
         with self.lock:
             for item in candidates:
                 asin = (item.get("asin") or "").strip().upper()
                 if not asin:
                     continue
+                seen_asins.add(asin)
 
                 title = normalize_title_line(item.get("title"))
-                seller = item.get("seller") or source
                 image_url = item.get("image_url")
                 new_price = _as_float(item.get("price"))
                 ship_line = shipping_display_hebrew(item.get("shipping_text"))
                 new_stock = 1 if bool(item.get("in_stock")) else 0
                 now = utc_iso()
 
-                row = self._fetch_product(asin)
+                row = self.conn.execute("SELECT * FROM aes_products WHERE asin = ?", (asin,)).fetchone()
                 if row is None:
                     self.conn.execute(
                         """
-                        INSERT INTO products
-                        (asin, title, seller, price, in_stock, first_seen, last_seen)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO aes_products
+                        (asin, title, price, in_stock, first_seen, last_seen)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         """,
-                        (asin, title, seller, new_price, new_stock, now, now),
+                        (asin, title, new_price, new_stock, now, now),
                     )
                     inserted_count += 1
                     if _should_emit_new_product_alert(new_stock, new_price):
@@ -411,14 +426,128 @@ class StateEngine:
                         new_count += 1
                     continue
 
-                skipped_count += 1
+                old_price = _as_float(row["price"])
+                old_stock = int(row["in_stock"] or 0)
+                if new_stock == 0:
+                    self.conn.execute(
+                        """
+                        UPDATE aes_products
+                        SET title = COALESCE(?, title),
+                            in_stock = 0,
+                            last_seen = ?
+                        WHERE asin = ?
+                        """,
+                        (title, now, asin),
+                    )
+                    continue
+
+                if old_stock == 0:
+                    self.conn.execute(
+                        """
+                        UPDATE aes_products
+                        SET title = COALESCE(?, title),
+                            price = COALESCE(?, price),
+                            in_stock = 1,
+                            last_seen = ?
+                        WHERE asin = ?
+                        """,
+                        (title, new_price, now, asin),
+                    )
+                else:
+                    self.conn.execute(
+                        """
+                        UPDATE aes_products
+                        SET title = COALESCE(?, title),
+                            price = COALESCE(?, price),
+                            in_stock = 1,
+                            last_seen = ?
+                        WHERE asin = ?
+                        """,
+                        (title, new_price, now, asin),
+                    )
+
+                stock_decision = decide_back_in_stock(old_stock, 1)
+                emitted_back_in_stock = False
+                if stock_decision.emit:
+                    alert = self._build_alert(
+                        "back_in_stock",
+                        source,
+                        asin,
+                        title,
+                        new_price,
+                        image_url=image_url,
+                        shipping=ship_line,
+                    )
+                    alerts.append(alert)
+                    self._record_alert(alert)
+                    self.conn.execute("UPDATE aes_products SET last_stock_alert = ? WHERE asin = ?", (now, asin))
+                    back_in_stock_count += 1
+                    emitted_back_in_stock = True
+                if not emitted_back_in_stock:
+                    price_decision = decide_price_drop(
+                        old_price,
+                        new_price,
+                        self.price_drop_percent,
+                    )
+                    if (
+                        not price_decision.emit
+                        and old_price is not None
+                        and new_price is not None
+                        and old_price > 0
+                        and new_price < old_price
+                    ):
+                        pct = ((old_price - new_price) / old_price) * 100
+                        LOGGER.info(
+                            "price_drop_skipped where=%s asin=%s old_price=%s new_price=%s "
+                            "pct_drop=%.2f threshold_pct=%s skip=%s last_price_alert=%s",
+                            source,
+                            asin,
+                            old_price,
+                            new_price,
+                            pct,
+                            self.price_drop_percent,
+                            price_decision.skip_reason,
+                            row["last_price_alert"],
+                            extra={"channel": "debug"},
+                        )
+                    if price_decision.emit:
+                        alert = self._build_alert(
+                            "price_drop",
+                            source,
+                            asin,
+                            title,
+                            new_price,
+                            old_price=old_price,
+                            new_price=new_price,
+                            image_url=image_url,
+                            shipping=ship_line,
+                        )
+                        alerts.append(alert)
+                        self._record_alert(alert)
+                        self.conn.execute("UPDATE aes_products SET last_price_alert = ? WHERE asin = ?", (now, asin))
+                        price_drop_count += 1
+
+            if reconcile_absence:
+                if seen_asins:
+                    placeholders = ",".join("?" for _ in seen_asins)
+                    cursor = self.conn.execute(
+                        f"UPDATE aes_products SET in_stock = 0 WHERE in_stock != 0 AND asin NOT IN ({placeholders})",
+                        tuple(sorted(seen_asins)),
+                    )
+                else:
+                    cursor = self.conn.execute("UPDATE aes_products SET in_stock = 0 WHERE in_stock != 0")
+                reconciled_oos_count = int(cursor.rowcount or 0)
 
             LOGGER.info(
-                "aes_discovery candidate_rows=%s inserted_count=%s skipped_count=%s new_count=%s",
+                "aes_serp_mirror candidate_rows=%s inserted_count=%s new_count=%s back_in_stock_count=%s "
+                "price_drop_count=%s reconciled_oos_count=%s reconcile_absence=%s",
                 len(candidates),
                 inserted_count,
-                skipped_count,
                 new_count,
+                back_in_stock_count,
+                price_drop_count,
+                reconciled_oos_count,
+                reconcile_absence,
                 extra={"channel": "debug"},
             )
             self.conn.commit()

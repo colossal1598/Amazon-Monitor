@@ -12,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 import fx_rate
+from alert_dedupe import dedupe_alerts_by_asin
 from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, NetworkAccessDenied
 from filter_pipeline import run_search_filter_pipeline
@@ -244,7 +245,7 @@ def main() -> None:
         scraping_paused["value"] = False
         LOGGER.info("PDP job resumed")
 
-    def aes_discovery_loop(config: dict[str, Any]) -> tuple[int, int, int]:
+    def aes_discovery_loop(config: dict[str, Any]) -> tuple[int, int, list[dict[str, Any]]]:
         aes_llc_url = resolve_aes_llc_url(config)
         aes_items, _ = scrape_search(
             aes_llc_url,
@@ -265,10 +266,12 @@ def main() -> None:
         aes_candidates = [
             row for row in aes_pipeline_rows if (row.get("asin") or "").strip().upper() not in blocked_asins
         ]
-        aes_alerts = state_engine.process_aes_discovery_candidates(aes_candidates, source="aes_llc")
-        for alert in aes_alerts:
-            send_alert(alert, config)
-        return len(aes_items), len(aes_candidates), len(aes_alerts)
+        aes_alerts = state_engine.process_aes_serp_mirror(
+            aes_candidates,
+            source="aes_llc",
+            reconcile_absence=len(aes_candidates) > 0,
+        )
+        return len(aes_items), len(aes_candidates), aes_alerts
 
     def pdp_loop() -> None:
         if scraping_paused["value"]:
@@ -289,6 +292,7 @@ def main() -> None:
             aes_raw_count = 0
             aes_pipeline_count = 0
             aes_alert_count = 0
+            tick_alerts: list[dict[str, Any]] = []
 
             if watch_list:
                 allowed_subs = _allowed_seller_substrings(config)
@@ -328,9 +332,7 @@ def main() -> None:
                     captcha_aborted=captcha_aborted_rows,
                 )
                 pdp_alerts = state_engine.process_pdp_watch_candidates(pdp_rows, set(watch_list))
-                for alert in pdp_alerts:
-                    send_alert(alert, config)
-                sent_alerts += len(pdp_alerts)
+                tick_alerts.extend(pdp_alerts)
             else:
                 LOGGER.warning("No pdp_watch_asins configured; PDP cycle did nothing.")
 
@@ -354,13 +356,21 @@ def main() -> None:
                     f"Aborted rows={captcha_aborted_rows}. "
                     f"Pausing PDP job for {pause_s}s."
                 )
+                deduped_alerts = dedupe_alerts_by_asin(tick_alerts)
+                for alert in deduped_alerts:
+                    send_alert(alert, config)
                 mark_job_error("pdp", msg)
                 send_operational_error("pdp_error", msg, config)
                 handle_captcha_or_network_pause(config)
                 return
 
-            aes_raw_count, aes_pipeline_count, aes_alert_count = aes_discovery_loop(config)
-            sent_alerts += aes_alert_count
+            aes_raw_count, aes_pipeline_count, aes_alerts = aes_discovery_loop(config)
+            aes_alert_count = len(aes_alerts)
+            tick_alerts.extend(aes_alerts)
+            deduped_alerts = dedupe_alerts_by_asin(tick_alerts)
+            for alert in deduped_alerts:
+                send_alert(alert, config)
+            sent_alerts = len(deduped_alerts)
             log_lifecycle(
                 "pdp_cycle_done",
                 alerts=sent_alerts,

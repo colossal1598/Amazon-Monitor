@@ -20,3 +20,13 @@ class TestDedupeAlertsByAsin(unittest.TestCase):
         ]
         out = dedupe_alerts_by_asin(alerts)
         self.assertEqual([a["asin"] for a in out], ["B0777777777", "B0888888888"])
+
+    def test_cross_source_same_asin_dedupes_to_single_back_in_stock(self) -> None:
+        alerts = [
+            {"type": "back_in_stock", "asin": "B066666666", "source": "pdp_watch"},
+            {"type": "back_in_stock", "asin": "B066666666", "source": "aes_llc"},
+            {"type": "price_drop", "asin": "B066666666", "source": "aes_llc"},
+        ]
+        out = dedupe_alerts_by_asin(alerts)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["type"], "back_in_stock")
