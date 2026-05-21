@@ -345,6 +345,7 @@ class StateEngine:
                         )
                         alerts.append(alert)
                         self._record_alert(alert)
+                        self.conn.execute("UPDATE products SET last_price_alert = ? WHERE asin = ?", (now, asin))
                         price_drop_count += 1
 
             missing_candidates = len(watch_upper - set(by_asin.keys()))

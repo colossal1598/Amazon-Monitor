@@ -15,6 +15,7 @@ import browser_factory
 from browser_factory import close_context, create_stealth_context
 from exceptions import CaptchaBlocked, NetworkAccessDenied
 from filter_pipeline import normalize_title_line
+from pdp_helpers import is_not_shippable_text
 from serp_card_price import card_list_price
 
 LOGGER = logging.getLogger(__name__)
@@ -125,22 +126,21 @@ def _extract_price_text(card) -> tuple[str, str | None]:
     return _extract_by_selectors(card, selectors)
 
 
-# Turn availability wording into a simple in-stock / out-of-stock guess for alerts and state tracking.
-def _stock_flag(text: str) -> bool:
-    lowered = (text or "").lower()
+# Estimate card buyability from price + explicit OOS + shipping block.
+# The filter pipeline recomputes stock using the same model before state is updated.
+def _stock_flag(availability_text: str, shipping_text: str, price: float | None) -> bool:
+    if price is None:
+        return False
+    lowered = (availability_text or "").lower()
     out_of_stock_terms = (
         "currently unavailable",
         "out of stock",
-        "unavailable",
     )
     if any(term in lowered for term in out_of_stock_terms):
         return False
-    in_stock_terms = (
-        "in stock",
-        "only ",
-        "left in stock",
-    )
-    return any(term in lowered for term in in_stock_terms)
+    if is_not_shippable_text("\n".join(p for p in (availability_text, shipping_text) if p)):
+        return False
+    return True
 
 
 # Find the best availability text we can (or fall back to the whole card text) so stock guessing has something to work with.
@@ -415,7 +415,7 @@ def _collect_product_row(
         "title": product_title,
         "price": price,
         "price_text": price_text,
-        "in_stock": _stock_flag(availability_text),
+        "in_stock": _stock_flag(availability_text, shipping_text, price),
         "availability_text": availability_text,
         "seller": seller_text or source,
         "seller_text": seller_text,

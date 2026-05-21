@@ -4,6 +4,8 @@ import unicodedata
 from typing import Any
 from urllib.parse import unquote
 
+from pdp_helpers import is_not_shippable_text
+
 LOGGER = logging.getLogger(__name__)
 
 _ASIN_LINE = re.compile(r"^[A-Z0-9]{10}$")
@@ -137,14 +139,7 @@ def _card_blob_for_delivery_line(item: dict[str, Any]) -> str:
 def _shipping_line_looks_free(line: str, clean_blob: str) -> bool:
     """English or common Hebrew free-shipping cues (no currency parsing)."""
     c = _normalize_ascii(line)
-    low_blob = (clean_blob or "").lower()
-    if (
-        "cannot be shipped to your selected delivery location" in low_blob
-        or "can't be shipped to your selected delivery location" in low_blob
-        or "cannot be delivered to your selected delivery location" in low_blob
-        or "can't be delivered to your selected delivery location" in low_blob
-        or "choose a different delivery location" in low_blob
-    ):
+    if is_not_shippable_text(clean_blob):
         return False
     if "free delivery" in c or "free shipping" in c:
         return True
@@ -367,6 +362,30 @@ def _apply_required_keywords_and_yaml_blacklist(
     return final, drops
 
 
+# Same “can I buy this?” idea as PDP: valid price + shippable, not Amazon “in stock” wording on the card.
+def _serp_row_explicit_oos(item: dict[str, Any]) -> bool:
+    """True only when the card clearly says unavailable (avoid bare 'unavailable' in long card text)."""
+    avail = _normalize_ascii(str(item.get("availability_text") or "")).lower()
+    return "currently unavailable" in avail or "out of stock" in avail
+
+
+def _serp_row_not_shippable(item: dict[str, Any]) -> bool:
+    """Match PDP _is_not_shippable patterns on the SERP delivery blob."""
+    blob = _card_blob_for_delivery_line(item)
+    return is_not_shippable_text(blob)
+
+
+def _serp_row_in_stock(item: dict[str, Any]) -> bool:
+    """SERP mirror stock flag aligned with PDP qualifies: price present, not explicit OOS, shippable."""
+    if not _is_valid_price(item):
+        return False
+    if _serp_row_explicit_oos(item):
+        return False
+    if _serp_row_not_shippable(item):
+        return False
+    return True
+
+
 # Convert filtered scrape items into the simple row format the state engine expects for tracking changes over time.
 def _rows_for_state_engine(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize to state-engine row shape (no merchant resolution)."""
@@ -380,7 +399,7 @@ def _rows_for_state_engine(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "asin": asin,
                 "title": item.get("title") or "",
                 "price": item.get("price"),
-                "in_stock": bool(item.get("in_stock")),
+                "in_stock": _serp_row_in_stock(item),
                 "seller": "search",
                 "seller_name": "search",
                 "image_url": item.get("image_url"),

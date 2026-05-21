@@ -25,6 +25,7 @@ AES never inserts or updates `products`. PDP never inserts or updates `aes_produ
 
 - **Mirrored** means “on current page-1 SERP after filters,” not global Amazon inventory.
 - Each cycle, every filtered SERP row updates its `aes_products` row (price written every time while in stock).
+- **In stock on SERP** uses the same idea as PDP: valid price on the card + shippable to your location, not Amazon “in stock” wording (SERP cards often omit that text).
 - **Reconcile absence** — only when this cycle has at least one filtered candidate (`aes_candidates` non-empty). Any `aes_products` row whose ASIN is *not* on the page is marked out of stock (`in_stock = 0`). If the scrape or pipeline yields zero candidates, reconcile is skipped so a bad or empty run does not mass-mark everything OOS.
 - Item leaves page 1 → OOS in mirror; item reappears in stock on the card → **`back_in_stock`**.
 

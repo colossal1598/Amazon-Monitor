@@ -35,7 +35,12 @@ def normalize_title_line(value: Any) -> str | None:
 
 
 def _line_is_not_shippable(line: str) -> bool:
-    clean = normalize_ascii(line)
+    return is_not_shippable_text(line)
+
+
+def is_not_shippable_text(text: str | None) -> bool:
+    """True when Amazon explicitly says delivery to your configured location is not possible."""
+    clean = normalize_ascii(text or "")
     patterns = (
         "cannot be shipped to your selected delivery location",
         "can't be shipped to your selected delivery location",

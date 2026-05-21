@@ -13,7 +13,7 @@ from typing import Any
 import browser_factory
 from browser_factory import USER_AGENTS, STEALTH
 from exceptions import NetworkAccessDenied
-from pdp_helpers import normalize_ascii, valid_asin
+from pdp_helpers import is_not_shippable_text, normalize_ascii, valid_asin
 
 LOGGER = logging.getLogger(__name__)
 
@@ -243,20 +243,6 @@ def _pdp_merchant_blob(page) -> str:
     return "\n".join(parts)
 
 
-# Detect the “can’t ship to your address” message so we don’t treat the item as in stock for you.
-def _is_not_shippable(shipping_text: str) -> bool:
-    """True when Amazon explicitly states the item can't ship to the selected location."""
-    t = _normalize_for_match(shipping_text or "")
-    patterns = (
-        "cannot be shipped to your selected delivery location",
-        "can't be shipped to your selected delivery location",
-        "cannot be delivered to your selected delivery location",
-        "can't be delivered to your selected delivery location",
-        "choose a different delivery location",
-    )
-    return any(p in t for p in patterns)
-
-
 # Build one standardized row for the state engine from a PDP scrape so the rest of the monitor can treat it like a normal observation.
 def _pdp_row(
     asin: str,
@@ -269,7 +255,7 @@ def _pdp_row(
     allowed: list[str],
 ) -> dict[str, Any]:
     qualifies = price is not None and merchant_matches_allowed(merchant_blob, allowed)
-    if _is_not_shippable(shipping_text):
+    if is_not_shippable_text(shipping_text):
         qualifies = False
     return {
         "asin": asin,
