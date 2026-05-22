@@ -15,6 +15,7 @@ import browser_factory
 from browser_factory import USER_AGENTS, STEALTH, register_heavy_resource_blocking_async
 from exceptions import NetworkAccessDenied
 from image_urls import pick_amazon_image_url
+from debug_probe import agent_log
 from pdp_helpers import is_not_shippable_text, normalize_ascii, valid_asin
 
 LOGGER = logging.getLogger(__name__)
@@ -708,7 +709,25 @@ async def _run_pdp_watch_async(
             pairs.append((item[0], item[1]))
 
     pairs.sort(key=lambda x: x[0])
-    return [row for _, row in pairs]
+    rows_out = [row for _, row in pairs]
+    wall = time.monotonic() - cycle_started
+    budget_hits = sum(
+        1 for r in rows_out if isinstance(r, dict) and r.get("skip_reason") == "cycle_budget_exceeded"
+    )
+    agent_log(
+        "pdp_scraper.py:_run_pdp_watch_async",
+        "pdp_watch_finished",
+        {
+            "wall_sec": round(wall, 2),
+            "max_cycle_seconds": max_cycle_seconds,
+            "asins": len(normalized),
+            "max_concurrent": max_concurrent,
+            "title_wait_ms": title_wait_ms,
+            "cycle_budget_exceeded": budget_hits,
+        },
+        "H3",
+    )
+    return rows_out
 
 
 async def scrape_pdp_watch_async(

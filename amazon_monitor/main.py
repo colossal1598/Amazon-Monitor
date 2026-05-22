@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 import fx_rate
 from alert_dedupe import dedupe_alerts_by_asin
+from debug_probe import agent_log
 from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, NetworkAccessDenied
 from filter_pipeline import run_search_filter_pipeline
@@ -277,6 +278,7 @@ def main() -> None:
         return len(aes_items), len(aes_candidates), aes_alerts
 
     def pdp_loop() -> None:
+        cycle_t0 = time.monotonic()
         if scraping_paused["value"]:
             return
         config = load_runtime_config(db_path)
@@ -287,6 +289,21 @@ def main() -> None:
         mark_job_started("pdp")
         try:
             watch_list = _normalize_pdp_watch_asins(config.get("pdp_watch_asins"))
+            poll_min = int(config.get("pdp_poll_minutes", 4))
+            agent_log(
+                "main.py:pdp_loop",
+                "cycle_start",
+                {
+                    "watch": len(watch_list),
+                    "pdp_poll_minutes": poll_min,
+                    "poll_interval_sec": poll_min * 60,
+                    "max_cycle_seconds": int(config.get("max_cycle_seconds", 170)),
+                    "pdp_title_wait_ms": int(config.get("pdp_title_wait_ms", 15_000)),
+                    "pdp_watch_max_concurrent_tabs": int(config.get("pdp_watch_max_concurrent_tabs", 2)),
+                    "playwright_headless": bool(config.get("playwright_headless", True)),
+                },
+                "H1",
+            )
             _log("lifecycle", "cycle_start", cycle_stamp=True, watch=len(watch_list))
             pdp_rows: list[dict[str, Any]] = []
             captcha_rows = 0
@@ -301,6 +318,7 @@ def main() -> None:
                 allowed_subs = _allowed_seller_substrings(config)
                 delay_range = _coerce_range(config.get("pdp_watch_scroll_delay_seconds"), (0.25, 0.65))
                 log_lifecycle("scrape_pdp_watch_start", count=len(watch_list))
+                pdp_t0 = time.monotonic()
                 pdp_rows = scrape_pdp_watch(
                     watch_list,
                     allowed_subs,
@@ -312,6 +330,7 @@ def main() -> None:
                     headless=bool(config.get("playwright_headless", True)),
                     pdp_title_wait_ms=int(config.get("pdp_title_wait_ms", 15_000)),
                 )
+                pdp_elapsed = time.monotonic() - pdp_t0
                 skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
                 in_stock_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("in_stock"))
                 captcha_rows = sum(
@@ -325,6 +344,22 @@ def main() -> None:
                     if isinstance(r, dict)
                     and r.get("_skip_update")
                     and r.get("skip_reason") == "captcha_run_aborted"
+                )
+                skip_reasons: dict[str, int] = {}
+                for r in pdp_rows:
+                    if isinstance(r, dict) and r.get("_skip_update"):
+                        reason = str(r.get("skip_reason") or "unknown")
+                        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                agent_log(
+                    "main.py:pdp_loop",
+                    "pdp_scrape_done",
+                    {
+                        "pdp_elapsed_sec": round(pdp_elapsed, 2),
+                        "watch": len(watch_list),
+                        "skip_update": skip_rows,
+                        "skip_reasons": skip_reasons,
+                    },
+                    "H2",
                 )
                 log_debug(
                     "pdp_watch_counts",
@@ -372,13 +407,32 @@ def main() -> None:
                 handle_captcha_or_network_pause(config)
                 return
 
+            aes_t0 = time.monotonic()
             aes_raw_count, aes_pipeline_count, aes_alerts = aes_discovery_loop(config)
+            aes_elapsed = time.monotonic() - aes_t0
+            agent_log(
+                "main.py:pdp_loop",
+                "aes_scrape_done",
+                {"aes_elapsed_sec": round(aes_elapsed, 2), "aes_raw": aes_raw_count},
+                "H5",
+            )
             aes_alert_count = len(aes_alerts)
             tick_alerts.extend(aes_alerts)
             deduped_alerts = dedupe_alerts_by_asin(tick_alerts)
             for alert in deduped_alerts:
                 send_alert(alert, config)
             sent_alerts = len(deduped_alerts)
+            total_elapsed = time.monotonic() - cycle_t0
+            agent_log(
+                "main.py:pdp_loop",
+                "cycle_done",
+                {
+                    "total_elapsed_sec": round(total_elapsed, 2),
+                    "pdp_poll_minutes": poll_min,
+                    "exceeds_poll_interval": total_elapsed > poll_min * 60,
+                },
+                "H1",
+            )
             log_lifecycle(
                 "pdp_cycle_done",
                 alerts=sent_alerts,
