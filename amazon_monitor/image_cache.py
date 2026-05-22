@@ -10,6 +10,8 @@ from typing import Any
 
 import requests
 
+import usage_metrics
+
 LOGGER = logging.getLogger(__name__)
 
 _CONTENT_TYPE_EXT = {
@@ -90,6 +92,7 @@ def ensure_cached_image(asin: str, remote_url: str | None, config: dict[str, Any
     remote = (str(remote_url).strip() if remote_url else "") or None
 
     if remote and meta and meta.get("remote_url") == remote and existing and existing.is_file():
+        usage_metrics.record_image_fetch(0, cache_hit=True)
         return existing
 
     if not remote:
@@ -106,6 +109,7 @@ def ensure_cached_image(asin: str, remote_url: str | None, config: dict[str, Any
             return existing
         return None
 
+    usage_metrics.record_image_fetch(len(resp.content), cache_hit=False)
     ext = _ext_from_content_type(resp.headers.get("Content-Type"))
     dest = cache / f"{asin_norm}{ext}"
     try:

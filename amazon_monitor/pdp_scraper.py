@@ -15,8 +15,9 @@ import browser_factory
 from browser_factory import USER_AGENTS, STEALTH, register_heavy_resource_blocking_async
 from exceptions import NetworkAccessDenied
 from image_urls import pick_amazon_image_url
-from debug_probe import agent_log
 from pdp_helpers import is_not_shippable_text, normalize_ascii, valid_asin
+from usage_metrics import NetMeter
+import usage_metrics
 
 LOGGER = logging.getLogger(__name__)
 
@@ -476,6 +477,8 @@ async def _run_pdp_watch_async(
     cycle_started = time.monotonic()
     sem = asyncio.Semaphore(max_concurrent)
     captcha_abort = asyncio.Event()
+    pdp_net_bytes = 0
+    net_lock = asyncio.Lock()
     stealth_ctx_applied = False
     stealth_page_fallback_warned = False
     title_wait_ms = max(3_000, int(pdp_title_wait_ms))
@@ -576,6 +579,8 @@ async def _run_pdp_watch_async(
                     if captcha_abort.is_set():
                         return idx, _pdp_skip_row(asin, "captcha_run_aborted")
                     page = await context.new_page()
+                    meter = NetMeter()
+                    meter.attach_async(page)
                     try:
                         page.set_default_timeout(2_000)
                         page.set_default_navigation_timeout(_PDP_GOTO_TIMEOUT_MS)
@@ -684,6 +689,8 @@ async def _run_pdp_watch_async(
                         return idx, _pdp_skip_row(asin, last_reason)
                     finally:
                         await page.close()
+                        async with net_lock:
+                            pdp_net_bytes += meter.total_bytes
 
                 return idx, _pdp_skip_row(asin, last_reason)
 
@@ -710,22 +717,13 @@ async def _run_pdp_watch_async(
 
     pairs.sort(key=lambda x: x[0])
     rows_out = [row for _, row in pairs]
-    wall = time.monotonic() - cycle_started
-    budget_hits = sum(
-        1 for r in rows_out if isinstance(r, dict) and r.get("skip_reason") == "cycle_budget_exceeded"
-    )
-    agent_log(
-        "pdp_scraper.py:_run_pdp_watch_async",
-        "pdp_watch_finished",
-        {
-            "wall_sec": round(wall, 2),
-            "max_cycle_seconds": max_cycle_seconds,
-            "asins": len(normalized),
-            "max_concurrent": max_concurrent,
-            "title_wait_ms": title_wait_ms,
-            "cycle_budget_exceeded": budget_hits,
-        },
-        "H3",
+    ok = sum(1 for r in rows_out if isinstance(r, dict) and not r.get("_skip_update"))
+    skip = len(rows_out) - ok
+    usage_metrics.record_pdp_phase(
+        time.monotonic() - cycle_started,
+        pdp_net_bytes,
+        ok=ok,
+        skip=skip,
     )
     return rows_out
 

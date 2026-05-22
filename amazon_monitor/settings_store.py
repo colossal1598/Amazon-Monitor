@@ -39,6 +39,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "fx_refresh_every_runs": 10,
     "fx_cache_path": "data/fx_usd_ils.json",
     "image_cache_dir": "data/product_images",
+    "metrics_enabled": True,
+    "metrics_jsonl_path": "data/metrics.jsonl",
     "fx_fallback_usd_ils": 3,
     "fx_request_timeout_seconds": 5,
     "affiliate_tag": "yourclient-20",

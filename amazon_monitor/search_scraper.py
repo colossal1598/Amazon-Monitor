@@ -19,6 +19,8 @@ from image_urls import pick_amazon_image_url
 from filter_pipeline import normalize_title_line
 from pdp_helpers import is_not_shippable_text
 from serp_card_price import card_list_price
+from usage_metrics import NetMeter
+import usage_metrics
 
 LOGGER = logging.getLogger(__name__)
 
@@ -608,8 +610,11 @@ def _scrape_single_attempt(
     total_pages_cap = 1
     page_meta_first: dict[str, Any] = {}
 
+    aes_started = time.monotonic()
+    meter = NetMeter()
     try:
         page = context.new_page()
+        meter.attach_sync(page)
         page_num = 1
         while True:
             elapsed = time.monotonic() - cycle_started
@@ -769,6 +774,7 @@ def _scrape_single_attempt(
             page_num += 1
             time.sleep(random.uniform(pagination_delay_range[0], pagination_delay_range[1]))
     finally:
+        usage_metrics.record_aes_phase(time.monotonic() - aes_started, meter.total_bytes)
         close_context(context)
 
     deduped = _dedupe_products_by_asin(all_products)

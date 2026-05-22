@@ -8,6 +8,8 @@ from typing import Optional
 from playwright.sync_api import BrowserContext, Route, sync_playwright
 from playwright_stealth.stealth import Stealth
 
+import usage_metrics
+
 _HEAVY_RESOURCE_TYPES = frozenset({"image", "media", "font"})
 
 # Blocking images/fonts can prevent domcontentloaded; commit + downstream selector waits gate readiness.
@@ -76,6 +78,7 @@ def should_abort_heavy_request(route: Route) -> bool:
 
 def _heavy_resource_route_handler(route: Route) -> None:
     if should_abort_heavy_request(route):
+        usage_metrics.bump_blocked()
         route.abort()
     else:
         route.continue_()
@@ -88,6 +91,7 @@ def register_heavy_resource_blocking_sync(context: BrowserContext) -> None:
 async def register_heavy_resource_blocking_async(context) -> None:
     async def handler(route: Route) -> None:
         if should_abort_heavy_request(route):
+            usage_metrics.bump_blocked()
             await route.abort()
         else:
             await route.continue_()
