@@ -552,7 +552,7 @@ async def _run_pdp_watch_async(
             LOGGER.warning("pdp_watch stealth not applied (continuing): %s", exc)
 
         async def worker(idx: int, asin: str) -> tuple[int, dict[str, Any]]:
-            nonlocal stealth_page_fallback_warned
+            nonlocal stealth_page_fallback_warned, pdp_net_bytes
             if captcha_abort.is_set():
                 return idx, _pdp_skip_row(asin, "captcha_run_aborted")
             async with sem:
