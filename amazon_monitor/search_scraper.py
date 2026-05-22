@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import browser_factory
@@ -493,10 +494,40 @@ def _carousel_tile_roots(page) -> list[Any]:
     return roots
 
 
+def _serp_stabilize_page(page, *, timeout_ms: int = 15_000) -> None:
+    """Brief settle after navigation commit before reading DOM (avoids context-destroyed races)."""
+    page.wait_for_selector("body", state="attached", timeout=timeout_ms)
+    time.sleep(0.25)
+
+
 def _serp_captcha_or_raise(page, source: str) -> None:
-    title = (page.title() or "").lower()
-    if "robot check" in title or page.query_selector("form[action*='validateCaptcha']"):
-        raise CaptchaBlocked(f"Captcha detected while scraping {source}")
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            title = (page.title() or "").lower()
+            if "robot check" in title:
+                raise CaptchaBlocked(f"Captcha detected while scraping {source}")
+            if page.query_selector("form[action*='validateCaptcha']"):
+                raise CaptchaBlocked(f"Captcha detected while scraping {source}")
+            return
+        except CaptchaBlocked:
+            raise
+        except PlaywrightError as exc:
+            msg = str(exc)
+            if "Execution context was destroyed" in msg or "Target closed" in msg or "Target page" in msg:
+                last_err = exc
+                LOGGER.debug(
+                    "SERP captcha check retry source=%s attempt=%s/%s: %s",
+                    source,
+                    attempt + 1,
+                    3,
+                    exc,
+                )
+                time.sleep(0.35 * (attempt + 1))
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
 
 
 def _wait_serp_result_cards(
@@ -548,6 +579,7 @@ def _wait_serp_result_cards(
                         e,
                     ) from e
                 raise
+            _serp_stabilize_page(page)
             _serp_captcha_or_raise(page, source)
 
 
@@ -567,10 +599,11 @@ def _scrape_single_attempt(
     pagination_delay_range: tuple[float, float] = (2.0, 4.5),
     serp_inner_retries: int = 2,
     serp_scroll_profile: SerpScrollProfile = "full",
+    headless: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_products: list[dict[str, Any]] = []
     debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}}
-    context = create_stealth_context(persistent_dir=None, headless=True)
+    context = create_stealth_context(persistent_dir=None, headless=headless)
     cycle_started = time.monotonic()
     total_pages_cap = 1
     page_meta_first: dict[str, Any] = {}
@@ -614,10 +647,12 @@ def _scrape_single_attempt(
                 )
                 raise
             LOGGER.info(
-                "SERP navigation committed source=%s page=%s; waiting for result cards",
+                "SERP navigation committed source=%s page=%s headless=%s; stabilizing DOM",
                 source,
                 page_num,
+                headless,
             )
+            _serp_stabilize_page(page)
             _serp_captcha_or_raise(page, source)
 
             _wait_serp_result_cards(
@@ -757,6 +792,7 @@ def scrape_search(
     pagination_delay_range: tuple[float, float] | None = None,
     serp_inner_retries: int = 2,
     serp_scroll_profile: SerpScrollProfile = "full",
+    headless: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Scrape Amazon search results. No PDP visits.
 
@@ -784,6 +820,7 @@ def scrape_search(
                 pagination_delay_range=pdr,
                 serp_inner_retries=serp_inner_retries,
                 serp_scroll_profile=serp_scroll_profile,
+                headless=headless,
             )
         except NetworkAccessDenied as e:
             last_error = e

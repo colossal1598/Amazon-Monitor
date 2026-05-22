@@ -257,6 +257,7 @@ def main() -> None:
             collect_debug=False,
             max_cycle_seconds=int(config.get("max_cycle_seconds", 170)),
             serp_scroll_profile="minimal",
+            headless=bool(config.get("playwright_headless", True)),
         )
         aes_pipeline_rows, _aes_meta = run_search_filter_pipeline(
             aes_items,
@@ -309,6 +310,7 @@ def main() -> None:
                     tab_jitter_seconds=config.get("pdp_watch_tab_jitter_seconds"),
                     max_attempts=int(config.get("pdp_watch_max_attempts", 3)),
                     headless=bool(config.get("playwright_headless", True)),
+                    pdp_title_wait_ms=int(config.get("pdp_title_wait_ms", 15_000)),
                 )
                 skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
                 in_stock_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("in_stock"))

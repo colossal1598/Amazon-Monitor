@@ -21,8 +21,13 @@ LOGGER = logging.getLogger(__name__)
 
 # Navigation uses commit (not domcontentloaded) when heavy resources are blocked; title selectors gate scrape readiness.
 _PDP_GOTO_TIMEOUT_MS = 12_000
-_PDP_TITLE_WAIT_MS = 8_000
+_PDP_TITLE_WAIT_MS_DEFAULT = 15_000
 _PDP_MAX_ATTEMPTS = 3
+_PDP_READY_SELECTORS = (
+    "#productTitle, #title, h1.a-size-large, "
+    "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, "
+    "#availability, #outOfStock, #add-to-cart-button"
+)
 _PDP_RETRY_BACKOFF_SECONDS = (1.5, 3.0)
 
 _PRICE_RE = re.compile(r"\$?\s*([0-9][0-9,]*)(?:\.(\d{2}))?")
@@ -463,6 +468,7 @@ async def _run_pdp_watch_async(
     jitter_range: tuple[float, float],
     max_attempts: int,
     headless: bool = True,
+    pdp_title_wait_ms: int = _PDP_TITLE_WAIT_MS_DEFAULT,
 ) -> list[dict[str, Any]]:
     from playwright.async_api import async_playwright
 
@@ -471,12 +477,15 @@ async def _run_pdp_watch_async(
     captcha_abort = asyncio.Event()
     stealth_ctx_applied = False
     stealth_page_fallback_warned = False
+    title_wait_ms = max(3_000, int(pdp_title_wait_ms))
     LOGGER.info(
-        "pdp_watch starting concurrent_tabs=%s jitter=%.2f-%.2f asins=%s",
+        "pdp_watch starting concurrent_tabs=%s jitter=%.2f-%.2f asins=%s headless=%s title_wait_ms=%s",
         max_concurrent,
         jitter_range[0],
         jitter_range[1],
         len(normalized),
+        headless,
+        title_wait_ms,
     )
 
     async with async_playwright() as pw:
@@ -603,11 +612,12 @@ async def _run_pdp_watch_async(
                             await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                             return idx, _pdp_skip_row(asin, last_reason)
 
-                        LOGGER.debug(
-                            "PDP navigation committed asin=%s attempt=%s/%s; waiting for product selectors",
+                        LOGGER.info(
+                            "PDP navigation committed asin=%s attempt=%s/%s; waiting for product DOM (attached, %sms)",
                             asin,
                             attempt,
                             max_attempts,
+                            title_wait_ms,
                         )
                         title_l = (await page.title() or "").lower()
                         cap_el = await page.query_selector("form[action*='validateCaptcha']")
@@ -617,15 +627,20 @@ async def _run_pdp_watch_async(
                             await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                             return idx, _pdp_skip_row(asin, "captcha")
 
-                        title_sel = "#productTitle, #title, h1.a-size-large"
+                        ready_ok = False
                         try:
-                            await page.wait_for_selector(title_sel, timeout=_PDP_TITLE_WAIT_MS)
-                            LOGGER.debug("PDP ready asin=%s (product selectors visible)", asin)
+                            await page.wait_for_selector(
+                                _PDP_READY_SELECTORS,
+                                state="attached",
+                                timeout=title_wait_ms,
+                            )
+                            ready_ok = True
+                            LOGGER.info("PDP ready asin=%s (product DOM attached)", asin)
                         except Exception as exc:
                             LOGGER.warning(
-                                "PDP ready check: product selectors not found asin=%s within %sms: %s",
+                                "PDP ready check: product DOM not attached asin=%s within %sms: %s",
                                 asin,
-                                _PDP_TITLE_WAIT_MS,
+                                title_wait_ms,
                                 exc,
                             )
 
@@ -634,6 +649,20 @@ async def _run_pdp_watch_async(
                         price = await _extract_pdp_price_async(page)
                         shipping = await _extract_pdp_shipping_async(page)
                         image_url = await _extract_pdp_image_async(page)
+                        if not ready_ok and not title and price is None:
+                            LOGGER.warning(
+                                "PDP scrape empty asin=%s after ready miss (skipping update)",
+                                asin,
+                            )
+                            await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                            return idx, _pdp_skip_row(asin, "parse_failed")
+                        if not ready_ok and (title or price is not None):
+                            LOGGER.info(
+                                "PDP ready check missed asin=%s but extracted title=%r price=%s",
+                                asin,
+                                (title or "")[:60],
+                                price,
+                            )
                         row = _pdp_row(
                             asin,
                             title=title,
@@ -691,6 +720,8 @@ async def scrape_pdp_watch_async(
     max_concurrent_tabs: int = 2,
     tab_jitter_seconds: tuple[float, float] | list[float] | None = None,
     max_attempts: int = _PDP_MAX_ATTEMPTS,
+    headless: bool = True,
+    pdp_title_wait_ms: int = _PDP_TITLE_WAIT_MS_DEFAULT,
 ) -> list[dict[str, Any]]:
     """Async version of scrape_pdp_watch for callers that already run an event loop."""
     normalized: list[str] = []
@@ -719,6 +750,8 @@ async def scrape_pdp_watch_async(
         max_concurrent=conc,
         jitter_range=jitter,
         max_attempts=max(1, int(max_attempts)),
+        headless=headless,
+        pdp_title_wait_ms=pdp_title_wait_ms,
     )
 
 
@@ -733,6 +766,7 @@ def scrape_pdp_watch(
     tab_jitter_seconds: tuple[float, float] | list[float] | None = None,
     max_attempts: int = _PDP_MAX_ATTEMPTS,
     headless: bool = True,
+    pdp_title_wait_ms: int = _PDP_TITLE_WAIT_MS_DEFAULT,
 ) -> list[dict[str, Any]]:
     """Visit each watch ASIN on amazon.com PDP; return exactly one dict per unique valid ASIN (order preserved).
 
@@ -779,5 +813,6 @@ def scrape_pdp_watch(
             jitter_range=jitter,
             max_attempts=max(1, int(max_attempts)),
             headless=headless,
+            pdp_title_wait_ms=pdp_title_wait_ms,
         )
     )
