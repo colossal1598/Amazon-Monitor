@@ -14,6 +14,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 import browser_factory
 from browser_factory import close_context, create_stealth_context
 from exceptions import CaptchaBlocked, NetworkAccessDenied
+from image_urls import pick_amazon_image_url
 from filter_pipeline import normalize_title_line
 from pdp_helpers import is_not_shippable_text
 from serp_card_price import card_list_price
@@ -22,6 +23,7 @@ LOGGER = logging.getLogger(__name__)
 
 ScrapeMode = Literal["featured_full", "newest_front"]
 PaginationMode = Literal["auto", "fixed"]
+SerpScrollProfile = Literal["full", "minimal"]
 
 
 # Recognize the “internet is blocked/broken” kinds of failures so the monitor can pause and recover instead of just retrying a page forever.
@@ -268,7 +270,7 @@ def _extract_image_url(card) -> str | None:
         try:
             candidates = json.loads(dynamic_attr)
             if isinstance(candidates, dict) and candidates:
-                return max(candidates.keys(), key=len)
+                return pick_amazon_image_url(candidates, rank=1)
         except Exception:
             pass
     srcset = image_el.get_attribute("srcset") or ""
@@ -276,7 +278,7 @@ def _extract_image_url(card) -> str | None:
         parts = [p.strip() for p in srcset.split(",") if p.strip()]
         urls = [p.split(" ")[0] for p in parts if p]
         if urls:
-            return urls[-1]
+            return pick_amazon_image_url(urls, rank=1)
     src = image_el.get_attribute("src")
     return src.strip() if src else None
 
@@ -556,6 +558,7 @@ def _scrape_single_attempt(
     scroll_delay_range: tuple[float, float] = (0.25, 0.65),
     pagination_delay_range: tuple[float, float] = (2.0, 4.5),
     serp_inner_retries: int = 2,
+    serp_scroll_profile: SerpScrollProfile = "full",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_products: list[dict[str, Any]] = []
     debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}}
@@ -596,9 +599,12 @@ def _scrape_single_attempt(
                 source,
                 serp_inner_retries=serp_inner_retries,
             )
-            _scroll_serp_to_settle(page, scroll_delay_range)
-            _scroll_serp_more_results_into_view(page, scroll_delay_range)
-            _scroll_serp_to_settle(page, scroll_delay_range, max_steps=6)
+            if serp_scroll_profile == "minimal":
+                _scroll_serp_to_settle(page, scroll_delay_range, max_steps=3)
+            else:
+                _scroll_serp_to_settle(page, scroll_delay_range)
+                _scroll_serp_more_results_into_view(page, scroll_delay_range)
+                _scroll_serp_to_settle(page, scroll_delay_range, max_steps=6)
 
             html = page.content()
             if page_num == 1:
@@ -723,6 +729,7 @@ def scrape_search(
     scroll_delay_range: tuple[float, float] | None = None,
     pagination_delay_range: tuple[float, float] | None = None,
     serp_inner_retries: int = 2,
+    serp_scroll_profile: SerpScrollProfile = "full",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Scrape Amazon search results. No PDP visits.
 
@@ -749,6 +756,7 @@ def scrape_search(
                 scroll_delay_range=sdr,
                 pagination_delay_range=pdr,
                 serp_inner_retries=serp_inner_retries,
+                serp_scroll_profile=serp_scroll_profile,
             )
         except NetworkAccessDenied as e:
             last_error = e

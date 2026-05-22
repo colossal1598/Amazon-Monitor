@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -11,8 +12,9 @@ import time
 from typing import Any
 
 import browser_factory
-from browser_factory import USER_AGENTS, STEALTH
+from browser_factory import USER_AGENTS, STEALTH, register_heavy_resource_blocking_async
 from exceptions import NetworkAccessDenied
+from image_urls import pick_amazon_image_url
 from pdp_helpers import is_not_shippable_text, normalize_ascii, valid_asin
 
 LOGGER = logging.getLogger(__name__)
@@ -147,6 +149,16 @@ def _extract_pdp_image(page) -> str | None:
             el = page.query_selector(sel)
             if not el:
                 continue
+            dynamic_attr = el.get_attribute("data-a-dynamic-image") or ""
+            if dynamic_attr:
+                try:
+                    candidates = json.loads(dynamic_attr)
+                    if isinstance(candidates, dict) and candidates:
+                        picked = pick_amazon_image_url(candidates, rank=1)
+                        if picked:
+                            return picked
+                except Exception:
+                    pass
             href = el.get_attribute("src")
             if href and href.startswith("http"):
                 return href.strip()
@@ -337,6 +349,16 @@ async def _extract_pdp_image_async(page: Any) -> str | None:
             el = await page.query_selector(sel)
             if not el:
                 continue
+            dynamic_attr = await el.get_attribute("data-a-dynamic-image") or ""
+            if dynamic_attr:
+                try:
+                    candidates = json.loads(dynamic_attr)
+                    if isinstance(candidates, dict) and candidates:
+                        picked = pick_amazon_image_url(candidates, rank=1)
+                        if picked:
+                            return picked
+                except Exception:
+                    pass
             href = await el.get_attribute("src")
             if href and href.startswith("http"):
                 return href.strip()
@@ -475,6 +497,7 @@ async def _run_pdp_watch_async(
             "permissions": ["geolocation"],
         }
         context = await browser.new_context(**ctx_kwargs)
+        await register_heavy_resource_blocking_async(context)
         await context.set_extra_http_headers({"Accept-Language": "en-IL,en;q=0.9"})
         await context.add_cookies(
             [

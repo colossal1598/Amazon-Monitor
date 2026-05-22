@@ -256,6 +256,7 @@ def main() -> None:
             max_search_pages=1,
             collect_debug=False,
             max_cycle_seconds=int(config.get("max_cycle_seconds", 170)),
+            serp_scroll_profile="minimal",
         )
         aes_pipeline_rows, _aes_meta = run_search_filter_pipeline(
             aes_items,
@@ -270,6 +271,7 @@ def main() -> None:
             aes_candidates,
             source="aes_llc",
             reconcile_absence=len(aes_candidates) > 0,
+            config=config,
         )
         return len(aes_items), len(aes_candidates), aes_alerts
 
@@ -331,7 +333,11 @@ def main() -> None:
                     captcha_skip=captcha_rows,
                     captcha_aborted=captcha_aborted_rows,
                 )
-                pdp_alerts = state_engine.process_pdp_watch_candidates(pdp_rows, set(watch_list))
+                pdp_alerts = state_engine.process_pdp_watch_candidates(
+                    pdp_rows,
+                    set(watch_list),
+                    config=config,
+                )
                 tick_alerts.extend(pdp_alerts)
             else:
                 LOGGER.warning("No pdp_watch_asins configured; PDP cycle did nothing.")

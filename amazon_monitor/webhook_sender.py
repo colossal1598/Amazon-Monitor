@@ -5,6 +5,7 @@ from typing import Any
 import requests
 
 import fx_rate
+import image_cache
 
 LOGGER = logging.getLogger(__name__)
 
@@ -177,8 +178,14 @@ def send_alert(alert_dict: dict[str, Any], config: dict[str, Any]) -> None:
         "to": _pick_recipient(config, operational=False),
         "message": _format_message(payload, config),
     }
-    image_url = payload.get("image_url")
-    if isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
+    image_url = alert_dict.get("image_url")
+    if asin:
+        cached = image_cache.ensure_cached_image(str(asin), image_url, config)
+        if cached and cached.is_file():
+            wa_payload["image_path"] = str(cached.resolve())
+        elif isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
+            wa_payload["image_url"] = image_url
+    elif isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
         wa_payload["image_url"] = image_url
     _post_wa(config, wa_payload)
 

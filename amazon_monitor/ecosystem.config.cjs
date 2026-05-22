@@ -86,6 +86,9 @@ module.exports = {
       exp_backoff_restart_delay: 3000,
       watch: false,
       cron_restart: "0 */3 * * *",
+      env: {
+        IMAGE_CACHE_ROOT: path.join(monitorRoot, "data", "product_images"),
+      },
     },
     {
       name: "monitor-healthcheck",

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import image_cache
+
 from alert_decisions import decide_back_in_stock, decide_new_product, decide_price_drop
 from pdp_helpers import normalize_title_line, shipping_display_hebrew
 
@@ -73,7 +75,8 @@ class StateEngine:
                     first_seen TEXT,
                     last_seen TEXT,
                     last_price_alert TEXT,
-                    last_stock_alert TEXT
+                    last_stock_alert TEXT,
+                    image_url TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS aes_products (
@@ -84,7 +87,8 @@ class StateEngine:
                     first_seen TEXT,
                     last_seen TEXT,
                     last_price_alert TEXT,
-                    last_stock_alert TEXT
+                    last_stock_alert TEXT,
+                    image_url TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS alerts (
@@ -115,7 +119,27 @@ class StateEngine:
                 CREATE INDEX IF NOT EXISTS idx_asins_role ON asins(role, enabled);
                 """
             )
+            self._migrate_image_url_columns()
             self.conn.commit()
+
+    def _table_has_column(self, table: str, column: str) -> bool:
+        rows = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(str(row[1]) == column for row in rows)
+
+    def _migrate_image_url_columns(self) -> None:
+        for table in ("products", "aes_products"):
+            if not self._table_has_column(table, "image_url"):
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN image_url TEXT")
+
+    def _maybe_cache_image(
+        self,
+        asin: str,
+        image_url: str | None,
+        config: dict[str, Any] | None,
+    ) -> None:
+        if not config or not image_url:
+            return
+        image_cache.ensure_cached_image(asin, image_url, config)
 
     # Look up the saved product row for an ASIN so we can compare “before” vs “now”.
     def _fetch_product(self, asin: str) -> sqlite3.Row | None:
@@ -179,6 +203,7 @@ class StateEngine:
         watch_asins: set[str],
         *,
         source: str = "pdp_watch",
+        config: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Apply PDP watch scrape rows with no global absence reconcile.
 
@@ -228,11 +253,12 @@ class StateEngine:
                     self.conn.execute(
                         """
                         INSERT INTO products
-                        (asin, title, seller, price, in_stock, first_seen, last_seen)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (asin, title, seller, price, in_stock, first_seen, last_seen, image_url)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (asin, title, seller, new_price, new_stock, now, now),
+                        (asin, title, seller, new_price, new_stock, now, now, image_url),
                     )
+                    self._maybe_cache_image(asin, image_url, config)
                     if _should_emit_new_product_alert(new_stock, new_price):
                         nd = decide_new_product(is_first_observation=True)
                         assert nd.emit and nd.alert_type is not None
@@ -262,7 +288,16 @@ class StateEngine:
                 old_stock = int(row["in_stock"] or 0)
                 if new_stock == 0:
                     # Non-qualifying PDP row explicitly marks the item out of stock.
-                    self.conn.execute("UPDATE products SET in_stock = 0 WHERE asin = ?", (asin,))
+                    self.conn.execute(
+                        """
+                        UPDATE products
+                        SET in_stock = 0,
+                            image_url = COALESCE(?, image_url)
+                        WHERE asin = ?
+                        """,
+                        (image_url, asin),
+                    )
+                    self._maybe_cache_image(asin, image_url, config)
                     continue
 
                 if old_stock == 0:
@@ -271,21 +306,24 @@ class StateEngine:
                         UPDATE products
                         SET price = COALESCE(?, price),
                             in_stock = 1,
-                            last_seen = ?
+                            last_seen = ?,
+                            image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (new_price, now, asin),
+                        (new_price, now, image_url, asin),
                     )
                 else:
                     self.conn.execute(
                         """
                         UPDATE products
                         SET price = COALESCE(?, price),
-                            last_seen = ?
+                            last_seen = ?,
+                            image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (new_price, now, asin),
+                        (new_price, now, image_url, asin),
                     )
+                self._maybe_cache_image(asin, image_url, config)
 
                 stock_decision = decide_back_in_stock(old_stock, 1)
                 emitted_back_in_stock = False
@@ -370,6 +408,7 @@ class StateEngine:
         *,
         source: str = "aes_llc",
         reconcile_absence: bool = True,
+        config: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Apply AES SERP rows into dedicated mirror state.
 
@@ -404,11 +443,12 @@ class StateEngine:
                     self.conn.execute(
                         """
                         INSERT INTO aes_products
-                        (asin, title, price, in_stock, first_seen, last_seen)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        (asin, title, price, in_stock, first_seen, last_seen, image_url)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (asin, title, new_price, new_stock, now, now),
+                        (asin, title, new_price, new_stock, now, now, image_url),
                     )
+                    self._maybe_cache_image(asin, image_url, config)
                     inserted_count += 1
                     if _should_emit_new_product_alert(new_stock, new_price):
                         nd = decide_new_product(is_first_observation=True)
@@ -435,11 +475,13 @@ class StateEngine:
                         UPDATE aes_products
                         SET title = COALESCE(?, title),
                             in_stock = 0,
-                            last_seen = ?
+                            last_seen = ?,
+                            image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (title, now, asin),
+                        (title, now, image_url, asin),
                     )
+                    self._maybe_cache_image(asin, image_url, config)
                     continue
 
                 if old_stock == 0:
@@ -449,10 +491,11 @@ class StateEngine:
                         SET title = COALESCE(?, title),
                             price = COALESCE(?, price),
                             in_stock = 1,
-                            last_seen = ?
+                            last_seen = ?,
+                            image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (title, new_price, now, asin),
+                        (title, new_price, now, image_url, asin),
                     )
                 else:
                     self.conn.execute(
@@ -461,11 +504,13 @@ class StateEngine:
                         SET title = COALESCE(?, title),
                             price = COALESCE(?, price),
                             in_stock = 1,
-                            last_seen = ?
+                            last_seen = ?,
+                            image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (title, new_price, now, asin),
+                        (title, new_price, now, image_url, asin),
                     )
+                self._maybe_cache_image(asin, image_url, config)
 
                 stock_decision = decide_back_in_stock(old_stock, 1)
                 emitted_back_in_stock = False

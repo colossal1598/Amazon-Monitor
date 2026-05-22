@@ -5,8 +5,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from playwright.sync_api import BrowserContext, sync_playwright
+from playwright.sync_api import BrowserContext, Route, sync_playwright
 from playwright_stealth.stealth import Stealth
+
+_HEAVY_RESOURCE_TYPES = frozenset({"image", "media", "font"})
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -63,6 +65,31 @@ def init_global_rate_limiter(max_requests_per_minute: int) -> TokenBucketRateLim
 # Apply the “look like a real browser” tweaks to a page as soon as it appears.
 def _stealth_page(page) -> None:
     STEALTH.apply_stealth_sync(page)
+
+
+def should_abort_heavy_request(route: Route) -> bool:
+    return route.request.resource_type in _HEAVY_RESOURCE_TYPES
+
+
+def _heavy_resource_route_handler(route: Route) -> None:
+    if should_abort_heavy_request(route):
+        route.abort()
+    else:
+        route.continue_()
+
+
+def register_heavy_resource_blocking_sync(context: BrowserContext) -> None:
+    context.route("**/*", _heavy_resource_route_handler)
+
+
+async def register_heavy_resource_blocking_async(context) -> None:
+    async def handler(route: Route) -> None:
+        if should_abort_heavy_request(route):
+            await route.abort()
+        else:
+            await route.continue_()
+
+    await context.route("**/*", handler)
 
 
 def _apply_amazon_cookie_prefs(context: BrowserContext) -> None:
@@ -123,6 +150,7 @@ def create_stealth_context(
     for page in context.pages:
         _stealth_page(page)
 
+    register_heavy_resource_blocking_sync(context)
     setattr(context, "_pw_runner", p)
     return context
 
