@@ -508,7 +508,7 @@ def _wait_serp_result_cards(
     selector_timeout_ms: int = 25_000,
     goto_timeout_ms: int = 45_000,
 ) -> None:
-    """Wait for SERP result cards; on timeout, re-goto the search URL up to ``serp_inner_retries`` times."""
+    """After navigation commit, wait for SERP result cards; on timeout, re-goto up to ``serp_inner_retries`` times."""
     recoveries = max(0, serp_inner_retries)
     total_rounds = 1 + recoveries
     for round_idx in range(total_rounds):
@@ -523,16 +523,24 @@ def _wait_serp_result_cards(
                 raise
             title_snip = ((page.title() or "").strip())[:160]
             LOGGER.warning(
-                "SERP selector timeout source=%s round=%s/%s url=%s title=%r — retrying goto",
+                "SERP ready check: result cards not found source=%s round=%s/%s url=%s title=%r — retrying navigation (wait_until=%s)",
                 source,
                 round_idx + 1,
                 total_rounds,
                 page.url,
                 title_snip,
+                browser_factory.NAV_WAIT_UNTIL,
             )
             time.sleep(random.uniform(0.5, 1.5))
             try:
-                page.goto(current_url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
+                page.goto(current_url, wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=goto_timeout_ms)
+                LOGGER.info(
+                    "SERP navigation committed source=%s round=%s/%s url=%s",
+                    source,
+                    round_idx + 1,
+                    total_rounds,
+                    current_url,
+                )
             except Exception as e:
                 if _is_network_error(e):
                     raise NetworkAccessDenied(
@@ -584,13 +592,32 @@ def _scrape_single_attempt(
                 browser_factory.global_rate_limiter.acquire()
 
             current_url = _set_page_param(search_url, page_num) if page_num > 1 else search_url
-            LOGGER.info("Scraping %s page %s/%s", source, page_num, total_pages_cap)
+            LOGGER.info(
+                "Scraping %s page %s/%s url=%s wait_until=%s",
+                source,
+                page_num,
+                total_pages_cap,
+                current_url,
+                browser_factory.NAV_WAIT_UNTIL,
+            )
             try:
-                page.goto(current_url, wait_until="domcontentloaded", timeout=45000)
+                page.goto(current_url, wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=45000)
             except Exception as e:
                 if _is_network_error(e):
                     raise NetworkAccessDenied(f"Network error on page {page_num}: {e}", e)
+                LOGGER.warning(
+                    "SERP navigation failed source=%s page=%s wait_until=%s: %s",
+                    source,
+                    page_num,
+                    browser_factory.NAV_WAIT_UNTIL,
+                    e,
+                )
                 raise
+            LOGGER.info(
+                "SERP navigation committed source=%s page=%s; waiting for result cards",
+                source,
+                page_num,
+            )
             _serp_captcha_or_raise(page, source)
 
             _wait_serp_result_cards(

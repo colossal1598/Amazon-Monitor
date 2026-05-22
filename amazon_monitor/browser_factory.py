@@ -10,6 +10,9 @@ from playwright_stealth.stealth import Stealth
 
 _HEAVY_RESOURCE_TYPES = frozenset({"image", "media", "font"})
 
+# Blocking images/fonts can prevent domcontentloaded; commit + downstream selector waits gate readiness.
+NAV_WAIT_UNTIL = "commit"
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",

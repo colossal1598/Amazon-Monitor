@@ -19,7 +19,7 @@ from pdp_helpers import is_not_shippable_text, normalize_ascii, valid_asin
 
 LOGGER = logging.getLogger(__name__)
 
-# ~15s per attempt (goto + title wait); odd PDPs must not block the scheduler loop.
+# Navigation uses commit (not domcontentloaded) when heavy resources are blocked; title selectors gate scrape readiness.
 _PDP_GOTO_TIMEOUT_MS = 12_000
 _PDP_TITLE_WAIT_MS = 8_000
 _PDP_MAX_ATTEMPTS = 3
@@ -561,7 +561,7 @@ async def _run_pdp_watch_async(
                     return idx, _pdp_skip_row(asin, "cycle_budget_exceeded")
 
                 url = f"https://www.amazon.com/dp/{asin}"
-                last_reason = "goto_failed"
+                last_reason = "navigation_failed"
                 for attempt in range(1, max_attempts + 1):
                     if captcha_abort.is_set():
                         return idx, _pdp_skip_row(asin, "captcha_run_aborted")
@@ -580,16 +580,21 @@ async def _run_pdp_watch_async(
                                     LOGGER.warning("pdp_watch per-page stealth fallback failed (continuing): %s", exc)
 
                         try:
-                            await page.goto(url, wait_until="domcontentloaded", timeout=_PDP_GOTO_TIMEOUT_MS)
+                            await page.goto(
+                                url,
+                                wait_until=browser_factory.NAV_WAIT_UNTIL,
+                                timeout=_PDP_GOTO_TIMEOUT_MS,
+                            )
                         except Exception as e:
                             if _is_network_error(e):
                                 raise NetworkAccessDenied(f"PDP network error for {asin}: {e}", e) from e
-                            last_reason = "goto_failed"
+                            last_reason = "navigation_failed"
                             LOGGER.warning(
-                                "PDP goto failed asin=%s attempt=%s/%s: %s",
+                                "PDP navigation failed asin=%s attempt=%s/%s wait_until=%s: %s",
                                 asin,
                                 attempt,
                                 max_attempts,
+                                browser_factory.NAV_WAIT_UNTIL,
                                 e,
                             )
                             if attempt < max_attempts:
@@ -598,6 +603,12 @@ async def _run_pdp_watch_async(
                             await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                             return idx, _pdp_skip_row(asin, last_reason)
 
+                        LOGGER.debug(
+                            "PDP navigation committed asin=%s attempt=%s/%s; waiting for product selectors",
+                            asin,
+                            attempt,
+                            max_attempts,
+                        )
                         title_l = (await page.title() or "").lower()
                         cap_el = await page.query_selector("form[action*='validateCaptcha']")
                         if "robot check" in title_l or cap_el:
@@ -606,13 +617,17 @@ async def _run_pdp_watch_async(
                             await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                             return idx, _pdp_skip_row(asin, "captcha")
 
+                        title_sel = "#productTitle, #title, h1.a-size-large"
                         try:
-                            await page.wait_for_selector(
-                                "#productTitle, #title, h1.a-size-large",
-                                timeout=_PDP_TITLE_WAIT_MS,
+                            await page.wait_for_selector(title_sel, timeout=_PDP_TITLE_WAIT_MS)
+                            LOGGER.debug("PDP ready asin=%s (product selectors visible)", asin)
+                        except Exception as exc:
+                            LOGGER.warning(
+                                "PDP ready check: product selectors not found asin=%s within %sms: %s",
+                                asin,
+                                _PDP_TITLE_WAIT_MS,
+                                exc,
                             )
-                        except Exception:
-                            pass
 
                         title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
                         merchant_blob = await _pdp_merchant_blob_async(page)
