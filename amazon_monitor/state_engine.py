@@ -246,6 +246,8 @@ class StateEngine:
                 new_price = _as_float(item.get("price"))
                 ship_line = shipping_display_hebrew(item.get("shipping_text"))
                 new_stock = 1 if bool(item.get("in_stock")) else 0
+                confidence = str(item.get("stock_confidence") or "").strip().lower()
+                reason = str(item.get("stock_reason") or "").strip() or None
                 now = utc_iso()
 
                 row = self._fetch_product(asin)
@@ -286,8 +288,29 @@ class StateEngine:
 
                 old_price = _as_float(row["price"])
                 old_stock = int(row["in_stock"] or 0)
+                if confidence == "unknown":
+                    LOGGER.info(
+                        "pdp_watch_unknown_stock asin=%s reason=%s (DB unchanged)",
+                        asin,
+                        reason or "unknown",
+                        extra={"channel": "debug"},
+                    )
+                    skipped_update_count += 1
+                    continue
                 if new_stock == 0:
                     # Non-qualifying PDP row explicitly marks the item out of stock.
+                    if confidence and confidence != "confirmed_out":
+                        # Newer scrapers distinguish "unknown" vs explicit out-of-stock.
+                        # Only explicit OOS signals may flip the DB to out-of-stock.
+                        LOGGER.info(
+                            "pdp_watch_nonqualifying_not_oos asin=%s confidence=%s reason=%s (DB unchanged)",
+                            asin,
+                            confidence,
+                            reason or "unknown",
+                            extra={"channel": "debug"},
+                        )
+                        skipped_update_count += 1
+                        continue
                     self.conn.execute(
                         """
                         UPDATE products

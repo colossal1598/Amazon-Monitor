@@ -38,6 +38,13 @@ _DELIVERY_RELEVANT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_EXPLICIT_OOS_RE = re.compile(
+    r"currently unavailable|temporarily out of stock|out of stock|unavailable|"
+    r"we don't know when or if this item will be back in stock|"
+    r"see all buying options",
+    re.IGNORECASE,
+)
+
 
 # Simplify text into an easy-to-compare form so seller and shipping wording matches even when formatting differs.
 def _normalize_for_match(value: str) -> str:
@@ -227,6 +234,43 @@ def _extract_pdp_shipping(page) -> str:
     return "\n".join(lines)
 
 
+def _explicit_oos_from_text(text: str | None) -> bool:
+    if not text:
+        return False
+    clean = " ".join(str(text).split())
+    return bool(_EXPLICIT_OOS_RE.search(clean))
+
+
+async def _extract_availability_text_async(page: Any) -> str:
+    for sel in ("#availability", "#outOfStock", "#desktop_buybox #availability"):
+        try:
+            el = await page.query_selector(sel)
+            if not el:
+                continue
+            t = (await el.inner_text() or "").strip()
+            if t:
+                return t
+        except Exception:
+            continue
+    return ""
+
+
+async def _detect_explicit_oos_async(page: Any, *, availability_text: str) -> tuple[bool, str | None]:
+    """Best-effort explicit out-of-stock detection.
+
+    If we can *explicitly* detect OOS, we return (True, reason). Otherwise (False, None).
+    """
+    if _explicit_oos_from_text(availability_text):
+        return True, "explicit_oos_text"
+    try:
+        node = await page.query_selector("#outOfStock")
+        if node:
+            return True, "outofstock_container"
+    except Exception:
+        pass
+    return False, None
+
+
 # Collect the page’s merchant and buy-box text into one blob so we can confirm the seller matches what you allow.
 def _pdp_merchant_blob(page) -> str:
     parts: list[str] = []
@@ -272,16 +316,38 @@ def _pdp_row(
     image_url: str | None,
     merchant_blob: str,
     allowed: list[str],
+    availability_text: str = "",
+    explicit_oos: bool = False,
 ) -> dict[str, Any]:
-    qualifies = price is not None and merchant_matches_allowed(merchant_blob, allowed)
-    if is_not_shippable_text(shipping_text):
-        qualifies = False
+    seller_ok = merchant_matches_allowed(merchant_blob, allowed)
+    shippable_ok = not is_not_shippable_text(shipping_text)
+    qualifies = price is not None and seller_ok and shippable_ok
+
+    stock_confidence = "unknown"
+    stock_reason: str | None = None
+    if qualifies:
+        stock_confidence = "confirmed_in"
+    elif explicit_oos:
+        stock_confidence = "confirmed_out"
+        stock_reason = "explicit_oos"
+    else:
+        if price is None:
+            stock_reason = "missing_price"
+        elif not seller_ok:
+            stock_reason = "seller_mismatch"
+        elif not shippable_ok:
+            stock_reason = "not_shippable"
+        else:
+            stock_reason = "not_qualified"
     return {
         "asin": asin,
         "title": title,
         "price": price if qualifies else None,
         "in_stock": bool(qualifies),
+        "stock_confidence": stock_confidence,
+        "stock_reason": stock_reason,
         "shipping_text": shipping_text,
+        "availability_text": availability_text,
         "image_url": image_url,
         "seller": "pdp_watch",
         "seller_text": merchant_blob[:2000],
@@ -654,6 +720,10 @@ async def _run_pdp_watch_async(
                         merchant_blob = await _pdp_merchant_blob_async(page)
                         price = await _extract_pdp_price_async(page)
                         shipping = await _extract_pdp_shipping_async(page)
+                        availability_text = await _extract_availability_text_async(page)
+                        explicit_oos, explicit_reason = await _detect_explicit_oos_async(
+                            page, availability_text=availability_text
+                        )
                         image_url = await _extract_pdp_image_async(page)
                         if not ready_ok and not title and price is None:
                             LOGGER.warning(
@@ -677,7 +747,11 @@ async def _run_pdp_watch_async(
                             image_url=image_url,
                             merchant_blob=merchant_blob,
                             allowed=allowed,
+                            availability_text=availability_text,
+                            explicit_oos=explicit_oos,
                         )
+                        if explicit_oos and explicit_reason:
+                            row["stock_reason"] = explicit_reason
                         await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                         return idx, row
                     except NetworkAccessDenied:
