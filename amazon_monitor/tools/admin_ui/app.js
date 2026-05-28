@@ -195,7 +195,6 @@ function fillSettings(settings) {
   byId("tpl-new-product").value = templates.new_product || "";
   byId("tpl-price-drop").value = templates.price_drop || "";
   byId("tpl-back-in-stock").value = templates.back_in_stock || "";
-  byId("tpl-default").value = templates.default || "";
 }
 
 async function loadSettings() {
@@ -304,7 +303,6 @@ function collectSettingsPayload() {
       new_product: byId("tpl-new-product").value,
       price_drop: byId("tpl-price-drop").value,
       back_in_stock: byId("tpl-back-in-stock").value,
-      default: byId("tpl-default").value,
     },
   };
 }

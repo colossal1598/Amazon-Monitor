@@ -333,17 +333,22 @@ button:focus {
   transform: translateX(-22px);
 }
 
-.templates-details {
+.templates-block {
   margin-top: 14px;
   border-top: 1px solid var(--border);
   padding-top: 10px;
 }
 
-.templates-details summary {
-  cursor: pointer;
-  font-weight: 700;
-  color: var(--muted);
-  margin-bottom: 8px;
+.templates-block h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+.tpl-editor {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  line-height: 1.35;
+  min-height: 150px;
+  white-space: pre;
 }
 
 .help-page {

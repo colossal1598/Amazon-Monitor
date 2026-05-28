@@ -81,17 +81,21 @@
       <input id="wa-client-to" type="text" dir="ltr" placeholder="972...@c.us">
       <p class="hint">ריק = משתמשים בקבוצה</p>
 
-      <details class="templates-details">
-        <summary>תבניות הודעה (למתקדמים)</summary>
+      <div class="templates-block" aria-label="עריכת תבניות הודעה">
+        <h3>תבניות הודעה</h3>
+        <p class="hint">
+          שדות נתמכים: <code>{title}</code> <code>{price_text}</code> <code>{shipping}</code> <code>{affiliate_link}</code>
+        </p>
+
         <label for="tpl-new-product">מוצר חדש</label>
-        <textarea id="tpl-new-product" rows="6"></textarea>
+        <textarea id="tpl-new-product" class="tpl-editor" rows="8"></textarea>
+
         <label for="tpl-price-drop">ירידת מחיר</label>
-        <textarea id="tpl-price-drop" rows="6"></textarea>
+        <textarea id="tpl-price-drop" class="tpl-editor" rows="8"></textarea>
+
         <label for="tpl-back-in-stock">חזרה למלאי</label>
-        <textarea id="tpl-back-in-stock" rows="6"></textarea>
-        <label for="tpl-default">ברירת מחדל</label>
-        <textarea id="tpl-default" rows="6"></textarea>
-      </details>
+        <textarea id="tpl-back-in-stock" class="tpl-editor" rows="8"></textarea>
+      </div>
     </section>
 
     <section class="card">

@@ -26,6 +26,35 @@ def _pdp_row(asin: str, price: float) -> dict:
         "shipping_text": "$12.44 delivery",
         "image_url": None,
         "seller": "pdp_watch",
+        "stock_confidence": "confirmed_in",
+    }
+
+
+def _pdp_unknown_row(asin: str) -> dict:
+    return {
+        "asin": asin,
+        "title": "Pokemon Card",
+        "price": None,
+        "in_stock": False,
+        "shipping_text": "",
+        "image_url": None,
+        "seller": "pdp_watch",
+        "stock_confidence": "unknown",
+        "stock_reason": "missing_price",
+    }
+
+
+def _pdp_confirmed_oos_row(asin: str) -> dict:
+    return {
+        "asin": asin,
+        "title": "Pokemon Card",
+        "price": None,
+        "in_stock": False,
+        "shipping_text": "",
+        "image_url": None,
+        "seller": "pdp_watch",
+        "stock_confidence": "confirmed_out",
+        "stock_reason": "explicit_oos_text",
     }
 
 
@@ -150,6 +179,32 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
                 self.assertEqual(stock, 0)
                 self.assertEqual(price, 19.99)
                 self.assertEqual(last_seen, "2020-01-01T00:00:00+00:00")
+            finally:
+                se.conn.close()
+
+    def test_unknown_stock_row_preserves_db_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=1, price=19.99)
+                alerts = se.process_pdp_watch_candidates([_pdp_unknown_row("B011111111")], {"B011111111"})
+                self.assertEqual(alerts, [])
+                stock, price = _stock_and_price(se, "B011111111")
+                self.assertEqual(stock, 1)
+                self.assertEqual(price, 19.99)
+            finally:
+                se.conn.close()
+
+    def test_confirmed_oos_row_marks_oos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=1, price=19.99)
+                alerts = se.process_pdp_watch_candidates([_pdp_confirmed_oos_row("B011111111")], {"B011111111"})
+                self.assertEqual(alerts, [])
+                stock, price = _stock_and_price(se, "B011111111")
+                self.assertEqual(stock, 0)
+                self.assertEqual(price, 19.99)
             finally:
                 se.conn.close()
 
