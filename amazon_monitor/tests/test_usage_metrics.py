@@ -1,11 +1,11 @@
-"""usage_metrics summary and JSONL (Israel timestamps)."""
+"""usage_metrics summary (Israel timestamps)."""
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
-from pathlib import Path
+
 import usage_metrics
+from telemetry_store import TelemetryStore
 
 
 def test_to_summary_has_israel_timestamps() -> None:
@@ -29,13 +29,8 @@ def test_to_summary_has_israel_timestamps() -> None:
     assert summary["net_kb_est"] > 0
 
 
-def test_append_jsonl(tmp_path: Path) -> None:
-    path = tmp_path / "metrics.jsonl"
-    cfg = {"metrics_enabled": True, "metrics_jsonl_path": str(path)}
-    usage_metrics.reset(cfg)
-    summary = usage_metrics.to_summary(pdp_poll_minutes=1)
-    usage_metrics.append_jsonl(cfg, summary)
-    lines = path.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 1
-    row = json.loads(lines[0])
-    assert row["timestamp_il"] == summary["timestamp_il"]
+def test_telemetry_enabled_fallback(tmp_path) -> None:
+    store = TelemetryStore(str(tmp_path / "telemetry.db"))
+    cfg = {"metrics_enabled": True}
+    cycle_id = store.begin_cycle(cfg)
+    assert cycle_id > 0

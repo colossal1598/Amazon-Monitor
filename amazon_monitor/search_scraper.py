@@ -604,11 +604,12 @@ def _scrape_single_attempt(
     headless: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_products: list[dict[str, Any]] = []
-    debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}}
+    debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}, "scrape_outcome": {}}
     context = create_stealth_context(persistent_dir=None, headless=headless)
     cycle_started = time.monotonic()
     total_pages_cap = 1
     page_meta_first: dict[str, Any] = {}
+    cards_page1 = 0
 
     aes_started = time.monotonic()
     meter = NetMeter()
@@ -762,6 +763,9 @@ def _scrape_single_attempt(
                     _append_debug_for_row(debug_data, row)
                 all_products.append(_strip_debug(dict(row)))
 
+            if page_num == 1:
+                cards_page1 = len(seen_asins_page)
+
             if page_num >= total_pages_cap:
                 break
             if scrape_mode == "newest_front":
@@ -777,6 +781,12 @@ def _scrape_single_attempt(
         usage_metrics.record_aes_phase(time.monotonic() - aes_started, meter.total_bytes)
         close_context(context)
 
+    total_result_count = page_meta_first.get("totalResultCount")
+    debug_data["scrape_outcome"] = {
+        "navigation_ok": True,
+        "cards_found": cards_page1,
+        "total_result_count": int(total_result_count) if total_result_count is not None else None,
+    }
     deduped = _dedupe_products_by_asin(all_products)
     return deduped, debug_data
 
@@ -848,4 +858,4 @@ def scrape_search(
             raise
     if last_error:
         raise last_error
-    return [], {"selector_debug": [], "scrape_meta": {}}
+    return [], {"selector_debug": [], "scrape_meta": {}, "scrape_outcome": {"navigation_ok": False, "cards_found": 0, "total_result_count": None}}

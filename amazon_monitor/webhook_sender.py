@@ -216,3 +216,12 @@ def send_operational_error(event_type: str, error_message: str, config: dict[str
         "message": _format_message({"type": event_type, "error_message": error_message, "timestamp": now}, config),
     }
     _post_wa(config, payload)
+
+
+def send_client_message(message: str, config: dict[str, Any]) -> None:
+    """Send a plain-text message to wa_client_to (personal DM)."""
+    to = str(config.get("wa_client_to") or "").strip()
+    if not to:
+        LOGGER.warning("wa_client_to is not configured; skipping client message.")
+        return
+    _post_wa(config, {"to": to, "message": message})

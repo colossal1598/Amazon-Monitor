@@ -204,7 +204,9 @@ class StateEngine:
         *,
         source: str = "pdp_watch",
         config: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
+        telemetry: Any = None,
+        cycle_id: int = 0,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Apply PDP watch scrape rows with no global absence reconcile.
 
         Per-ASIN PDP failures are surfaced as ``_skip_update=True`` markers and intentionally
@@ -224,19 +226,23 @@ class StateEngine:
                 continue
             by_asin[asin_key] = item
         watch_upper = {a.upper() for a in watch_asins}
+        _SCRAPE_DEBUG_REASONS = frozenset({"navigation_failed", "parse_failed", "goto_failed"})
+
+        def _tel(event: str, *, asin: str | None = None, **fields: Any) -> None:
+            if telemetry and cycle_id:
+                telemetry.debug(cycle_id, event, asin=asin, **fields)
+
         with self.lock:
             for asin in sorted(watch_upper):
                 item = by_asin.get(asin)
                 if item is None:
-                    LOGGER.info("pdp_watch_no_row asin=%s (DB unchanged)", asin)
+                    _tel("pdp_watch_no_row", asin=asin)
                     skipped_update_count += 1
                     continue
                 if item.get("_skip_update"):
-                    LOGGER.info(
-                        "pdp_watch_skip_update asin=%s reason=%s (DB unchanged)",
-                        asin,
-                        item.get("skip_reason") or "unknown",
-                    )
+                    reason = str(item.get("skip_reason") or "unknown")
+                    if reason in _SCRAPE_DEBUG_REASONS:
+                        _tel("pdp_watch_skip_update", asin=asin, reason=reason)
                     skipped_update_count += 1
                     continue
                 row_source = str(item.get("source") or source)
@@ -276,25 +282,12 @@ class StateEngine:
                         alerts.append(alert)
                         self._record_alert(alert)
                         new_count += 1
-                    else:
-                        LOGGER.info(
-                            "pdp_watch_seeded_no_new_alert asin=%s in_stock=%s price=%s",
-                            asin,
-                            new_stock,
-                            new_price,
-                            extra={"channel": "debug"},
-                        )
                     continue
 
                 old_price = _as_float(row["price"])
                 old_stock = int(row["in_stock"] or 0)
                 if confidence == "unknown":
-                    LOGGER.info(
-                        "pdp_watch_unknown_stock asin=%s reason=%s (DB unchanged)",
-                        asin,
-                        reason or "unknown",
-                        extra={"channel": "debug"},
-                    )
+                    _tel("pdp_watch_unknown_stock", asin=asin, reason=reason or "unknown")
                     skipped_update_count += 1
                     continue
                 if new_stock == 0:
@@ -302,12 +295,11 @@ class StateEngine:
                     if confidence and confidence != "confirmed_out":
                         # Newer scrapers distinguish "unknown" vs explicit out-of-stock.
                         # Only explicit OOS signals may flip the DB to out-of-stock.
-                        LOGGER.info(
-                            "pdp_watch_nonqualifying_not_oos asin=%s confidence=%s reason=%s (DB unchanged)",
-                            asin,
-                            confidence,
-                            reason or "unknown",
-                            extra={"channel": "debug"},
+                        _tel(
+                            "pdp_watch_nonqualifying_not_oos",
+                            asin=asin,
+                            confidence=confidence,
+                            reason=reason or "unknown",
                         )
                         skipped_update_count += 1
                         continue
@@ -379,18 +371,16 @@ class StateEngine:
                         and new_price < old_price
                     ):
                         pct = ((old_price - new_price) / old_price) * 100
-                        LOGGER.info(
-                            "price_drop_skipped where=%s asin=%s old_price=%s new_price=%s "
-                            "pct_drop=%.2f threshold_pct=%s skip=%s last_price_alert=%s",
-                            row_source,
-                            asin,
-                            old_price,
-                            new_price,
-                            pct,
-                            self.price_drop_percent,
-                            price_decision.skip_reason,
-                            row["last_price_alert"],
-                            extra={"channel": "debug"},
+                        _tel(
+                            "price_drop_skipped",
+                            asin=asin,
+                            where=row_source,
+                            old_price=old_price,
+                            new_price=new_price,
+                            pct_drop=round(pct, 2),
+                            threshold_pct=self.price_drop_percent,
+                            skip=price_decision.skip_reason,
+                            last_price_alert=row["last_price_alert"],
                         )
                     if price_decision.emit:
                         alert = self._build_alert(
@@ -410,20 +400,17 @@ class StateEngine:
                         price_drop_count += 1
 
             missing_candidates = len(watch_upper - set(by_asin.keys()))
-            LOGGER.info(
-                "pdp_watch candidate_rows=%s watch=%s new_count=%s back_in_stock_count=%s price_drop_count=%s "
-                "skipped_update_count=%s asins_without_scrape_row=%s",
-                len(by_asin),
-                len(watch_upper),
-                new_count,
-                back_in_stock_count,
-                price_drop_count,
-                skipped_update_count,
-                missing_candidates,
-                extra={"channel": "debug"},
-            )
+            summary = {
+                "candidate_rows": len(by_asin),
+                "watch": len(watch_upper),
+                "new_count": new_count,
+                "back_in_stock_count": back_in_stock_count,
+                "price_drop_count": price_drop_count,
+                "skipped_update_count": skipped_update_count,
+                "asins_without_scrape_row": missing_candidates,
+            }
             self.conn.commit()
-        return alerts
+        return alerts, summary
 
     def process_aes_serp_mirror(
         self,
@@ -432,7 +419,9 @@ class StateEngine:
         source: str = "aes_llc",
         reconcile_absence: bool = True,
         config: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
+        telemetry: Any = None,
+        cycle_id: int = 0,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Apply AES SERP rows into dedicated mirror state.
 
         Rows are persisted in ``aes_products`` only; ``products`` remains PDP-owned.
@@ -446,6 +435,10 @@ class StateEngine:
         price_drop_count = 0
         reconciled_oos_count = 0
         seen_asins: set[str] = set()
+
+        def _tel(event: str, *, asin: str | None = None, **fields: Any) -> None:
+            if telemetry and cycle_id:
+                telemetry.debug(cycle_id, event, asin=asin, **fields)
 
         with self.lock:
             for item in candidates:
@@ -566,18 +559,16 @@ class StateEngine:
                         and new_price < old_price
                     ):
                         pct = ((old_price - new_price) / old_price) * 100
-                        LOGGER.info(
-                            "price_drop_skipped where=%s asin=%s old_price=%s new_price=%s "
-                            "pct_drop=%.2f threshold_pct=%s skip=%s last_price_alert=%s",
-                            source,
-                            asin,
-                            old_price,
-                            new_price,
-                            pct,
-                            self.price_drop_percent,
-                            price_decision.skip_reason,
-                            row["last_price_alert"],
-                            extra={"channel": "debug"},
+                        _tel(
+                            "price_drop_skipped",
+                            asin=asin,
+                            where=source,
+                            old_price=old_price,
+                            new_price=new_price,
+                            pct_drop=round(pct, 2),
+                            threshold_pct=self.price_drop_percent,
+                            skip=price_decision.skip_reason,
+                            last_price_alert=row["last_price_alert"],
                         )
                     if price_decision.emit:
                         alert = self._build_alert(
@@ -607,18 +598,15 @@ class StateEngine:
                     cursor = self.conn.execute("UPDATE aes_products SET in_stock = 0 WHERE in_stock != 0")
                 reconciled_oos_count = int(cursor.rowcount or 0)
 
-            LOGGER.info(
-                "aes_serp_mirror candidate_rows=%s inserted_count=%s new_count=%s back_in_stock_count=%s "
-                "price_drop_count=%s reconciled_oos_count=%s reconcile_absence=%s",
-                len(candidates),
-                inserted_count,
-                new_count,
-                back_in_stock_count,
-                price_drop_count,
-                reconciled_oos_count,
-                reconcile_absence,
-                extra={"channel": "debug"},
-            )
+            summary = {
+                "candidate_rows": len(candidates),
+                "inserted_count": inserted_count,
+                "new_count": new_count,
+                "back_in_stock_count": back_in_stock_count,
+                "price_drop_count": price_drop_count,
+                "reconciled_oos_count": reconciled_oos_count,
+                "reconcile_absence": reconcile_absence,
+            }
             self.conn.commit()
 
-        return alerts
+        return alerts, summary

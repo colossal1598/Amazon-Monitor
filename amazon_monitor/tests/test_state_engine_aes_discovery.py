@@ -70,7 +70,7 @@ class TestProcessAesSerpMirror(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
-                alerts = se.process_aes_serp_mirror(
+                alerts, _ = se.process_aes_serp_mirror(
                     [_aes_candidate("B099999999", in_stock=True, price=24.99)],
                     source="aes_llc",
                     reconcile_absence=False,
@@ -94,7 +94,7 @@ class TestProcessAesSerpMirror(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_aes_row(se, "B011111111", in_stock=0, price=29.99)
-                alerts = se.process_aes_serp_mirror(
+                alerts, _ = se.process_aes_serp_mirror(
                     [_aes_candidate("B011111111", in_stock=True, price=27.99)],
                     source="aes_llc",
                     reconcile_absence=False,
@@ -112,7 +112,7 @@ class TestProcessAesSerpMirror(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_aes_row(se, "B022222222", in_stock=1, price=20.00)
-                alerts = se.process_aes_serp_mirror(
+                alerts, _ = se.process_aes_serp_mirror(
                     [_aes_candidate("B022222222", in_stock=True, price=16.00)],
                     source="aes_llc",
                     reconcile_absence=False,

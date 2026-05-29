@@ -78,7 +78,7 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=19.99)
-                alerts = se.process_pdp_watch_candidates(
+                alerts, _ = se.process_pdp_watch_candidates(
                     [
                         {
                             "asin": "B011111111",
@@ -101,7 +101,7 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=19.99)
-                alerts = se.process_pdp_watch_candidates(
+                alerts, _ = se.process_pdp_watch_candidates(
                     [
                         {
                             "asin": "B011111111",
@@ -124,7 +124,7 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=19.99)
-                alerts = se.process_pdp_watch_candidates(
+                alerts, _ = se.process_pdp_watch_candidates(
                     [
                         {
                             "asin": "B011111111",
@@ -147,7 +147,7 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=19.99)
-                alerts = se.process_pdp_watch_candidates([], {"B011111111"})
+                alerts, _ = se.process_pdp_watch_candidates([], {"B011111111"})
                 self.assertEqual(alerts, [])
                 stock, price = _stock_and_price(se, "B011111111")
                 self.assertEqual(stock, 1)
@@ -160,7 +160,7 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=19.99)
-                alerts = se.process_pdp_watch_candidates(
+                alerts, _ = se.process_pdp_watch_candidates(
                     [
                         {
                             "asin": "B011111111",
@@ -187,7 +187,7 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=19.99)
-                alerts = se.process_pdp_watch_candidates([_pdp_unknown_row("B011111111")], {"B011111111"})
+                alerts, _ = se.process_pdp_watch_candidates([_pdp_unknown_row("B011111111")], {"B011111111"})
                 self.assertEqual(alerts, [])
                 stock, price = _stock_and_price(se, "B011111111")
                 self.assertEqual(stock, 1)
@@ -200,7 +200,7 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=19.99)
-                alerts = se.process_pdp_watch_candidates([_pdp_confirmed_oos_row("B011111111")], {"B011111111"})
+                alerts, _ = se.process_pdp_watch_candidates([_pdp_confirmed_oos_row("B011111111")], {"B011111111"})
                 self.assertEqual(alerts, [])
                 stock, price = _stock_and_price(se, "B011111111")
                 self.assertEqual(stock, 0)
@@ -213,7 +213,7 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=0, price=19.99)
-                alerts = se.process_pdp_watch_candidates(
+                alerts, _ = se.process_pdp_watch_candidates(
                     [
                         {
                             "asin": "B011111111",
@@ -240,7 +240,7 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=19.99)
-                alerts = se.process_pdp_watch_candidates([_pdp_row("B011111111", 21.99)], {"B011111111"})
+                alerts, _ = se.process_pdp_watch_candidates([_pdp_row("B011111111", 21.99)], {"B011111111"})
                 self.assertEqual(alerts, [])
                 stock, price, last_seen = _stock_price_seen(se, "B011111111")
                 self.assertEqual(stock, 1)
@@ -254,8 +254,8 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=0, price=19.99)
-                first = se.process_pdp_watch_candidates([_pdp_row("B011111111", 21.99)], {"B011111111"})
-                second = se.process_pdp_watch_candidates([_pdp_row("B011111111", 22.99)], {"B011111111"})
+                first, _ = se.process_pdp_watch_candidates([_pdp_row("B011111111", 21.99)], {"B011111111"})
+                second, _ = se.process_pdp_watch_candidates([_pdp_row("B011111111", 22.99)], {"B011111111"})
                 self.assertEqual([a["type"] for a in first], ["back_in_stock"])
                 self.assertEqual(second, [])
                 rows = se.conn.execute(
@@ -272,15 +272,15 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=100.0)
 
-                first = se.process_pdp_watch_candidates([_pdp_row("B011111111", 80.0)], {"B011111111"})
+                first, _ = se.process_pdp_watch_candidates([_pdp_row("B011111111", 80.0)], {"B011111111"})
                 self.assertEqual([a["type"] for a in first], ["price_drop"])
                 self.assertEqual(_stock_and_price(se, "B011111111"), (1, 80.0))
 
-                recovery = se.process_pdp_watch_candidates([_pdp_row("B011111111", 120.0)], {"B011111111"})
+                recovery, _ = se.process_pdp_watch_candidates([_pdp_row("B011111111", 120.0)], {"B011111111"})
                 self.assertEqual(recovery, [])
                 self.assertEqual(_stock_and_price(se, "B011111111"), (1, 120.0))
 
-                second = se.process_pdp_watch_candidates([_pdp_row("B011111111", 90.0)], {"B011111111"})
+                second, _ = se.process_pdp_watch_candidates([_pdp_row("B011111111", 90.0)], {"B011111111"})
                 self.assertEqual([a["type"] for a in second], ["price_drop"])
                 self.assertEqual(_stock_and_price(se, "B011111111"), (1, 90.0))
             finally:

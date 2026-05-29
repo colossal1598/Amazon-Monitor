@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
@@ -49,6 +47,8 @@ _state = _CycleState()
 def _enabled(config: dict[str, Any] | None) -> bool:
     if config is None:
         return True
+    if "telemetry_enabled" in config:
+        return bool(config.get("telemetry_enabled"))
     return bool(config.get("metrics_enabled", True))
 
 
@@ -112,19 +112,6 @@ def to_summary(*, pdp_poll_minutes: int) -> dict[str, Any]:
         "exceeds_poll_interval": (total_ms / 1000.0) > poll_sec,
         "pdp_poll_minutes": pdp_poll_minutes,
     }
-
-
-def append_jsonl(config: dict[str, Any], summary: dict[str, Any]) -> None:
-    if not _enabled(config):
-        return
-    raw = config.get("metrics_jsonl_path") or "data/metrics.jsonl"
-    path = Path(str(raw))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
-    except OSError as exc:
-        LOGGER.warning("metrics_jsonl write failed path=%s: %s", path, exc)
 
 
 def _host_matches(url: str) -> bool:

@@ -11,6 +11,7 @@ import yaml
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
+import client_alerts
 import fx_rate
 from alert_dedupe import dedupe_alerts_by_asin
 from browser_factory import init_global_rate_limiter
@@ -21,14 +22,15 @@ from pdp_scraper import scrape_pdp_watch
 from search_scraper import scrape_search
 from settings_store import list_asins, load_runtime_config, migrate_yaml_to_db
 from state_engine import StateEngine
-from webhook_sender import send_alert, send_heartbeat, send_operational_error
+from telemetry_store import TelemetryStore
+from webhook_sender import send_alert, send_heartbeat
 import usage_metrics
 
 LOGGER = logging.getLogger("monitor")
 
 
 def _kv_tail(**fields: Any) -> str:
-    """Normalized key=value tail for compact lifecycle/debug logs."""
+    """Normalized key=value tail for compact lifecycle logs."""
 
     def fmt(v: Any) -> str:
         if v is None:
@@ -52,40 +54,26 @@ def _english_head(event: str) -> str:
         "monitor_shutdown": "Monitor shutting down.",
         "cycle_start": "PDP cycle start.",
         "scrape_pdp_watch_start": "Scraping PDP watch list.",
-        "pdp_watch_counts": "PDP watch counts.",
         "pdp_cycle_done": "PDP cycle done.",
-        "cycle_metrics": "Cycle metrics.",
     }
     return heads.get(event, "Log.")
 
 
-def _log(channel: str, event: str, *, cycle_stamp: bool = False, **fields: Any) -> None:
+def log_lifecycle(event: str, *, cycle_stamp: bool = False, **fields: Any) -> None:
     head = _english_head(event)
     tail = _kv_tail(**fields)
     msg = f"{head} {tail}".strip() if tail else head
     if cycle_stamp:
         msg = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}"
-    LOGGER.info(msg, extra={"channel": channel})
+    LOGGER.info(msg, extra={"channel": "lifecycle"})
 
 
-def log_lifecycle(event: str, **fields: Any) -> None:
-    _log("lifecycle", event, **fields)
-
-
-def log_debug(event: str, **fields: Any) -> None:
-    _log("debug", event, **fields)
-
-
-class _ChannelFilter(logging.Filter):
-    def __init__(self, *, allowed_channels: set[str]):
-        super().__init__()
-        self.allowed_channels = allowed_channels
-
+class _LifecycleFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno >= logging.WARNING:
             return True
         ch = getattr(record, "channel", None)
-        return isinstance(ch, str) and ch in self.allowed_channels
+        return ch == "lifecycle"
 
 
 def load_config(path: str = "config.yaml") -> dict[str, Any]:
@@ -105,31 +93,29 @@ def setup_logging(log_dir: str) -> None:
         encoding="utf-8",
     )
     lifecycle_file.setFormatter(formatter)
-    lifecycle_file.addFilter(_ChannelFilter(allowed_channels={"lifecycle"}))
-
-    debug_file = RotatingFileHandler(
-        Path(log_dir) / "monitor.debug.log",
-        maxBytes=5_000_000,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    debug_file.setFormatter(formatter)
-    debug_file.addFilter(_ChannelFilter(allowed_channels={"debug"}))
+    lifecycle_file.addFilter(_LifecycleFilter())
 
     console = logging.StreamHandler()
     console.setFormatter(formatter)
-    console.addFilter(_ChannelFilter(allowed_channels={"lifecycle"}))
+    console.addFilter(_LifecycleFilter())
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
     root.handlers.clear()
     root.addHandler(lifecycle_file)
-    root.addHandler(debug_file)
     root.addHandler(console)
 
 
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _telemetry_db_path(bootstrap: dict[str, Any], runtime: dict[str, Any]) -> str:
+    return str(
+        bootstrap.get("telemetry_db_path")
+        or runtime.get("telemetry_db_path")
+        or "data/telemetry.db"
+    )
 
 
 def _normalize_pdp_watch_asins(raw: Any) -> list[str]:
@@ -187,6 +173,59 @@ def _blacklist_asins(config: dict[str, Any]) -> set[str]:
     return out
 
 
+def _finish_cycle(
+    telemetry: TelemetryStore,
+    cycle_id: int,
+    config: dict[str, Any],
+    poll_min: int,
+    *,
+    watch_list: list[str],
+    pdp_rows: list[dict[str, Any]],
+    skip_rows: int,
+    in_stock_rows: int,
+    captcha_rows: int,
+    captcha_aborted_rows: int,
+    sent_alerts: int,
+    aes_raw_count: int,
+    aes_pipeline_count: int,
+    aes_alert_count: int,
+    aes_outcome: dict[str, Any] | None,
+    pdp_state_summary: dict[str, Any] | None,
+    aes_state_summary: dict[str, Any] | None,
+) -> None:
+    scrape_errors, reason_counts = client_alerts.count_pdp_scrape_errors(pdp_rows)
+    metrics = usage_metrics.to_summary(pdp_poll_minutes=poll_min)
+    summary: dict[str, Any] = {
+        **metrics,
+        "pdp_watch": len(watch_list),
+        "watch_rows": len(pdp_rows),
+        "in_stock": in_stock_rows,
+        "skip_update": skip_rows,
+        "captcha_skip": captcha_rows,
+        "captcha_aborted": captcha_aborted_rows,
+        "alerts_sent": sent_alerts,
+        "aes_raw": aes_raw_count,
+        "aes_candidates": aes_pipeline_count,
+        "aes_alerts": aes_alert_count,
+        "captcha_aborted_flag": bool(captcha_aborted_rows),
+        "pdp_scrape_errors": scrape_errors,
+        "pdp_scrape_error_reasons_json": reason_counts,
+        "aes_scrape_outcome_json": aes_outcome or {},
+        "pdp_state_summary_json": pdp_state_summary or {},
+        "aes_state_summary_json": aes_state_summary or {},
+    }
+    telemetry.finish_cycle(cycle_id, summary, config)
+    client_alerts.on_cycle_timing(summary, config, telemetry, cycle_id=cycle_id)
+    client_alerts.check_scrape_degraded(
+        pdp_rows,
+        aes_outcome,
+        len(watch_list),
+        config,
+        telemetry,
+        cycle_id=cycle_id,
+    )
+
+
 def main() -> None:
     load_dotenv()
     bootstrap_config = load_config()
@@ -196,6 +235,7 @@ def main() -> None:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     migrate_yaml_to_db("config.yaml", db_path)
     startup_config = load_runtime_config(db_path)
+    telemetry = TelemetryStore(_telemetry_db_path(bootstrap_config, startup_config))
 
     state_engine = StateEngine(
         db_path=db_path,
@@ -245,18 +285,16 @@ def main() -> None:
         if scheduler.get_job("pdp_loop"):
             scheduler.resume_job("pdp_loop")
         scraping_paused["value"] = False
-        LOGGER.info("PDP job resumed")
+        LOGGER.warning("PDP job resumed")
 
-    def _emit_cycle_metrics(config: dict[str, Any], poll_min: int) -> None:
-        if not config.get("metrics_enabled", True):
-            return
-        summary = usage_metrics.to_summary(pdp_poll_minutes=poll_min)
-        log_lifecycle("cycle_metrics", **summary)
-        usage_metrics.append_jsonl(config, summary)
-
-    def aes_discovery_loop(config: dict[str, Any]) -> tuple[int, int, list[dict[str, Any]]]:
+    def aes_discovery_loop(
+        config: dict[str, Any],
+        *,
+        telemetry_store: TelemetryStore,
+        cycle_id: int,
+    ) -> tuple[int, int, list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         aes_llc_url = resolve_aes_llc_url(config)
-        aes_items, _ = scrape_search(
+        aes_items, scrape_data = scrape_search(
             aes_llc_url,
             source="aes_llc",
             scrape_mode="newest_front",
@@ -268,6 +306,9 @@ def main() -> None:
             serp_scroll_profile="minimal",
             headless=bool(config.get("playwright_headless", True)),
         )
+        aes_outcome = scrape_data.get("scrape_outcome") if isinstance(scrape_data, dict) else {}
+        if not isinstance(aes_outcome, dict):
+            aes_outcome = {}
         aes_pipeline_rows, _aes_meta = run_search_filter_pipeline(
             aes_items,
             config,
@@ -277,13 +318,15 @@ def main() -> None:
         aes_candidates = [
             row for row in aes_pipeline_rows if (row.get("asin") or "").strip().upper() not in blocked_asins
         ]
-        aes_alerts = state_engine.process_aes_serp_mirror(
+        aes_alerts, aes_summary = state_engine.process_aes_serp_mirror(
             aes_candidates,
             source="aes_llc",
             reconcile_absence=len(aes_candidates) > 0,
             config=config,
+            telemetry=telemetry_store,
+            cycle_id=cycle_id,
         )
-        return len(aes_items), len(aes_candidates), aes_alerts
+        return len(aes_items), len(aes_candidates), aes_alerts, aes_outcome, aes_summary
 
     def pdp_loop() -> None:
         if scraping_paused["value"]:
@@ -294,20 +337,28 @@ def main() -> None:
         state_engine.price_drop_percent = float(config.get("price_drop_percent", 10))
         init_global_rate_limiter(int(config.get("max_requests_per_minute", 10)))
         mark_job_started("pdp")
+        cycle_id = 0
+        poll_min = int(config.get("pdp_poll_minutes", 4))
+        watch_list: list[str] = []
+        pdp_rows: list[dict[str, Any]] = []
+        skip_rows = 0
+        in_stock_rows = 0
+        captcha_rows = 0
+        captcha_aborted_rows = 0
+        aes_outcome: dict[str, Any] = {}
+        pdp_state_summary: dict[str, Any] = {}
+        aes_state_summary: dict[str, Any] = {}
         try:
+            telemetry.maybe_prune(config)
             usage_metrics.reset(config)
-            poll_min = int(config.get("pdp_poll_minutes", 4))
+            cycle_id = telemetry.begin_cycle(config)
             watch_list = _normalize_pdp_watch_asins(config.get("pdp_watch_asins"))
-            _log(
-                "lifecycle",
+            log_lifecycle(
                 "cycle_start",
                 cycle_stamp=True,
                 watch=len(watch_list),
                 timestamp_il=usage_metrics.israel_now_iso(),
             )
-            pdp_rows: list[dict[str, Any]] = []
-            captcha_rows = 0
-            captcha_aborted_rows = 0
             sent_alerts = 0
             aes_raw_count = 0
             aes_pipeline_count = 0
@@ -344,31 +395,12 @@ def main() -> None:
                     and r.get("_skip_update")
                     and r.get("skip_reason") == "captcha_run_aborted"
                 )
-                missing_price_count = sum(
-                    1
-                    for r in pdp_rows
-                    if isinstance(r, dict)
-                    and not r.get("_skip_update")
-                    and r.get("stock_reason") == "missing_price"
-                )
-                price_wait_used_count = sum(
-                    1 for r in pdp_rows if isinstance(r, dict) and r.get("price_wait_used")
-                )
-                log_debug(
-                    "pdp_watch_counts",
-                    watch=len(watch_list),
-                    rows=len(pdp_rows),
-                    in_stock=in_stock_rows,
-                    skip_update=skip_rows,
-                    captcha_skip=captcha_rows,
-                    captcha_aborted=captcha_aborted_rows,
-                    missing_price_count=missing_price_count,
-                    price_wait_used_count=price_wait_used_count,
-                )
-                pdp_alerts = state_engine.process_pdp_watch_candidates(
+                pdp_alerts, pdp_state_summary = state_engine.process_pdp_watch_candidates(
                     pdp_rows,
                     set(watch_list),
                     config=config,
+                    telemetry=telemetry,
+                    cycle_id=cycle_id,
                 )
                 tick_alerts.extend(pdp_alerts)
             else:
@@ -382,28 +414,48 @@ def main() -> None:
                         if isinstance(r, dict) and r.get("skip_reason") == "captcha" and r.get("asin")
                     }
                 )
-                captcha_asin_label = ",".join(captcha_asins) if captcha_asins else "unknown"
                 completed_rows = sum(
                     1 for r in pdp_rows if isinstance(r, dict) and not r.get("_skip_update")
                 )
                 pause_s = max(0, int(config.get("captcha_recovery_pause_seconds", 120)))
-                msg = (
-                    f"Captcha detected on ASIN(s): {captcha_asin_label}. "
-                    f"Completed {completed_rows}/{len(watch_list)}. "
-                    f"Captcha rows={captcha_rows}. "
-                    f"Aborted rows={captcha_aborted_rows}. "
-                    f"Pausing PDP job for {pause_s}s."
+                detail = (
+                    f"asins={','.join(captcha_asins) or 'unknown'} "
+                    f"completed={completed_rows}/{len(watch_list)} "
+                    f"captcha_rows={captcha_rows} aborted={captcha_aborted_rows} pause_s={pause_s}"
                 )
+                LOGGER.warning("Captcha detected: %s", detail)
                 deduped_alerts = dedupe_alerts_by_asin(tick_alerts)
                 for alert in deduped_alerts:
                     send_alert(alert, config)
-                mark_job_error("pdp", msg)
-                send_operational_error("pdp_error", msg, config)
-                _emit_cycle_metrics(config, poll_min)
+                mark_job_error("pdp", detail)
+                client_alerts.maybe_alert("captcha", config, telemetry, cycle_id=cycle_id, detail=detail)
+                _finish_cycle(
+                    telemetry,
+                    cycle_id,
+                    config,
+                    poll_min,
+                    watch_list=watch_list,
+                    pdp_rows=pdp_rows,
+                    skip_rows=skip_rows,
+                    in_stock_rows=in_stock_rows,
+                    captcha_rows=captcha_rows,
+                    captcha_aborted_rows=captcha_aborted_rows,
+                    sent_alerts=len(deduped_alerts),
+                    aes_raw_count=0,
+                    aes_pipeline_count=0,
+                    aes_alert_count=0,
+                    aes_outcome=aes_outcome,
+                    pdp_state_summary=pdp_state_summary,
+                    aes_state_summary=aes_state_summary,
+                )
                 handle_captcha_or_network_pause(config)
                 return
 
-            aes_raw_count, aes_pipeline_count, aes_alerts = aes_discovery_loop(config)
+            aes_raw_count, aes_pipeline_count, aes_alerts, aes_outcome, aes_state_summary = aes_discovery_loop(
+                config,
+                telemetry_store=telemetry,
+                cycle_id=cycle_id,
+            )
             aes_alert_count = len(aes_alerts)
             tick_alerts.extend(aes_alerts)
             deduped_alerts = dedupe_alerts_by_asin(tick_alerts)
@@ -419,22 +471,41 @@ def main() -> None:
                 aes_candidates=aes_pipeline_count,
                 aes_alerts=aes_alert_count,
             )
-            _emit_cycle_metrics(config, poll_min)
+            _finish_cycle(
+                telemetry,
+                cycle_id,
+                config,
+                poll_min,
+                watch_list=watch_list,
+                pdp_rows=pdp_rows,
+                skip_rows=skip_rows,
+                in_stock_rows=in_stock_rows,
+                captcha_rows=captcha_rows,
+                captcha_aborted_rows=captcha_aborted_rows,
+                sent_alerts=sent_alerts,
+                aes_raw_count=aes_raw_count,
+                aes_pipeline_count=aes_pipeline_count,
+                aes_alert_count=aes_alert_count,
+                aes_outcome=aes_outcome,
+                pdp_state_summary=pdp_state_summary,
+                aes_state_summary=aes_state_summary,
+            )
             mark_job_success("pdp")
             fx_rate.bump_monitor_tick(config)
         except CaptchaBlocked:
             mark_job_error("pdp", "CaptchaBlocked")
-            send_operational_error("pdp_error", "CaptchaBlocked: PDP scraping paused then resumed", config)
+            LOGGER.warning("CaptchaBlocked during PDP cycle")
+            client_alerts.maybe_alert("captcha", config, telemetry, cycle_id=cycle_id, detail="CaptchaBlocked")
             handle_captcha_or_network_pause(config)
         except NetworkAccessDenied as exc:
             mark_job_error("pdp", f"NetworkAccessDenied: {exc}")
             LOGGER.error("Network access denied: %s", exc)
-            send_operational_error("pdp_error", str(exc), config)
+            client_alerts.maybe_alert("network_blocked", config, telemetry, cycle_id=cycle_id, detail=str(exc))
             handle_captcha_or_network_pause(config)
         except Exception as exc:
             LOGGER.exception("pdp_loop failed: %s", exc)
             mark_job_error("pdp", exc)
-            send_operational_error("pdp_error", str(exc), config)
+            client_alerts.maybe_alert("cycle_failed", config, telemetry, cycle_id=cycle_id, detail=str(exc))
 
     def heartbeat_loop() -> None:
         config = load_runtime_config(db_path)
@@ -445,7 +516,6 @@ def main() -> None:
         except Exception as exc:
             LOGGER.warning("heartbeat failed: %s", exc)
             mark_job_error("heartbeat", exc)
-            send_operational_error("heartbeat_error", str(exc), config)
 
     scheduler.add_job(
         pdp_loop,

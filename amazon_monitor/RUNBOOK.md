@@ -99,16 +99,28 @@ python tools/healthcheck.py
 
 Also check:
 
-- `logs/monitor.log` for lifecycle events.
-- `logs/monitor.debug.log` for per-cycle counts and skipped PDP rows.
+- `logs/monitor.log` for lifecycle events and warnings.
+- `data/telemetry.db` (`cycle_stats`, `debug_events`) for per-cycle timing and debug detail.
 - `data/health.json` for last `pdp` and `heartbeat` success times.
 - `pm2 list` for PM2 process status.
+
+Query examples:
+
+```sql
+-- Last cycles timing
+SELECT recorded_at_il, total_sec, pdp_sec, aes_sec, exceeds_poll_interval, alerts_sent
+FROM cycle_stats ORDER BY id DESC LIMIT 20;
+```
+
+## Client operational alerts (WhatsApp DM)
+
+When `wa_client_to` is set, short Hebrew alerts go to the client on captcha, cycle failure, network block, stall, chronic stall, or widespread scrape failures. Rate-limited (default: 30 min cooldown, max 3 per 6 h per kind). Full detail stays in `telemetry.db` and `monitor.log`.
 
 ## CAPTCHA Or Network Block
 
 Expected behavior:
 
-- Operational WhatsApp error is sent with `pdp_error`.
+- Client DM alert (captcha or network) when `wa_client_to` is configured.
 - PDP job pauses for `captcha_recovery_pause_seconds`.
 - Scheduler resumes automatically.
 

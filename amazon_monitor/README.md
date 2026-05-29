@@ -73,5 +73,9 @@ python tools/migrate_yaml_to_db.py
 
 ## Health
 
-- `logs/monitor.log`, `data/health.json`
+- `logs/monitor.log` — lifecycle milestones and warnings
+- `data/telemetry.db` — per-cycle stats and selective debug events
+- `data/health.json` — job timestamps
 - `python tools/healthcheck.py`
+
+Client operational alerts (captcha, failures, stalls) go to `wa_client_to` when configured; product alerts stay on `wa_group_id`.
