@@ -35,6 +35,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "pdp_watch_tab_jitter_seconds": [0.15, 0.55],
     "pdp_watch_scroll_delay_seconds": [0.25, 0.65],
     "pdp_title_wait_ms": 15_000,
+    "pdp_price_wait_ms": 4_000,
     "fx_enabled": True,
     "fx_refresh_every_runs": 10,
     "fx_cache_path": "data/fx_usd_ils.json",

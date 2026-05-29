@@ -24,11 +24,18 @@ LOGGER = logging.getLogger(__name__)
 # Navigation uses commit (not domcontentloaded) when heavy resources are blocked; title selectors gate scrape readiness.
 _PDP_GOTO_TIMEOUT_MS = 12_000
 _PDP_TITLE_WAIT_MS_DEFAULT = 15_000
+_PDP_PRICE_WAIT_MS_DEFAULT = 4_000
 _PDP_MAX_ATTEMPTS = 3
-_PDP_READY_SELECTORS = (
-    "#productTitle, #title, h1.a-size-large, "
-    "#corePriceDisplay_desktop_feature_div, #corePrice_feature_div, "
-    "#availability, #outOfStock, #add-to-cart-button"
+_PDP_TITLE_READY_SELECTORS = "#productTitle, #title, h1.a-size-large"
+_PDP_PRICE_WAIT_SELECTORS = (
+    "#corePrice_feature_div .a-price .a-offscreen, "
+    "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen, "
+    ".reinventPricePriceToPayMargin .a-price .a-offscreen, "
+    ".apex-pricetopay-value .a-offscreen, "
+    "#apex-pricetopay-accessibility-label, "
+    "#tp_price_block_total_price_ww .a-offscreen, "
+    "span.a-price.a-text-price .a-offscreen, "
+    "#desktop_buybox .a-price-whole, #buybox .a-price-whole"
 )
 _PDP_RETRY_BACKOFF_SECONDS = (1.5, 3.0)
 
@@ -143,6 +150,68 @@ def _extract_pdp_price(page) -> float | None:
         except Exception:
             continue
     return None
+
+
+async def _resolve_buybox_price_async(
+    page: Any,
+    max_wait_ms: int,
+    *,
+    asin: str = "",
+    skip_wait: bool = False,
+) -> tuple[float | None, bool]:
+    """Extract buy-box price; wait for price DOM only when the first extract misses."""
+    price = await _extract_pdp_price_async(page)
+    if price is not None:
+        return price, False
+    if skip_wait:
+        return None, False
+    wait_ms = max(1_000, int(max_wait_ms))
+    try:
+        await page.wait_for_selector(
+            _PDP_PRICE_WAIT_SELECTORS,
+            state="attached",
+            timeout=wait_ms,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "PDP price wait: selector not attached asin=%s within %sms: %s",
+            asin or "?",
+            wait_ms,
+            exc,
+            extra={"channel": "debug"},
+        )
+    price = await _extract_pdp_price_async(page)
+    if asin:
+        LOGGER.info(
+            "PDP price wait used asin=%s price_found=%s",
+            asin,
+            price is not None,
+            extra={"channel": "debug"},
+        )
+    return price, True
+
+
+async def _resolve_title_async(page: Any, max_wait_ms: int) -> tuple[str, bool]:
+    """Extract title after price; wait for title DOM only when the first extract is empty."""
+    title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
+    if title:
+        return title, False
+    wait_ms = max(1_000, int(max_wait_ms))
+    try:
+        await page.wait_for_selector(
+            _PDP_TITLE_READY_SELECTORS,
+            state="attached",
+            timeout=wait_ms,
+        )
+    except Exception as exc:
+        LOGGER.warning(
+            "PDP title wait: selector not attached within %sms: %s",
+            wait_ms,
+            exc,
+            extra={"channel": "debug"},
+        )
+    title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
+    return title, True
 
 
 # Read the product’s visible title from the page so alerts show a clean name instead of a generic page title.
@@ -537,6 +606,7 @@ async def _run_pdp_watch_async(
     max_attempts: int,
     headless: bool = True,
     pdp_title_wait_ms: int = _PDP_TITLE_WAIT_MS_DEFAULT,
+    pdp_price_wait_ms: int = _PDP_PRICE_WAIT_MS_DEFAULT,
 ) -> list[dict[str, Any]]:
     from playwright.async_api import async_playwright
 
@@ -548,14 +618,17 @@ async def _run_pdp_watch_async(
     stealth_ctx_applied = False
     stealth_page_fallback_warned = False
     title_wait_ms = max(3_000, int(pdp_title_wait_ms))
+    price_wait_ms = max(1_000, int(pdp_price_wait_ms))
     LOGGER.info(
-        "pdp_watch starting concurrent_tabs=%s jitter=%.2f-%.2f asins=%s headless=%s title_wait_ms=%s",
+        "pdp_watch starting concurrent_tabs=%s jitter=%.2f-%.2f asins=%s headless=%s "
+        "title_wait_ms=%s price_wait_ms=%s",
         max_concurrent,
         jitter_range[0],
         jitter_range[1],
         len(normalized),
         headless,
         title_wait_ms,
+        price_wait_ms,
     )
 
     async with async_playwright() as pw:
@@ -685,11 +758,10 @@ async def _run_pdp_watch_async(
                             return idx, _pdp_skip_row(asin, last_reason)
 
                         LOGGER.info(
-                            "PDP navigation committed asin=%s attempt=%s/%s; waiting for product DOM (attached, %sms)",
+                            "PDP navigation committed asin=%s attempt=%s/%s; resolving price then title",
                             asin,
                             attempt,
                             max_attempts,
-                            title_wait_ms,
                         )
                         title_l = (await page.title() or "").lower()
                         cap_el = await page.query_selector("form[action*='validateCaptcha']")
@@ -699,46 +771,30 @@ async def _run_pdp_watch_async(
                             await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                             return idx, _pdp_skip_row(asin, "captcha")
 
-                        ready_ok = False
-                        try:
-                            await page.wait_for_selector(
-                                _PDP_READY_SELECTORS,
-                                state="attached",
-                                timeout=title_wait_ms,
-                            )
-                            ready_ok = True
-                            LOGGER.info("PDP ready asin=%s (product DOM attached)", asin)
-                        except Exception as exc:
-                            LOGGER.warning(
-                                "PDP ready check: product DOM not attached asin=%s within %sms: %s",
-                                asin,
-                                title_wait_ms,
-                                exc,
-                            )
-
-                        title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
-                        merchant_blob = await _pdp_merchant_blob_async(page)
-                        price = await _extract_pdp_price_async(page)
-                        shipping = await _extract_pdp_shipping_async(page)
                         availability_text = await _extract_availability_text_async(page)
                         explicit_oos, explicit_reason = await _detect_explicit_oos_async(
                             page, availability_text=availability_text
                         )
+                        price_wait_used = False
+                        if explicit_oos:
+                            price = None
+                        else:
+                            price, price_wait_used = await _resolve_buybox_price_async(
+                                page,
+                                price_wait_ms,
+                                asin=asin,
+                            )
+                        title, _title_wait_used = await _resolve_title_async(page, title_wait_ms)
+                        merchant_blob = await _pdp_merchant_blob_async(page)
+                        shipping = await _extract_pdp_shipping_async(page)
                         image_url = await _extract_pdp_image_async(page)
-                        if not ready_ok and not title and price is None:
+                        if not explicit_oos and not title and price is None:
                             LOGGER.warning(
-                                "PDP scrape empty asin=%s after ready miss (skipping update)",
+                                "PDP scrape empty asin=%s after price/title resolve (skipping update)",
                                 asin,
                             )
                             await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                             return idx, _pdp_skip_row(asin, "parse_failed")
-                        if not ready_ok and (title or price is not None):
-                            LOGGER.info(
-                                "PDP ready check missed asin=%s but extracted title=%r price=%s",
-                                asin,
-                                (title or "")[:60],
-                                price,
-                            )
                         row = _pdp_row(
                             asin,
                             title=title,
@@ -752,6 +808,7 @@ async def _run_pdp_watch_async(
                         )
                         if explicit_oos and explicit_reason:
                             row["stock_reason"] = explicit_reason
+                        row["price_wait_used"] = price_wait_used
                         await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                         return idx, row
                     except NetworkAccessDenied:
@@ -813,6 +870,7 @@ async def scrape_pdp_watch_async(
     max_attempts: int = _PDP_MAX_ATTEMPTS,
     headless: bool = True,
     pdp_title_wait_ms: int = _PDP_TITLE_WAIT_MS_DEFAULT,
+    pdp_price_wait_ms: int = _PDP_PRICE_WAIT_MS_DEFAULT,
 ) -> list[dict[str, Any]]:
     """Async version of scrape_pdp_watch for callers that already run an event loop."""
     normalized: list[str] = []
@@ -843,6 +901,7 @@ async def scrape_pdp_watch_async(
         max_attempts=max(1, int(max_attempts)),
         headless=headless,
         pdp_title_wait_ms=pdp_title_wait_ms,
+        pdp_price_wait_ms=pdp_price_wait_ms,
     )
 
 
@@ -858,6 +917,7 @@ def scrape_pdp_watch(
     max_attempts: int = _PDP_MAX_ATTEMPTS,
     headless: bool = True,
     pdp_title_wait_ms: int = _PDP_TITLE_WAIT_MS_DEFAULT,
+    pdp_price_wait_ms: int = _PDP_PRICE_WAIT_MS_DEFAULT,
 ) -> list[dict[str, Any]]:
     """Visit each watch ASIN on amazon.com PDP; return exactly one dict per unique valid ASIN (order preserved).
 
@@ -905,5 +965,6 @@ def scrape_pdp_watch(
             max_attempts=max(1, int(max_attempts)),
             headless=headless,
             pdp_title_wait_ms=pdp_title_wait_ms,
+            pdp_price_wait_ms=pdp_price_wait_ms,
         )
     )

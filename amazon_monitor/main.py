@@ -328,6 +328,7 @@ def main() -> None:
                     max_attempts=int(config.get("pdp_watch_max_attempts", 3)),
                     headless=bool(config.get("playwright_headless", True)),
                     pdp_title_wait_ms=int(config.get("pdp_title_wait_ms", 15_000)),
+                    pdp_price_wait_ms=int(config.get("pdp_price_wait_ms", 4_000)),
                 )
                 skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
                 in_stock_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("in_stock"))
@@ -343,6 +344,16 @@ def main() -> None:
                     and r.get("_skip_update")
                     and r.get("skip_reason") == "captcha_run_aborted"
                 )
+                missing_price_count = sum(
+                    1
+                    for r in pdp_rows
+                    if isinstance(r, dict)
+                    and not r.get("_skip_update")
+                    and r.get("stock_reason") == "missing_price"
+                )
+                price_wait_used_count = sum(
+                    1 for r in pdp_rows if isinstance(r, dict) and r.get("price_wait_used")
+                )
                 log_debug(
                     "pdp_watch_counts",
                     watch=len(watch_list),
@@ -351,6 +362,8 @@ def main() -> None:
                     skip_update=skip_rows,
                     captcha_skip=captcha_rows,
                     captcha_aborted=captcha_aborted_rows,
+                    missing_price_count=missing_price_count,
+                    price_wait_used_count=price_wait_used_count,
                 )
                 pdp_alerts = state_engine.process_pdp_watch_candidates(
                     pdp_rows,
