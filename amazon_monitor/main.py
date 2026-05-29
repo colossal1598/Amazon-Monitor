@@ -29,23 +29,28 @@ import usage_metrics
 LOGGER = logging.getLogger("monitor")
 
 
+def _fmt_kv_value(v: Any) -> str:
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s == "":
+        return '""'
+    needs_quote = any(ch.isspace() for ch in s) or any(ch in s for ch in ['"', "=", "\\"])
+    return json.dumps(s, ensure_ascii=False) if needs_quote else s
+
+
 def _kv_tail(**fields: Any) -> str:
-    """Normalized key=value tail for compact lifecycle logs."""
+    """Normalized key=value tail for compact lifecycle logs (sorted keys)."""
+    return " ".join(f"{k}={_fmt_kv_value(v)}" for k, v in sorted(fields.items()) if k)
 
-    def fmt(v: Any) -> str:
-        if v is None:
-            return "null"
-        if isinstance(v, bool):
-            return "true" if v else "false"
-        if isinstance(v, (int, float)):
-            return str(v)
-        s = str(v)
-        if s == "":
-            return '""'
-        needs_quote = any(ch.isspace() for ch in s) or any(ch in s for ch in ['"', "=", "\\"])
-        return json.dumps(s, ensure_ascii=False) if needs_quote else s
 
-    return " ".join(f"{k}={fmt(v)}" for k, v in sorted(fields.items()) if k)
+def _ordered_kv_tail(pairs: list[tuple[str, Any]]) -> str:
+    """key=value tail with explicit field order."""
+    return " ".join(f"{k}={_fmt_kv_value(v)}" for k, v in pairs if k)
 
 
 def _english_head(event: str) -> str:
@@ -59,9 +64,18 @@ def _english_head(event: str) -> str:
     return heads.get(event, "Log.")
 
 
-def log_lifecycle(event: str, *, cycle_stamp: bool = False, **fields: Any) -> None:
+def log_lifecycle(
+    event: str,
+    *,
+    cycle_stamp: bool = False,
+    ordered: list[tuple[str, Any]] | None = None,
+    **fields: Any,
+) -> None:
     head = _english_head(event)
-    tail = _kv_tail(**fields)
+    if ordered is not None:
+        tail = _ordered_kv_tail(ordered)
+    else:
+        tail = _kv_tail(**fields)
     msg = f"{head} {tail}".strip() if tail else head
     if cycle_stamp:
         msg = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}"
@@ -357,7 +371,6 @@ def main() -> None:
                 "cycle_start",
                 cycle_stamp=True,
                 watch=len(watch_list),
-                timestamp_il=usage_metrics.israel_now_iso(),
             )
             sent_alerts = 0
             aes_raw_count = 0
@@ -462,14 +475,17 @@ def main() -> None:
             for alert in deduped_alerts:
                 send_alert(alert, config)
             sent_alerts = len(deduped_alerts)
+            cycle_timing = usage_metrics.to_summary(pdp_poll_minutes=poll_min)
             log_lifecycle(
                 "pdp_cycle_done",
-                alerts=sent_alerts,
-                captcha_aborted=bool(captcha_rows),
-                pdp_watch=len(watch_list),
-                aes_raw=aes_raw_count,
-                aes_candidates=aes_pipeline_count,
-                aes_alerts=aes_alert_count,
+                cycle_stamp=True,
+                ordered=[
+                    ("PDP", len(watch_list)),
+                    ("AES", aes_pipeline_count),
+                    ("Alerts", sent_alerts),
+                    ("captcha", bool(captcha_rows)),
+                    ("total_sec", cycle_timing["total_sec"]),
+                ],
             )
             _finish_cycle(
                 telemetry,
