@@ -27,7 +27,19 @@ _PDP_TITLE_WAIT_MS_DEFAULT = 15_000
 _PDP_PRICE_WAIT_MS_DEFAULT = 4_000
 _PDP_MAX_ATTEMPTS = 3
 _PDP_TITLE_READY_SELECTORS = "#productTitle, #title, h1.a-size-large"
-_PDP_PRICE_WAIT_SELECTORS = (
+# Post-nav gate: any of these means the PDP shell is far enough along to scrape.
+_PDP_DOM_GATE_SELECTORS = (
+    "#productTitle, #title, h1.a-size-large, "
+    "#desktop_buybox, #buybox, "
+    "#corePrice_feature_div, #corePriceDisplay_desktop_feature_div, "
+    "#availability, #outOfStock"
+)
+# Buy-box containers (attach before leaf price nodes hydrate).
+_PDP_PRICE_CONTAINER_SELECTORS = (
+    "#corePrice_feature_div, #corePriceDisplay_desktop_feature_div, "
+    "#desktop_buybox, #buybox"
+)
+_PDP_PRICE_LEAF_SELECTORS = (
     "#corePrice_feature_div .a-price .a-offscreen, "
     "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen, "
     ".reinventPricePriceToPayMargin .a-price .a-offscreen, "
@@ -37,6 +49,8 @@ _PDP_PRICE_WAIT_SELECTORS = (
     "span.a-price.a-text-price .a-offscreen, "
     "#desktop_buybox .a-price-whole, #buybox .a-price-whole"
 )
+_PDP_PRICE_WAIT_SELECTORS = f"{_PDP_PRICE_CONTAINER_SELECTORS}, {_PDP_PRICE_LEAF_SELECTORS}"
+_PDP_DOM_GATE_MS_DEFAULT = 5_000
 _PDP_RETRY_BACKOFF_SECONDS = (1.5, 3.0)
 
 _PRICE_RE = re.compile(r"\$?\s*([0-9][0-9,]*)(?:\.(\d{2}))?")
@@ -152,6 +166,37 @@ def _extract_pdp_price(page) -> float | None:
     return None
 
 
+async def _await_pdp_dom_gate_async(page: Any, timeout_ms: int) -> bool:
+    """Best-effort wait for PDP shell after navigation commit."""
+    wait_ms = max(1_000, int(timeout_ms))
+    try:
+        await page.wait_for_selector(
+            _PDP_DOM_GATE_SELECTORS,
+            state="attached",
+            timeout=wait_ms,
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def _pdp_buybox_present_async(page: Any) -> bool:
+    """True when a buy-box or core price region exists (price may still be hydrating)."""
+    for sel in (
+        "#desktop_buybox",
+        "#buybox",
+        "#corePrice_feature_div",
+        "#corePriceDisplay_desktop_feature_div",
+        "#add-to-cart-button",
+    ):
+        try:
+            if await page.query_selector(sel):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def _resolve_buybox_price_async(
     page: Any,
     max_wait_ms: int,
@@ -165,6 +210,13 @@ async def _resolve_buybox_price_async(
         return price, False
     if skip_wait:
         return None, False
+    if not await _pdp_buybox_present_async(page):
+        LOGGER.info(
+            "PDP price wait skipped asin=%s (no buybox on page)",
+            asin or "?",
+            extra={"channel": "debug"},
+        )
+        return None, False
     wait_ms = max(1_000, int(max_wait_ms))
     try:
         await page.wait_for_selector(
@@ -172,12 +224,11 @@ async def _resolve_buybox_price_async(
             state="attached",
             timeout=wait_ms,
         )
-    except Exception as exc:
-        LOGGER.warning(
-            "PDP price wait: selector not attached asin=%s within %sms: %s",
+    except Exception:
+        LOGGER.info(
+            "PDP price wait timeout asin=%s ms=%s",
             asin or "?",
             wait_ms,
-            exc,
             extra={"channel": "debug"},
         )
     price = await _extract_pdp_price_async(page)
@@ -203,11 +254,10 @@ async def _resolve_title_async(page: Any, max_wait_ms: int) -> tuple[str, bool]:
             state="attached",
             timeout=wait_ms,
         )
-    except Exception as exc:
-        LOGGER.warning(
-            "PDP title wait: selector not attached within %sms: %s",
+    except Exception:
+        LOGGER.info(
+            "PDP title wait timeout ms=%s",
             wait_ms,
-            exc,
             extra={"channel": "debug"},
         )
     title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
@@ -619,6 +669,7 @@ async def _run_pdp_watch_async(
     stealth_page_fallback_warned = False
     title_wait_ms = max(3_000, int(pdp_title_wait_ms))
     price_wait_ms = max(1_000, int(pdp_price_wait_ms))
+    dom_gate_ms = min(title_wait_ms, _PDP_DOM_GATE_MS_DEFAULT)
     LOGGER.info(
         "pdp_watch starting concurrent_tabs=%s jitter=%.2f-%.2f asins=%s headless=%s "
         "title_wait_ms=%s price_wait_ms=%s",
@@ -770,6 +821,15 @@ async def _run_pdp_watch_async(
                             captcha_abort.set()
                             await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                             return idx, _pdp_skip_row(asin, "captcha")
+
+                        dom_ok = await _await_pdp_dom_gate_async(page, dom_gate_ms)
+                        if not dom_ok:
+                            LOGGER.info(
+                                "PDP dom gate miss asin=%s within %sms (continuing)",
+                                asin,
+                                dom_gate_ms,
+                                extra={"channel": "debug"},
+                            )
 
                         availability_text = await _extract_availability_text_async(page)
                         explicit_oos, explicit_reason = await _detect_explicit_oos_async(
