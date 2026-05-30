@@ -34,21 +34,27 @@ _PDP_DOM_GATE_SELECTORS = (
     "#corePrice_feature_div, #corePriceDisplay_desktop_feature_div, "
     "#availability, #outOfStock"
 )
+# Pay-price extraction only (tight; verified against tests/fixtures/pdp HTML).
+_PDP_PRICE_PAY_SELECTORS = (
+    "#qualifiedBuybox .apex-pricetopay-value .a-offscreen",
+    "#corePrice_feature_div .apex-pricetopay-value .a-offscreen",
+    "#corePriceDisplay_desktop_feature_div #apex-pricetopay-accessibility-label",
+    "#tp_price_block_total_price_ww .a-offscreen",
+)
 # Buy-box containers (attach before leaf price nodes hydrate).
 _PDP_PRICE_CONTAINER_SELECTORS = (
     "#corePrice_feature_div, #corePriceDisplay_desktop_feature_div, "
-    "#desktop_buybox, #buybox, #tabular-buybox, #qualifiedBuybox"
+    "#desktop_buybox, #buybox, #qualifiedBuybox"
 )
+# Broad leaf markers for wait-for-hydration only (NOT used for pay-price extraction).
 _PDP_PRICE_LEAF_SELECTORS = (
-    "#corePrice_feature_div .a-price .a-offscreen, "
-    "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen, "
-    ".reinventPricePriceToPayMargin .a-price .a-offscreen, "
-    ".apex-pricetopay-value .a-offscreen, "
+    ".apex-pricetopay-value, "
+    ".reinventPricePriceToPayMargin, "
     "#apex-pricetopay-accessibility-label, "
-    "#tp_price_block_total_price_ww .a-offscreen, "
-    "span.a-price.a-text-price .a-offscreen, "
-    "#desktop_buybox .a-price-whole, #buybox .a-price-whole, "
-    ".a-price .a-offscreen"
+    "#corePrice_feature_div .a-price, "
+    "#corePriceDisplay_desktop_feature_div .a-price, "
+    "#tp_price_block_total_price_ww, "
+    "#qualifiedBuybox .a-price"
 )
 _PDP_PRICE_WAIT_SELECTORS = f"{_PDP_PRICE_CONTAINER_SELECTORS}, {_PDP_PRICE_LEAF_SELECTORS}"
 _PDP_DOM_GATE_MS_DEFAULT = 5_000
@@ -130,16 +136,8 @@ def _parse_price_text(text: str) -> float | None:
 
 # Try a few known Amazon page spots to find the buy-box price and return quickly when the page doesn’t have one.
 def _extract_pdp_price(page) -> float | None:
-    """Use query_selector only (no locator auto-wait) so missing buy box returns fast."""
-    for sel in (
-        "#corePrice_feature_div .a-price .a-offscreen",
-        "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
-        ".reinventPricePriceToPayMargin .a-price .a-offscreen",
-        ".apex-pricetopay-value .a-offscreen",
-        "#apex-pricetopay-accessibility-label",
-        "#tp_price_block_total_price_ww .a-offscreen",
-        "span.a-price.a-text-price .a-offscreen",
-    ):
+    """Use query_selector only (no locator auto-wait) so missing buy box returns fast. Unused in prod."""
+    for sel in _PDP_PRICE_PAY_SELECTORS:
         try:
             el = page.query_selector(sel)
             if not el:
@@ -150,18 +148,22 @@ def _extract_pdp_price(page) -> float | None:
         p = _parse_price_text(raw)
         if p is not None:
             return p
-    for root_sel in ("#desktop_buybox", "#buybox", "#offerDisplayFeature_feature_div", "body"):
+    for root_sel in ("#qualifiedBuybox", "#corePriceDisplay_desktop_feature_div"):
         try:
             root = page.query_selector(root_sel)
             if not root:
                 continue
-            whole = root.query_selector(".a-price-whole")
-            frac = root.query_selector(".a-price-fraction")
-            if whole and frac:
+            pay = root.query_selector(".apex-pricetopay-value")
+            if not pay:
+                continue
+            whole = pay.query_selector(".a-price-whole")
+            frac = pay.query_selector(".a-price-fraction")
+            if whole:
                 w = (whole.inner_text() or "").strip().replace(",", "").replace(".", "")
-                f = (frac.inner_text() or "").strip()
-                if w.isdigit() and f.isdigit():
-                    return float(f"{w}.{f}")
+                f = (frac.inner_text() or "").strip() if frac else ""
+                if w.isdigit():
+                    cents = f if f.isdigit() else "00"
+                    return float(f"{w}.{cents}")
         except Exception:
             continue
     return None
@@ -357,11 +359,9 @@ def _extract_pdp_shipping(page) -> str:
 
     for sel in (
         "[id^='mir-layout-DELIVERY_BLOCK-slot-']",
-        "#deliveryBlockMessage",
-        "#mir-layout-DELIVERY_BLOCK-slot-PRIMARYDELIVERYBLOCKLARGE",
         "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",
-        "#ddmDeliveryMessage",
-        "[data-cy='delivery-recipe']",
+        "#mir-layout-DELIVERY_BLOCK-slot-NO_PROMISE_UPSELL_MESSAGE",
+        "#deliveryBlockMessage",
     ):
         try:
             el = page.query_selector(sel)
@@ -545,21 +545,7 @@ async def _read_text_async(el: Any) -> str:
 
 
 async def _extract_pdp_price_async(page: Any) -> float | None:
-    for sel in (
-        "#corePrice_feature_div .a-price .a-offscreen",
-        "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
-        ".reinventPricePriceToPayMargin .a-price .a-offscreen",
-        ".apex-pricetopay-value .a-offscreen",
-        "#apex-pricetopay-accessibility-label",
-        "#tp_price_block_total_price_ww .a-offscreen",
-        "span.a-price.a-text-price .a-offscreen",
-        "#tabular-buybox .a-price .a-offscreen",
-        "#qualifiedBuybox .a-price .a-offscreen",
-        "#priceblock_ourprice",
-        "#priceblock_dealprice",
-        "#price",
-        ".a-price .a-offscreen",
-    ):
+    for sel in _PDP_PRICE_PAY_SELECTORS:
         try:
             el = await page.query_selector(sel)
             if not el:
@@ -570,21 +556,16 @@ async def _extract_pdp_price_async(page: Any) -> float | None:
         p = _parse_price_text(raw)
         if p is not None:
             return p
-    for root_sel in (
-        "#desktop_buybox",
-        "#buybox",
-        "#tabular-buybox",
-        "#qualifiedBuybox",
-        "#corePriceDisplay_desktop_feature_div",
-        "#offerDisplayFeature_feature_div",
-        "body",
-    ):
+    for root_sel in ("#qualifiedBuybox", "#corePriceDisplay_desktop_feature_div"):
         try:
             root = await page.query_selector(root_sel)
             if not root:
                 continue
-            whole = await root.query_selector(".a-price-whole")
-            frac = await root.query_selector(".a-price-fraction")
+            pay = await root.query_selector(".apex-pricetopay-value")
+            if not pay:
+                continue
+            whole = await pay.query_selector(".a-price-whole")
+            frac = await pay.query_selector(".a-price-fraction")
             if whole:
                 w = (await _read_text_async(whole)).replace(",", "").replace(".", "")
                 f = (await _read_text_async(frac)) if frac else ""
@@ -645,11 +626,9 @@ async def _extract_pdp_shipping_async(page: Any) -> str:
 
     for sel in (
         "[id^='mir-layout-DELIVERY_BLOCK-slot-']",
-        "#deliveryBlockMessage",
-        "#mir-layout-DELIVERY_BLOCK-slot-PRIMARYDELIVERYBLOCKLARGE",
         "#mir-layout-DELIVERY_BLOCK-slot-PRIMARY_DELIVERY_MESSAGE_LARGE",
-        "#ddmDeliveryMessage",
-        "[data-cy='delivery-recipe']",
+        "#mir-layout-DELIVERY_BLOCK-slot-NO_PROMISE_UPSELL_MESSAGE",
+        "#deliveryBlockMessage",
     ):
         try:
             el = await page.query_selector(sel)

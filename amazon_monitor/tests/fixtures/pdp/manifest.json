@@ -1,0 +1,36 @@
+{
+  "shipperseller.html": {
+    "pay_price": 31.99,
+    "delivery_contains": ["$18.59", "delivery"]
+  },
+  "chaos-rising.html": {
+    "pay_price": 58.86,
+    "delivery_contains": ["FREE delivery", "Israel"]
+  },
+  "perfect-order-etb.html": {
+    "pay_price": 81.62,
+    "delivery_contains": ["FREE delivery to Israel"]
+  },
+  "poke-ball-tins.html": {
+    "pay_price": 29.95,
+    "delivery_contains": ["$18.59", "delivery"]
+  },
+  "prismatic-evolutions.html": {
+    "pay_price": 100.98,
+    "delivery_contains": ["$18", "delivery"]
+  },
+  "nihil-zero.html": {
+    "pay_price": 90.0,
+    "list_price": 99.99,
+    "delivery_contains": ["$18.54", "delivery"]
+  },
+  "aec-discount.html": {
+    "pay_price": 264.95,
+    "list_price": 279.99,
+    "delivery_contains": ["June 4 - 11"]
+  },
+  "aes-llc.html": {
+    "pay_price": 69.99,
+    "delivery_contains": ["June 4 - 11"]
+  }
+}
