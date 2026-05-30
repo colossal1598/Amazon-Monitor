@@ -23,8 +23,8 @@ LOGGER = logging.getLogger(__name__)
 
 # Navigation uses commit (not domcontentloaded) when heavy resources are blocked; title selectors gate scrape readiness.
 _PDP_GOTO_TIMEOUT_MS = 12_000
-_PDP_TITLE_WAIT_MS_DEFAULT = 15_000
-_PDP_PRICE_WAIT_MS_DEFAULT = 4_000
+_PDP_TITLE_WAIT_MS_DEFAULT = 6_000
+_PDP_PRICE_WAIT_MS_DEFAULT = 2_000
 _PDP_MAX_ATTEMPTS = 3
 _PDP_TITLE_READY_SELECTORS = "#productTitle, #title, h1.a-size-large"
 # Post-nav gate: any of these means the PDP shell is far enough along to scrape.
@@ -57,7 +57,7 @@ _PDP_PRICE_LEAF_SELECTORS = (
     "#qualifiedBuybox .a-price"
 )
 _PDP_PRICE_WAIT_SELECTORS = f"{_PDP_PRICE_CONTAINER_SELECTORS}, {_PDP_PRICE_LEAF_SELECTORS}"
-_PDP_DOM_GATE_MS_DEFAULT = 5_000
+_PDP_DOM_GATE_MS_DEFAULT = 3_000
 _PDP_RETRY_BACKOFF_SECONDS = (1.5, 3.0)
 
 _PRICE_RE = re.compile(r"\$?\s*([0-9][0-9,]*)(?:\.(\d{2}))?")
@@ -183,16 +183,21 @@ async def _await_pdp_dom_gate_async(page: Any, timeout_ms: int) -> bool:
         return False
 
 
-_PDP_BUYBOX_PRESENT_SELECTORS = (
+# Tight gate for price-wait decision (buybox-scoped only; avoids sponsored/carousel .a-price).
+_PDP_BUYBOX_WAIT_GATE_SELECTORS = (
+    "#qualifiedBuybox",
     "#desktop_buybox",
     "#buybox",
-    "#tabular-buybox",
-    "#qualifiedBuybox",
-    "#unqualifiedBuyBox",
     "#corePrice_feature_div",
     "#corePriceDisplay_desktop_feature_div",
     "#add-to-cart-button",
     "#buy-now-button",
+)
+# Broader markers for missing-price diagnostics only.
+_PDP_BUYBOX_PRESENT_SELECTORS = (
+    *_PDP_BUYBOX_WAIT_GATE_SELECTORS,
+    "#tabular-buybox",
+    "#unqualifiedBuyBox",
     "#priceblock_ourprice",
     "#priceblock_dealprice",
     ".a-price",
@@ -200,8 +205,8 @@ _PDP_BUYBOX_PRESENT_SELECTORS = (
 
 
 async def _pdp_buybox_present_async(page: Any) -> bool:
-    """True when a buy-box or any price region exists (price may still be hydrating)."""
-    for sel in _PDP_BUYBOX_PRESENT_SELECTORS:
+    """True when a buy-box region exists (price may still be hydrating)."""
+    for sel in _PDP_BUYBOX_WAIT_GATE_SELECTORS:
         try:
             if await page.query_selector(sel):
                 return True
@@ -885,9 +890,16 @@ async def _run_pdp_watch_async(
                                 asin=asin,
                             )
                         title, _title_wait_used = await _resolve_title_async(page, title_wait_ms)
-                        merchant_blob = await _pdp_merchant_blob_async(page)
-                        shipping = await _extract_pdp_shipping_async(page)
-                        image_url = await _extract_pdp_image_async(page)
+                        if explicit_oos:
+                            merchant_blob = ""
+                            shipping = ""
+                            image_url = None
+                        else:
+                            merchant_blob, shipping, image_url = await asyncio.gather(
+                                _pdp_merchant_blob_async(page),
+                                _extract_pdp_shipping_async(page),
+                                _extract_pdp_image_async(page),
+                            )
                         if not explicit_oos and not title and price is None:
                             LOGGER.warning(
                                 "PDP scrape empty asin=%s after price/title resolve (skipping update)",

@@ -11,3 +11,5 @@ config.yaml
 data/telemetry.db
 
 _archive_amazon_com_search/
+
+tests/*
