@@ -9,6 +9,7 @@ import os
 import random
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 import browser_factory
@@ -315,18 +316,11 @@ async def _resolve_buybox_price_async(
     asin: str = "",
     skip_wait: bool = False,
 ) -> tuple[float | None, bool]:
-    """Extract buy-box price; wait for price DOM only when the first extract misses."""
+    """Extract buy-box price; wait for buybox-scoped price DOM when the first extract misses."""
     price = await _extract_pdp_price_async(page)
     if price is not None:
         return price, False
     if skip_wait:
-        return None, False
-    if not await _pdp_buybox_present_async(page):
-        LOGGER.info(
-            "PDP price wait skipped asin=%s (no buybox on page)",
-            asin or "?",
-            extra={"channel": "debug"},
-        )
         return None, False
     wait_ms = max(1_000, int(max_wait_ms))
     try:
@@ -361,9 +355,46 @@ async def _resolve_buybox_price_async(
     return price, True
 
 
+def _product_title_from_page_title(raw: str) -> str:
+    """Strip generic Amazon document titles; keep product name when present."""
+    title = (raw or "").strip()
+    if not title:
+        return ""
+    lower = title.lower()
+    if lower in ("amazon.com", "amazon.com: online shopping", "www.amazon.com"):
+        return ""
+    for sep in (" : Amazon.com", " | Amazon", " - Amazon"):
+        if sep in title:
+            title = title.split(sep, 1)[0].strip()
+    if title.lower().startswith("amazon.com"):
+        return ""
+    return title
+
+
+async def _pdp_page_debug_snapshot_async(page: Any) -> dict[str, Any]:
+    """Lightweight page state for empty-scrape diagnostics."""
+    snapshot: dict[str, Any] = {"url": "", "doc_title": "", "html_len": 0}
+    try:
+        snapshot["url"] = page.url or ""
+    except Exception:
+        pass
+    try:
+        snapshot["doc_title"] = (await page.title() or "")[:120]
+    except Exception:
+        pass
+    try:
+        html = await page.content()
+        snapshot["html_len"] = len(html or "")
+    except Exception:
+        pass
+    return snapshot
+
+
 async def _resolve_title_async(page: Any, max_wait_ms: int) -> tuple[str, bool]:
-    """Extract title after price; wait for title DOM only when the first extract is empty."""
-    title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
+    """Extract title before price; wait for title DOM only when the first extract is empty."""
+    title = await _extract_pdp_title_async(page) or _product_title_from_page_title(
+        await page.title() or ""
+    )
     if title:
         return title, False
     wait_ms = max(1_000, int(max_wait_ms))
@@ -379,7 +410,9 @@ async def _resolve_title_async(page: Any, max_wait_ms: int) -> tuple[str, bool]:
             wait_ms,
             extra={"channel": "debug"},
         )
-    title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
+    title = await _extract_pdp_title_async(page) or _product_title_from_page_title(
+        await page.title() or ""
+    )
     return title, True
 
 
@@ -877,6 +910,8 @@ async def _run_pdp_watch_async(
     net_lock = asyncio.Lock()
     stealth_ctx_applied = False
     stealth_page_fallback_warned = False
+    empty_debug_saved = False
+    empty_debug_lock = asyncio.Lock()
     title_wait_ms = max(3_000, int(pdp_title_wait_ms))
     price_wait_ms = max(1_000, int(pdp_price_wait_ms))
     dom_gate_ms = min(title_wait_ms, _PDP_DOM_GATE_MS_DEFAULT)
@@ -952,7 +987,7 @@ async def _run_pdp_watch_async(
             LOGGER.warning("pdp_watch stealth not applied (continuing): %s", exc)
 
         async def worker(idx: int, asin: str) -> tuple[int, dict[str, Any]]:
-            nonlocal stealth_page_fallback_warned, pdp_net_bytes
+            nonlocal stealth_page_fallback_warned, pdp_net_bytes, empty_debug_saved
             if captcha_abort.is_set():
                 return idx, _pdp_skip_row(asin, "captcha_run_aborted")
             async with sem:
@@ -1019,7 +1054,7 @@ async def _run_pdp_watch_async(
                             return idx, _pdp_skip_row(asin, last_reason)
 
                         LOGGER.info(
-                            "PDP navigation committed asin=%s attempt=%s/%s; resolving price then title",
+                            "PDP navigation committed asin=%s attempt=%s/%s; resolving title then price",
                             asin,
                             attempt,
                             max_attempts,
@@ -1045,6 +1080,7 @@ async def _run_pdp_watch_async(
                         explicit_oos, explicit_reason = await _detect_explicit_oos_async(
                             page, availability_text=availability_text
                         )
+                        title, _title_wait_used = await _resolve_title_async(page, title_wait_ms)
                         price_wait_used = False
                         if explicit_oos:
                             price = None
@@ -1054,7 +1090,6 @@ async def _run_pdp_watch_async(
                                 price_wait_ms,
                                 asin=asin,
                             )
-                        title, _title_wait_used = await _resolve_title_async(page, title_wait_ms)
                         if not explicit_oos and price is None and title:
                             inferred, infer_reason = await _detect_inferred_oos_async(
                                 page,
@@ -1092,9 +1127,51 @@ async def _run_pdp_watch_async(
                                 _extract_pdp_image_async(page),
                             )
                         if not explicit_oos and not title and price is None:
+                            markers = await _pdp_present_markers_async(page)
+                            buybox_present = await _pdp_buybox_present_async(page)
+                            snap = await _pdp_page_debug_snapshot_async(page)
+                            if attempt < max_attempts:
+                                LOGGER.warning(
+                                    "PDP scrape empty asin=%s attempt=%s/%s dom_ok=%s buybox=%s "
+                                    "markers=%s url=%s doc_title=%r html_len=%s (retrying)",
+                                    asin,
+                                    attempt,
+                                    max_attempts,
+                                    dom_ok,
+                                    buybox_present,
+                                    markers,
+                                    snap.get("url", ""),
+                                    snap.get("doc_title", ""),
+                                    snap.get("html_len", 0),
+                                )
+                                await asyncio.sleep(random.uniform(*_PDP_RETRY_BACKOFF_SECONDS))
+                                continue
+                            async with empty_debug_lock:
+                                save_html = not empty_debug_saved
+                                if save_html:
+                                    empty_debug_saved = True
+                            if save_html:
+                                try:
+                                    html = await page.content()
+                                    debug_path = Path("data") / f"pdp_empty_debug_{asin}.html"
+                                    debug_path.parent.mkdir(parents=True, exist_ok=True)
+                                    debug_path.write_text(html, encoding="utf-8")
+                                    LOGGER.warning(
+                                        "PDP empty debug html saved path=%s",
+                                        debug_path,
+                                    )
+                                except Exception as exc:
+                                    LOGGER.warning("PDP empty debug html save failed: %s", exc)
                             LOGGER.warning(
-                                "PDP scrape empty asin=%s after price/title resolve (skipping update)",
+                                "PDP scrape empty asin=%s after title/price resolve dom_ok=%s buybox=%s "
+                                "markers=%s url=%s doc_title=%r html_len=%s (skipping update)",
                                 asin,
+                                dom_ok,
+                                buybox_present,
+                                markers,
+                                snap.get("url", ""),
+                                snap.get("doc_title", ""),
+                                snap.get("html_len", 0),
                             )
                             await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                             return idx, _pdp_skip_row(asin, "parse_failed")

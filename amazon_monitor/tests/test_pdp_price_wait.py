@@ -36,15 +36,15 @@ class TestResolveBuyboxPriceAsync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.wait_for_selector.await_args.kwargs.get("timeout"), 4_000)
         self.assertEqual(extracts.await_count, 2)
 
-    async def test_skip_wait_when_no_buybox(self) -> None:
+    async def test_wait_even_when_buybox_not_yet_attached(self) -> None:
         page = MagicMock()
         page.wait_for_selector = AsyncMock()
         page.query_selector = AsyncMock(return_value=None)
         with patch("pdp_scraper._extract_pdp_price_async", new_callable=AsyncMock, return_value=None):
             price, wait_used = await _resolve_buybox_price_async(page, 4_000, asin="B011111111")
         self.assertIsNone(price)
-        self.assertFalse(wait_used)
-        page.wait_for_selector.assert_not_called()
+        self.assertTrue(wait_used)
+        page.wait_for_selector.assert_awaited_once()
 
     async def test_skip_wait_when_explicit_oos_path(self) -> None:
         page = MagicMock()
