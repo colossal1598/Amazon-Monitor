@@ -62,10 +62,6 @@ def extract_pay_price_from_html(html: str) -> float | None:
             _chunk_after_id(html, "qualifiedBuybox"),
             "apex-pricetopay-value",
         ),
-        "#corePrice_feature_div .a-price .a-offscreen": (
-            _chunk_after_id(html, "corePrice_feature_div"),
-            "a-price",
-        ),
         "#corePrice_feature_div .apex-pricetopay-value .a-offscreen": (
             _chunk_after_id(html, "corePrice_feature_div"),
             "apex-pricetopay-value",
