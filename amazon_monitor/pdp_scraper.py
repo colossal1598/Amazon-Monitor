@@ -37,7 +37,7 @@ _PDP_DOM_GATE_SELECTORS = (
 # Buy-box containers (attach before leaf price nodes hydrate).
 _PDP_PRICE_CONTAINER_SELECTORS = (
     "#corePrice_feature_div, #corePriceDisplay_desktop_feature_div, "
-    "#desktop_buybox, #buybox"
+    "#desktop_buybox, #buybox, #tabular-buybox, #qualifiedBuybox"
 )
 _PDP_PRICE_LEAF_SELECTORS = (
     "#corePrice_feature_div .a-price .a-offscreen, "
@@ -47,7 +47,8 @@ _PDP_PRICE_LEAF_SELECTORS = (
     "#apex-pricetopay-accessibility-label, "
     "#tp_price_block_total_price_ww .a-offscreen, "
     "span.a-price.a-text-price .a-offscreen, "
-    "#desktop_buybox .a-price-whole, #buybox .a-price-whole"
+    "#desktop_buybox .a-price-whole, #buybox .a-price-whole, "
+    ".a-price .a-offscreen"
 )
 _PDP_PRICE_WAIT_SELECTORS = f"{_PDP_PRICE_CONTAINER_SELECTORS}, {_PDP_PRICE_LEAF_SELECTORS}"
 _PDP_DOM_GATE_MS_DEFAULT = 5_000
@@ -180,21 +181,43 @@ async def _await_pdp_dom_gate_async(page: Any, timeout_ms: int) -> bool:
         return False
 
 
+_PDP_BUYBOX_PRESENT_SELECTORS = (
+    "#desktop_buybox",
+    "#buybox",
+    "#tabular-buybox",
+    "#qualifiedBuybox",
+    "#unqualifiedBuyBox",
+    "#corePrice_feature_div",
+    "#corePriceDisplay_desktop_feature_div",
+    "#add-to-cart-button",
+    "#buy-now-button",
+    "#priceblock_ourprice",
+    "#priceblock_dealprice",
+    ".a-price",
+)
+
+
 async def _pdp_buybox_present_async(page: Any) -> bool:
-    """True when a buy-box or core price region exists (price may still be hydrating)."""
-    for sel in (
-        "#desktop_buybox",
-        "#buybox",
-        "#corePrice_feature_div",
-        "#corePriceDisplay_desktop_feature_div",
-        "#add-to-cart-button",
-    ):
+    """True when a buy-box or any price region exists (price may still be hydrating)."""
+    for sel in _PDP_BUYBOX_PRESENT_SELECTORS:
         try:
             if await page.query_selector(sel):
                 return True
         except Exception:
             continue
     return False
+
+
+async def _pdp_present_markers_async(page: Any) -> str:
+    """Comma list of price/buybox markers found on the page (for missing-price diagnostics)."""
+    found: list[str] = []
+    for sel in _PDP_BUYBOX_PRESENT_SELECTORS:
+        try:
+            if await page.query_selector(sel):
+                found.append(sel)
+        except Exception:
+            continue
+    return ",".join(found) if found else "none"
 
 
 async def _resolve_buybox_price_async(
@@ -233,12 +256,20 @@ async def _resolve_buybox_price_async(
         )
     price = await _extract_pdp_price_async(page)
     if asin:
-        LOGGER.info(
-            "PDP price wait used asin=%s price_found=%s",
-            asin,
-            price is not None,
-            extra={"channel": "debug"},
-        )
+        if price is None:
+            markers = await _pdp_present_markers_async(page)
+            LOGGER.info(
+                "PDP price still missing asin=%s after wait markers=%s",
+                asin,
+                markers,
+                extra={"channel": "debug"},
+            )
+        else:
+            LOGGER.info(
+                "PDP price wait used asin=%s price_found=True",
+                asin,
+                extra={"channel": "debug"},
+            )
     return price, True
 
 
@@ -498,6 +529,21 @@ async def _extract_pdp_title_async(page: Any) -> str:
         return ""
 
 
+async def _read_text_async(el: Any) -> str:
+    """Read element text, falling back to text_content for clipped (.a-offscreen) nodes."""
+    raw = ""
+    try:
+        raw = (await el.inner_text() or "").strip()
+    except Exception:
+        raw = ""
+    if raw:
+        return raw
+    try:
+        return (await el.text_content() or "").strip()
+    except Exception:
+        return ""
+
+
 async def _extract_pdp_price_async(page: Any) -> float | None:
     for sel in (
         "#corePrice_feature_div .a-price .a-offscreen",
@@ -507,29 +553,44 @@ async def _extract_pdp_price_async(page: Any) -> float | None:
         "#apex-pricetopay-accessibility-label",
         "#tp_price_block_total_price_ww .a-offscreen",
         "span.a-price.a-text-price .a-offscreen",
+        "#tabular-buybox .a-price .a-offscreen",
+        "#qualifiedBuybox .a-price .a-offscreen",
+        "#priceblock_ourprice",
+        "#priceblock_dealprice",
+        "#price",
+        ".a-price .a-offscreen",
     ):
         try:
             el = await page.query_selector(sel)
             if not el:
                 continue
-            raw = (await el.inner_text() or "").strip()
+            raw = await _read_text_async(el)
         except Exception:
             raw = ""
         p = _parse_price_text(raw)
         if p is not None:
             return p
-    for root_sel in ("#desktop_buybox", "#buybox", "#offerDisplayFeature_feature_div", "body"):
+    for root_sel in (
+        "#desktop_buybox",
+        "#buybox",
+        "#tabular-buybox",
+        "#qualifiedBuybox",
+        "#corePriceDisplay_desktop_feature_div",
+        "#offerDisplayFeature_feature_div",
+        "body",
+    ):
         try:
             root = await page.query_selector(root_sel)
             if not root:
                 continue
             whole = await root.query_selector(".a-price-whole")
             frac = await root.query_selector(".a-price-fraction")
-            if whole and frac:
-                w = (await whole.inner_text() or "").strip().replace(",", "").replace(".", "")
-                f = (await frac.inner_text() or "").strip()
-                if w.isdigit() and f.isdigit():
-                    return float(f"{w}.{f}")
+            if whole:
+                w = (await _read_text_async(whole)).replace(",", "").replace(".", "")
+                f = (await _read_text_async(frac)) if frac else ""
+                if w.isdigit():
+                    cents = f if f.isdigit() else "00"
+                    return float(f"{w}.{cents}")
         except Exception:
             continue
     return None
