@@ -23,8 +23,8 @@ LOGGER = logging.getLogger(__name__)
 
 # Navigation uses commit (not domcontentloaded) when heavy resources are blocked; title selectors gate scrape readiness.
 _PDP_GOTO_TIMEOUT_MS = 12_000
-_PDP_TITLE_WAIT_MS_DEFAULT = 6_000
-_PDP_PRICE_WAIT_MS_DEFAULT = 2_000
+_PDP_TITLE_WAIT_MS_DEFAULT = 15_000
+_PDP_PRICE_WAIT_MS_DEFAULT = 4_000
 _PDP_MAX_ATTEMPTS = 3
 _PDP_TITLE_READY_SELECTORS = "#productTitle, #title, h1.a-size-large"
 # Post-nav gate: any of these means the PDP shell is far enough along to scrape.
@@ -37,6 +37,7 @@ _PDP_DOM_GATE_SELECTORS = (
 # Pay-price extraction only (tight; verified against tests/fixtures/pdp HTML).
 _PDP_PRICE_PAY_SELECTORS = (
     "#qualifiedBuybox .apex-pricetopay-value .a-offscreen",
+    "#corePrice_feature_div .a-price .a-offscreen",
     "#corePrice_feature_div .apex-pricetopay-value .a-offscreen",
     "#corePriceDisplay_desktop_feature_div #apex-pricetopay-accessibility-label",
     "#tp_price_block_total_price_ww .a-offscreen",
@@ -57,7 +58,7 @@ _PDP_PRICE_LEAF_SELECTORS = (
     "#qualifiedBuybox .a-price"
 )
 _PDP_PRICE_WAIT_SELECTORS = f"{_PDP_PRICE_CONTAINER_SELECTORS}, {_PDP_PRICE_LEAF_SELECTORS}"
-_PDP_DOM_GATE_MS_DEFAULT = 3_000
+_PDP_DOM_GATE_MS_DEFAULT = 5_000
 _PDP_RETRY_BACKOFF_SECONDS = (1.5, 3.0)
 
 _PRICE_RE = re.compile(r"\$?\s*([0-9][0-9,]*)(?:\.(\d{2}))?")
@@ -219,13 +220,16 @@ def _extract_pdp_price(page) -> float | None:
             el = page.query_selector(sel)
             if not el:
                 continue
-            raw = (el.inner_text() or "").strip()
+            raw = (el.inner_text() or el.text_content() or "").strip()
         except Exception:
             raw = ""
         p = _parse_price_text(raw)
         if p is not None:
             return p
-    for root_sel in ("#qualifiedBuybox", "#corePriceDisplay_desktop_feature_div"):
+    hidden = _extract_hidden_buybox_price_from_root(page.query_selector("#qualifiedBuybox"))
+    if hidden is not None:
+        return hidden
+    for root_sel in ("#qualifiedBuybox", "#desktop_buybox", "#buybox", "#corePriceDisplay_desktop_feature_div"):
         try:
             root = page.query_selector(root_sel)
             if not root:
@@ -243,11 +247,7 @@ def _extract_pdp_price(page) -> float | None:
                     return float(f"{w}.{cents}")
         except Exception:
             continue
-    try:
-        root = page.query_selector("#qualifiedBuybox")
-    except Exception:
-        root = None
-    return _extract_hidden_buybox_price_from_root(root)
+    return None
 
 
 async def _await_pdp_dom_gate_async(page: Any, timeout_ms: int) -> bool:
@@ -361,16 +361,34 @@ async def _resolve_buybox_price_async(
     return price, True
 
 
+def _product_title_from_page_title(raw: str) -> str:
+    """Strip generic Amazon document titles; keep product name when present."""
+    title = (raw or "").strip()
+    if not title:
+        return ""
+    lower = title.lower()
+    if lower in ("amazon.com", "amazon.com: online shopping", "www.amazon.com"):
+        return ""
+    for sep in (" : Amazon.com", " | Amazon", " - Amazon"):
+        if sep in title:
+            title = title.split(sep, 1)[0].strip()
+    if title.lower().startswith("amazon.com"):
+        return ""
+    return title
+
+
 async def _resolve_title_async(page: Any, max_wait_ms: int) -> tuple[str, bool]:
     """Extract title after price; wait for title DOM only when the first extract is empty."""
-    title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
+    title = await _extract_pdp_title_async(page) or _product_title_from_page_title(
+        await page.title() or ""
+    )
     if title:
         return title, False
     wait_ms = max(1_000, int(max_wait_ms))
     try:
         await page.wait_for_selector(
             _PDP_TITLE_READY_SELECTORS,
-            state="attached",
+            state="visible",
             timeout=wait_ms,
         )
     except Exception:
@@ -379,7 +397,9 @@ async def _resolve_title_async(page: Any, max_wait_ms: int) -> tuple[str, bool]:
             wait_ms,
             extra={"channel": "debug"},
         )
-    title = await _extract_pdp_title_async(page) or (await page.title() or "").strip()
+    title = await _extract_pdp_title_async(page) or _product_title_from_page_title(
+        await page.title() or ""
+    )
     return title, True
 
 
@@ -694,7 +714,7 @@ async def _extract_pdp_title_async(page: Any) -> str:
         node = await page.query_selector("#productTitle") or await page.query_selector("#title")
         if not node:
             return ""
-        return (await node.inner_text() or "").strip()
+        return await _read_text_async(node)
     except Exception:
         return ""
 
@@ -726,7 +746,10 @@ async def _extract_pdp_price_async(page: Any) -> float | None:
         p = _parse_price_text(raw)
         if p is not None:
             return p
-    for root_sel in ("#qualifiedBuybox", "#corePriceDisplay_desktop_feature_div"):
+    hidden = await _extract_hidden_buybox_price_async(page)
+    if hidden is not None:
+        return hidden
+    for root_sel in ("#qualifiedBuybox", "#desktop_buybox", "#buybox", "#corePriceDisplay_desktop_feature_div"):
         try:
             root = await page.query_selector(root_sel)
             if not root:
@@ -744,7 +767,7 @@ async def _extract_pdp_price_async(page: Any) -> float | None:
                     return float(f"{w}.{cents}")
         except Exception:
             continue
-    return await _extract_hidden_buybox_price_async(page)
+    return None
 
 
 async def _extract_pdp_image_async(page: Any) -> str | None:
@@ -982,7 +1005,7 @@ async def _run_pdp_watch_async(
                     meter = NetMeter()
                     meter.attach_async(page)
                     try:
-                        page.set_default_timeout(2_000)
+                        page.set_default_timeout(max(title_wait_ms, price_wait_ms, dom_gate_ms))
                         page.set_default_navigation_timeout(_PDP_GOTO_TIMEOUT_MS)
                         if not stealth_ctx_applied:
                             # Best-effort fallback: try existing sync stealth against the page.
@@ -1092,9 +1115,26 @@ async def _run_pdp_watch_async(
                                 _extract_pdp_image_async(page),
                             )
                         if not explicit_oos and not title and price is None:
+                            markers = await _pdp_present_markers_async(page)
+                            buybox_present = await _pdp_buybox_present_async(page)
+                            if (dom_ok or buybox_present) and attempt < max_attempts:
+                                LOGGER.warning(
+                                    "PDP hydrate miss asin=%s attempt=%s/%s dom_ok=%s buybox=%s markers=%s (retrying)",
+                                    asin,
+                                    attempt,
+                                    max_attempts,
+                                    dom_ok,
+                                    buybox_present,
+                                    markers,
+                                )
+                                await asyncio.sleep(random.uniform(*_PDP_RETRY_BACKOFF_SECONDS))
+                                continue
                             LOGGER.warning(
-                                "PDP scrape empty asin=%s after price/title resolve (skipping update)",
+                                "PDP scrape empty asin=%s after price/title resolve dom_ok=%s buybox=%s markers=%s (skipping update)",
                                 asin,
+                                dom_ok,
+                                buybox_present,
+                                markers,
                             )
                             await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                             return idx, _pdp_skip_row(asin, "parse_failed")

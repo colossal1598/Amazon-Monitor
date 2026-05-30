@@ -391,8 +391,8 @@ def main() -> None:
                     tab_jitter_seconds=config.get("pdp_watch_tab_jitter_seconds"),
                     max_attempts=int(config.get("pdp_watch_max_attempts", 3)),
                     headless=bool(config.get("playwright_headless", True)),
-                    pdp_title_wait_ms=int(config.get("pdp_title_wait_ms", 6_000)),
-                    pdp_price_wait_ms=int(config.get("pdp_price_wait_ms", 2_000)),
+                    pdp_title_wait_ms=int(config.get("pdp_title_wait_ms", 15_000)),
+                    pdp_price_wait_ms=int(config.get("pdp_price_wait_ms", 4_000)),
                 )
                 skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
                 in_stock_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("in_stock"))

@@ -79,7 +79,7 @@ class TestResolveTitleAsync(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(wait_used)
         page.wait_for_selector.assert_awaited_once_with(
             _PDP_TITLE_READY_SELECTORS,
-            state="attached",
+            state="visible",
             timeout=15_000,
         )
 

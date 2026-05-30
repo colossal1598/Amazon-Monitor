@@ -34,8 +34,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "pdp_watch_max_attempts": 3,
     "pdp_watch_tab_jitter_seconds": [0.15, 0.55],
     "pdp_watch_scroll_delay_seconds": [0.25, 0.65],
-    "pdp_title_wait_ms": 6_000,
-    "pdp_price_wait_ms": 2_000,
+    "pdp_title_wait_ms": 15_000,
+    "pdp_price_wait_ms": 4_000,
     "fx_enabled": True,
     "fx_refresh_every_runs": 10,
     "fx_cache_path": "data/fx_usd_ils.json",
@@ -389,5 +389,11 @@ def load_runtime_config(db_path: str) -> dict[str, Any]:
     wa_api_key = _env("WA_API_KEY")
     if wa_api_key:
         config["wa_api_key"] = wa_api_key
+
+    # Speed-opt regression: commit nav + blocked resources need longer hydration windows.
+    if config.get("pdp_title_wait_ms") == 6_000:
+        config["pdp_title_wait_ms"] = 15_000
+    if config.get("pdp_price_wait_ms") == 2_000:
+        config["pdp_price_wait_ms"] = 4_000
 
     return config
