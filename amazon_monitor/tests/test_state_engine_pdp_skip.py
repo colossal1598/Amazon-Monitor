@@ -31,16 +31,17 @@ def _pdp_row(asin: str, price: float) -> dict:
 
 
 def _pdp_unknown_row(asin: str) -> dict:
+    """Unknown confidence — state engine must not change DB (not the same as no pay price)."""
     return {
         "asin": asin,
         "title": "Pokemon Card",
-        "price": None,
-        "in_stock": False,
+        "price": 19.99,
+        "in_stock": True,
         "shipping_text": "",
         "image_url": None,
         "seller": "pdp_watch",
         "stock_confidence": "unknown",
-        "stock_reason": "missing_price",
+        "stock_reason": "low_confidence",
     }
 
 
@@ -191,6 +192,34 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
                 self.assertEqual(alerts, [])
                 stock, price = _stock_and_price(se, "B011111111")
                 self.assertEqual(stock, 1)
+                self.assertEqual(price, 19.99)
+            finally:
+                se.conn.close()
+
+    def test_no_pay_price_row_marks_oos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=1, price=19.99)
+                alerts, _ = se.process_pdp_watch_candidates(
+                    [
+                        {
+                            "asin": "B011111111",
+                            "title": "Pokemon Card",
+                            "price": None,
+                            "in_stock": False,
+                            "shipping_text": "",
+                            "image_url": None,
+                            "seller": "pdp_watch",
+                            "stock_confidence": "confirmed_out",
+                            "stock_reason": "no_pay_price",
+                        }
+                    ],
+                    {"B011111111"},
+                )
+                self.assertEqual(alerts, [])
+                stock, price = _stock_and_price(se, "B011111111")
+                self.assertEqual(stock, 0)
                 self.assertEqual(price, 19.99)
             finally:
                 se.conn.close()

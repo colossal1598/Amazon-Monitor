@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from pdp_scraper import _DELIVERY_RELEVANT_RE, _PDP_PRICE_PAY_SELECTORS, _parse_price_text
+from pdp_scraper import _DELIVERY_RELEVANT_RE, _PDP_PRICE_PAY_SELECTORS, _parse_hidden_buybox_amount, _parse_price_text
 
 
 def _first_group(pattern: str, html: str, *, flags: int = 0) -> str | None:
@@ -91,6 +91,15 @@ def extract_pay_price_from_html(html: str) -> float | None:
     for root_id in ("qualifiedBuybox", "corePriceDisplay_desktop_feature_div"):
         chunk = _chunk_after_id(html, root_id)
         price = _pay_price_from_whole_fraction(chunk)
+        if price is not None:
+            return price
+    buybox = _chunk_after_id(html, "qualifiedBuybox")
+    if buybox:
+        raw = _first_group(
+            r'name="items\[0\.base\]\[customerVisiblePrice\]\[amount\]"[^>]*value="([^"]+)"',
+            buybox,
+        )
+        price = _parse_hidden_buybox_amount(raw)
         if price is not None:
             return price
     return None

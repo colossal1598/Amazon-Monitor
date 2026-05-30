@@ -149,6 +149,68 @@ def _parse_price_text(text: str) -> float | None:
         return None
 
 
+def _parse_hidden_buybox_amount(raw: str | None) -> float | None:
+    """Parse Amazon add-to-cart hidden customerVisiblePrice amount (e.g. 119.99, 90.0)."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        value = float(text.replace(",", ""))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _extract_hidden_buybox_price_from_root(root: Any) -> float | None:
+    """Read pay price from server-rendered hidden inputs inside #qualifiedBuybox."""
+    if root is None:
+        return None
+    selectors = (
+        'input[name="items[0.base][customerVisiblePrice][amount]"]',
+        'input[id="items[0.base][customerVisiblePrice][amount]"]',
+        'input[name*="customerVisiblePrice"][name*="amount"]',
+    )
+    for sel in selectors:
+        try:
+            el = root.query_selector(sel)
+            if not el:
+                continue
+            value = el.get_attribute("value")
+            price = _parse_hidden_buybox_amount(value)
+            if price is not None:
+                return price
+        except Exception:
+            continue
+    return None
+
+
+async def _extract_hidden_buybox_price_async(page: Any) -> float | None:
+    """Qualified buybox forms often ship hidden pay price before visible price nodes hydrate."""
+    try:
+        root = await page.query_selector("#qualifiedBuybox")
+    except Exception:
+        root = None
+    if root is None:
+        return None
+    selectors = (
+        'input[name="items[0.base][customerVisiblePrice][amount]"]',
+        'input[id="items[0.base][customerVisiblePrice][amount]"]',
+        'input[name*="customerVisiblePrice"][name*="amount"]',
+    )
+    for sel in selectors:
+        try:
+            el = await root.query_selector(sel)
+            if not el:
+                continue
+            value = await el.get_attribute("value")
+            price = _parse_hidden_buybox_amount(value)
+            if price is not None:
+                return price
+        except Exception:
+            continue
+    return None
+
+
 # Try a few known Amazon page spots to find the buy-box price and return quickly when the page doesn’t have one.
 def _extract_pdp_price(page) -> float | None:
     """Use query_selector only (no locator auto-wait) so missing buy box returns fast. Unused in prod."""
@@ -181,7 +243,11 @@ def _extract_pdp_price(page) -> float | None:
                     return float(f"{w}.{cents}")
         except Exception:
             continue
-    return None
+    try:
+        root = page.query_selector("#qualifiedBuybox")
+    except Exception:
+        root = None
+    return _extract_hidden_buybox_price_from_root(root)
 
 
 async def _await_pdp_dom_gate_async(page: Any, timeout_ms: int) -> bool:
@@ -580,6 +646,10 @@ def _pdp_row(
     elif explicit_oos:
         stock_confidence = "confirmed_out"
         stock_reason = "explicit_oos"
+    elif price is None and (title or "").strip():
+        # Should not happen when worker sets explicit_oos for title+no price; guard anyway.
+        stock_confidence = "confirmed_out"
+        stock_reason = "no_pay_price"
     else:
         if price is None:
             stock_reason = "missing_price"
@@ -674,7 +744,7 @@ async def _extract_pdp_price_async(page: Any) -> float | None:
                     return float(f"{w}.{cents}")
         except Exception:
             continue
-    return None
+    return await _extract_hidden_buybox_price_async(page)
 
 
 async def _extract_pdp_image_async(page: Any) -> str | None:
@@ -993,10 +1063,22 @@ async def _run_pdp_watch_async(
                             if inferred:
                                 explicit_oos = True
                                 explicit_reason = infer_reason
+                            elif await _buybox_purchasable_async(page):
+                                # Pay-price leaf missed but add-to-cart is live — hydration race, not OOS.
                                 LOGGER.info(
-                                    "PDP inferred OOS asin=%s reason=%s",
+                                    "PDP pay price missing with purchase action asin=%s (leaving unknown)",
                                     asin,
-                                    infer_reason or "unknown",
+                                    extra={"channel": "debug"},
+                                )
+                            else:
+                                # Title + no pay price + no purchase action → no primary offer.
+                                explicit_oos = True
+                                explicit_reason = "no_pay_price"
+                            if explicit_oos and explicit_reason:
+                                LOGGER.info(
+                                    "PDP no pay price asin=%s reason=%s",
+                                    asin,
+                                    explicit_reason,
                                     extra={"channel": "debug"},
                                 )
                         if explicit_oos:
