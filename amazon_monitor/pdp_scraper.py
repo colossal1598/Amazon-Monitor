@@ -69,8 +69,23 @@ _DELIVERY_RELEVANT_RE = re.compile(
 _EXPLICIT_OOS_RE = re.compile(
     r"currently unavailable|temporarily out of stock|out of stock|unavailable|"
     r"we don't know when or if this item will be back in stock|"
-    r"see all buying options",
+    r"see all buying options|no featured offers|not available to ship",
     re.IGNORECASE,
+)
+
+# When primary buy box has no price, these DOM hints mean OOS (not a scrape miss).
+_PDP_SEE_ALL_BUYING_SELECTORS = (
+    "#buybox-see-all-buying-choices",
+    "#buybox-see-all-buying-choices-announce",
+    "#accSeeAllBuyingConsoles",
+    "#all-offers-display",
+    "a[href*='buying-options']",
+)
+_PDP_PURCHASE_BUTTON_SELECTORS = (
+    "#add-to-cart-button",
+    "#buy-now-button",
+    "input[name='submit.add-to-cart']",
+    "#submit.add-to-cart",
 )
 
 
@@ -397,17 +412,97 @@ def _explicit_oos_from_text(text: str | None) -> bool:
 
 
 async def _extract_availability_text_async(page: Any) -> str:
-    for sel in ("#availability", "#outOfStock", "#desktop_buybox #availability"):
+    parts: list[str] = []
+    seen: set[str] = set()
+    for sel in (
+        "#availability",
+        "#availabilityMessage",
+        "#outOfStock",
+        "#desktop_buybox #availability",
+        "#qualifiedBuybox #availability",
+        "#availabilityInsideBuyBox_feature_div",
+        "#buybox #availability",
+    ):
         try:
             el = await page.query_selector(sel)
             if not el:
                 continue
             t = (await el.inner_text() or "").strip()
-            if t:
-                return t
+            if t and t not in seen:
+                seen.add(t)
+                parts.append(t)
         except Exception:
             continue
-    return ""
+    return " ".join(parts)
+
+
+async def _buybox_purchasable_async(page: Any) -> bool:
+    """True when an enabled add-to-cart or buy-now control exists."""
+    for sel in _PDP_PURCHASE_BUTTON_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if not el:
+                continue
+            disabled = await el.get_attribute("disabled")
+            aria_disabled = (await el.get_attribute("aria-disabled") or "").strip().lower()
+            if disabled is not None or aria_disabled in ("true", "1"):
+                continue
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _see_all_buying_options_present_async(page: Any) -> bool:
+    for sel in _PDP_SEE_ALL_BUYING_SELECTORS:
+        try:
+            if await page.query_selector(sel):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _detect_inferred_oos_async(
+    page: Any,
+    *,
+    availability_text: str,
+) -> tuple[bool, str | None]:
+    """Infer confirmed OOS when the page loaded but there is no buyable primary offer.
+
+    Called only after price resolve failed and title exists — avoids marking empty/broken
+    pages as OOS (those stay parse_failed).
+    """
+    if _explicit_oos_from_text(availability_text):
+        return True, "explicit_oos_text"
+    try:
+        if await page.query_selector("#outOfStock"):
+            return True, "outofstock_container"
+    except Exception:
+        pass
+
+    fresh_avail = await _extract_availability_text_async(page)
+    if _explicit_oos_from_text(fresh_avail):
+        return True, "explicit_oos_text"
+
+    for sel in ("#qualifiedBuybox", "#desktop_buybox", "#buybox"):
+        try:
+            node = await page.query_selector(sel)
+            if not node:
+                continue
+            blob = (await node.inner_text() or "")[:2500]
+            if _explicit_oos_from_text(blob):
+                return True, "explicit_oos_buybox_text"
+        except Exception:
+            continue
+
+    if await _see_all_buying_options_present_async(page):
+        return True, "inferred_oos_see_all_options"
+
+    if not await _buybox_purchasable_async(page) and await _pdp_buybox_present_async(page):
+        return True, "inferred_oos_no_purchase_action"
+
+    return False, None
 
 
 async def _detect_explicit_oos_async(page: Any, *, availability_text: str) -> tuple[bool, str | None]:
@@ -890,6 +985,20 @@ async def _run_pdp_watch_async(
                                 asin=asin,
                             )
                         title, _title_wait_used = await _resolve_title_async(page, title_wait_ms)
+                        if not explicit_oos and price is None and title:
+                            inferred, infer_reason = await _detect_inferred_oos_async(
+                                page,
+                                availability_text=availability_text,
+                            )
+                            if inferred:
+                                explicit_oos = True
+                                explicit_reason = infer_reason
+                                LOGGER.info(
+                                    "PDP inferred OOS asin=%s reason=%s",
+                                    asin,
+                                    infer_reason or "unknown",
+                                    extra={"channel": "debug"},
+                                )
                         if explicit_oos:
                             merchant_blob = ""
                             shipping = ""
