@@ -18,7 +18,7 @@ from browser_factory import init_global_rate_limiter
 from exceptions import CaptchaBlocked, NetworkAccessDenied
 from filter_pipeline import run_search_filter_pipeline
 from pdp_helpers import valid_asin
-from pdp_scraper import scrape_pdp_watch
+from pdp_scraper import pdp_skip_log_label, scrape_pdp_watch
 from search_scraper import scrape_search
 from settings_store import list_asins, load_runtime_config, migrate_yaml_to_db
 from state_engine import StateEngine
@@ -90,6 +90,11 @@ class _LifecycleFilter(logging.Filter):
         return ch == "lifecycle"
 
 
+class _DebugFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return getattr(record, "channel", None) == "debug"
+
+
 def load_config(path: str = "config.yaml") -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as file:
         loaded = yaml.safe_load(file)
@@ -113,11 +118,21 @@ def setup_logging(log_dir: str) -> None:
     console.setFormatter(formatter)
     console.addFilter(_LifecycleFilter())
 
+    debug_file = RotatingFileHandler(
+        Path(log_dir) / "debug.log",
+        maxBytes=5_000_000,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    debug_file.setFormatter(formatter)
+    debug_file.addFilter(_DebugFilter())
+
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
     root.handlers.clear()
     root.addHandler(lifecycle_file)
     root.addHandler(console)
+    root.addHandler(debug_file)
 
 
 def utc_iso() -> str:
@@ -356,6 +371,7 @@ def main() -> None:
         watch_list: list[str] = []
         pdp_rows: list[dict[str, Any]] = []
         skip_rows = 0
+        ok_rows = 0
         in_stock_rows = 0
         captcha_rows = 0
         captcha_aborted_rows = 0
@@ -381,7 +397,6 @@ def main() -> None:
             if watch_list:
                 allowed_subs = _allowed_seller_substrings(config)
                 delay_range = _coerce_range(config.get("pdp_watch_scroll_delay_seconds"), (0.25, 0.65))
-                log_lifecycle("scrape_pdp_watch_start", count=len(watch_list))
                 pdp_rows = scrape_pdp_watch(
                     watch_list,
                     allowed_subs,
@@ -395,6 +410,13 @@ def main() -> None:
                     pdp_price_wait_ms=int(config.get("pdp_price_wait_ms", 2_000)),
                 )
                 skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
+                ok_rows = len(pdp_rows) - skip_rows
+                for r in pdp_rows:
+                    if isinstance(r, dict) and r.get("_skip_update") and r.get("asin"):
+                        LOGGER.info(
+                            f"{r['asin']} skipped {pdp_skip_log_label(r)}",
+                            extra={"channel": "lifecycle"},
+                        )
                 in_stock_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("in_stock"))
                 captcha_rows = sum(
                     1
@@ -418,6 +440,7 @@ def main() -> None:
                 tick_alerts.extend(pdp_alerts)
             else:
                 LOGGER.warning("No pdp_watch_asins configured; PDP cycle did nothing.")
+                ok_rows = 0
 
             if captcha_rows:
                 captcha_asins = sorted(
@@ -431,12 +454,17 @@ def main() -> None:
                     1 for r in pdp_rows if isinstance(r, dict) and not r.get("_skip_update")
                 )
                 pause_s = max(0, int(config.get("captcha_recovery_pause_seconds", 120)))
+                asin_list = ",".join(captcha_asins) or "unknown"
+                LOGGER.warning(
+                    "Captcha detected. %s paused %ss",
+                    asin_list,
+                    pause_s,
+                )
                 detail = (
                     f"asins={','.join(captcha_asins) or 'unknown'} "
                     f"completed={completed_rows}/{len(watch_list)} "
                     f"captcha_rows={captcha_rows} aborted={captcha_aborted_rows} pause_s={pause_s}"
                 )
-                LOGGER.warning("Captcha detected: %s", detail)
                 deduped_alerts = dedupe_alerts_by_asin(tick_alerts)
                 for alert in deduped_alerts:
                     send_alert(alert, config)
@@ -480,7 +508,8 @@ def main() -> None:
                 "pdp_cycle_done",
                 cycle_stamp=True,
                 ordered=[
-                    ("PDP", len(watch_list)),
+                    ("ok", ok_rows),
+                    ("skip", skip_rows),
                     ("AES", aes_pipeline_count),
                     ("Alerts", sent_alerts),
                     ("captcha", bool(captcha_rows)),
