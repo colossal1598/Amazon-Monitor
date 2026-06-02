@@ -402,12 +402,14 @@ def main() -> None:
                     allowed_subs,
                     max_cycle_seconds=int(config.get("max_cycle_seconds", 170)),
                     scroll_delay_range=delay_range,
-                    max_concurrent_tabs=int(config.get("pdp_watch_max_concurrent_tabs", 2)),
+                    max_concurrent_tabs=int(config.get("pdp_watch_max_concurrent_tabs", 3)),
                     tab_jitter_seconds=config.get("pdp_watch_tab_jitter_seconds"),
-                    max_attempts=int(config.get("pdp_watch_max_attempts", 3)),
+                    max_attempts=int(config.get("pdp_watch_max_attempts", 1)),
                     headless=bool(config.get("playwright_headless", True)),
-                    pdp_title_wait_ms=int(config.get("pdp_title_wait_ms", 6_000)),
-                    pdp_price_wait_ms=int(config.get("pdp_price_wait_ms", 2_000)),
+                    pdp_settle_seconds=float(config.get("pdp_settle_seconds", 8.0)),
+                    pdp_continue_shopping_max_clicks=int(
+                        config.get("pdp_continue_shopping_max_clicks", 3)
+                    ),
                 )
                 skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
                 ok_rows = len(pdp_rows) - skip_rows

@@ -8,8 +8,6 @@ from pathlib import Path
 
 from pdp_scraper import (
     _PDP_BUYBOX_PRESENT_SELECTORS,
-    _PDP_DOM_GATE_SELECTORS,
-    _PDP_PRICE_LEAF_SELECTORS,
     _PDP_PRICE_PAY_SELECTORS,
 )
 from tests.pdp_fixture_helpers import (
@@ -64,17 +62,9 @@ class TestPdpSelectorConstantsFromPlan(unittest.TestCase):
         joined = " ".join(_PDP_PRICE_PAY_SELECTORS)
         self.assertNotIn("a-text-price", joined)
 
-    def test_wait_leaf_selectors_stay_broad(self) -> None:
-        self.assertIn("apex-pricetopay-value", _PDP_PRICE_LEAF_SELECTORS)
-        self.assertIn("reinventPricePriceToPayMargin", _PDP_PRICE_LEAF_SELECTORS)
-
     def test_buybox_present_untouched(self) -> None:
         self.assertIn("#tabular-buybox", _PDP_BUYBOX_PRESENT_SELECTORS)
         self.assertIn(".a-price", _PDP_BUYBOX_PRESENT_SELECTORS)
-
-    def test_dom_gate_untouched(self) -> None:
-        self.assertIn("#corePrice_feature_div", _PDP_DOM_GATE_SELECTORS)
-        self.assertIn("#corePriceDisplay_desktop_feature_div", _PDP_DOM_GATE_SELECTORS)
 
 
 if __name__ == "__main__":

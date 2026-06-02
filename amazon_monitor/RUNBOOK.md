@@ -132,7 +132,9 @@ If it repeats:
 
 ## Timeout Or Slow Product Page
 
-Each ASIN gets `pdp_watch_max_attempts` navigation attempts. If all attempts fail, the row is emitted as `_skip_update`, and the database is left unchanged for that ASIN.
+PDP scrape is bare-bones: one navigation per ASIN, dismiss “continue shopping” interstitials (up to `pdp_continue_shopping_max_clicks`, default 3), then `pdp_settle_seconds` (default **8**) before a single DOM extract. Default concurrency is **3** tabs (`pdp_watch_max_concurrent_tabs`).
+
+If navigation fails or the page is empty after settle, the row is `_skip_update` and the database is unchanged. If price is missing but add-to-cart is present, stock stays **unknown** (no false OOS). Tune `pdp_settle_seconds` in settings when telemetry shows many `pdp_watch_unknown_stock` events; check `logs/debug.log` for `continue shopping` click counts per ASIN.
 
 ## Seller And Delivery Rules
 
