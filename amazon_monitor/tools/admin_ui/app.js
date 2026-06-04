@@ -177,6 +177,9 @@ function fillSettings(settings) {
   byId("pdp-poll-minutes").value = settings.pdp_poll_minutes ?? "";
   byId("max-cycle-seconds").value = settings.max_cycle_seconds ?? "";
   byId("max-concurrent-tabs").value = settings.pdp_watch_max_concurrent_tabs ?? "";
+  byId("pdp-settle-seconds").value = settings.pdp_settle_seconds ?? "";
+  byId("pdp-continue-shopping-max-clicks").value =
+    settings.pdp_continue_shopping_max_clicks ?? "";
   byId("playwright-headless").checked = settings.playwright_headless !== false;
 
   byId("wa-group-id").value = settings.wa_group_id || "";
@@ -200,6 +203,66 @@ function fillSettings(settings) {
 async function loadSettings() {
   const payload = await apiJson("/api/settings");
   fillSettings(payload.settings || {});
+}
+
+function formatMb(bytes) {
+  const n = Number(bytes) || 0;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function formatGbFromBytes(bytes) {
+  const n = Number(bytes) || 0;
+  return `${(n / 1024 ** 3).toFixed(3)} GB`;
+}
+
+function fillBandwidthSummary(data) {
+  const last = data.last_cycle;
+  if (last && last.net_bytes_total != null) {
+    byId("bw-last-cycle-mb").textContent = formatMb(last.net_bytes_total);
+    byId("bw-last-cycle-time").textContent = last.recorded_at_il || "";
+  } else {
+    byId("bw-last-cycle-mb").textContent = "—";
+    byId("bw-last-cycle-time").textContent = "אין נתוני סיבוב עדיין";
+  }
+
+  const today = data.today;
+  if (today && today.bytes_total != null) {
+    byId("bw-today-gb").textContent = formatGbFromBytes(today.bytes_total);
+    const cycles = Number(today.cycles) || 0;
+    byId("bw-today-cycles").textContent = `${cycles} סיבובים היום`;
+  } else {
+    byId("bw-today-gb").textContent = "0.000 GB";
+    byId("bw-today-cycles").textContent = "0 סיבובים היום";
+  }
+
+  const weekGb = Number(data.last_7_days_gb);
+  byId("bw-week-gb").textContent = Number.isFinite(weekGb) ? `${weekGb.toFixed(3)} GB` : "—";
+
+  if (last) {
+    const url = Number(last.blocked_url) || 0;
+    const heavy = Number(last.blocked_heavy) || 0;
+    byId("bw-blocked").textContent = `${url} / ${heavy}`;
+  } else {
+    byId("bw-blocked").textContent = "—";
+  }
+
+  const lines = (data.recent_cycles || []).map((row) => {
+    const ts = row.recorded_at_il || "?";
+    const bytes = row.net_bytes_total != null ? row.net_bytes_total : "?";
+    return `${ts}\t${bytes}`;
+  });
+  byId("bw-recent-cycles").value = lines.length ? lines.join("\n") : "";
+}
+
+async function loadBandwidthSummary() {
+  try {
+    const data = await apiJson("/api/bandwidth/summary");
+    fillBandwidthSummary(data);
+  } catch (err) {
+    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
+      byId("bw-last-cycle-mb").textContent = "שגיאה בטעינה";
+    }
+  }
 }
 
 async function addAsin(role) {
@@ -287,6 +350,17 @@ function collectSettingsPayload() {
     pdp_poll_minutes: parsePositiveInt(byId("pdp-poll-minutes").value, 4),
     max_cycle_seconds: parsePositiveInt(byId("max-cycle-seconds").value, 170),
     pdp_watch_max_concurrent_tabs: Math.min(10, tabs),
+    pdp_settle_seconds: (() => {
+      const n = parseFloat(String(byId("pdp-settle-seconds").value || "").trim());
+      return Number.isFinite(n) ? Math.min(30, Math.max(1, n)) : 8.0;
+    })(),
+    pdp_continue_shopping_max_clicks: (() => {
+      const n = parseInt(
+        String(byId("pdp-continue-shopping-max-clicks").value || "").trim(),
+        10,
+      );
+      return Number.isFinite(n) ? Math.min(10, Math.max(0, n)) : 3;
+    })(),
     playwright_headless: byId("playwright-headless").checked,
     wa_group_id: String(byId("wa-group-id").value || "").trim(),
     wa_client_to: String(byId("wa-client-to").value || "").trim(),
@@ -456,6 +530,7 @@ function bindEvents() {
 
 async function loadAppData() {
   await loadSettings();
+  await loadBandwidthSummary();
   await Promise.all([loadAsins("watch"), loadAsins("blacklist"), refreshSqliteStatus()]);
 }
 

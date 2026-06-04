@@ -171,6 +171,12 @@ textarea {
   resize: vertical;
 }
 
+.stat-value {
+  margin: 4px 0 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
 input:focus,
 textarea:focus,
 button:focus {

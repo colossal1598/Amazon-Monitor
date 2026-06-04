@@ -109,8 +109,30 @@ class TelemetryStore:
                     window_started_il TEXT NOT NULL,
                     payload_json TEXT NOT NULL DEFAULT '{}'
                 );
+
+                CREATE TABLE IF NOT EXISTS daily_bandwidth (
+                    date_il TEXT PRIMARY KEY,
+                    bytes_total INTEGER NOT NULL DEFAULT 0,
+                    bytes_pdp INTEGER NOT NULL DEFAULT 0,
+                    bytes_aes INTEGER NOT NULL DEFAULT 0,
+                    bytes_image INTEGER NOT NULL DEFAULT 0,
+                    cycles INTEGER NOT NULL DEFAULT 0,
+                    updated_at_il TEXT NOT NULL
+                );
                 """
             )
+            for col, col_type in (
+                ("net_bytes_total", "INTEGER"),
+                ("net_bytes_pdp", "INTEGER"),
+                ("net_bytes_aes", "INTEGER"),
+                ("net_bytes_image", "INTEGER"),
+                ("blocked_url", "INTEGER"),
+                ("gb_est_total", "REAL"),
+            ):
+                try:
+                    self.conn.execute(f"ALTER TABLE cycle_stats ADD COLUMN {col} {col_type}")
+                except sqlite3.OperationalError:
+                    pass
             self.conn.commit()
 
     def enabled(self, config: dict[str, Any] | None) -> bool:
@@ -173,6 +195,12 @@ class TelemetryStore:
             "pdp_ok",
             "pdp_skip",
             "blocked_heavy",
+            "blocked_url",
+            "net_bytes_total",
+            "net_bytes_pdp",
+            "net_bytes_aes",
+            "net_bytes_image",
+            "gb_est_total",
             "exceeds_poll_interval",
             "pdp_poll_minutes",
             "pdp_watch",
@@ -209,6 +237,33 @@ class TelemetryStore:
             self.conn.execute(
                 f"UPDATE cycle_stats SET {set_clause} WHERE id = ?",
                 (*values, cycle_id),
+            )
+            self.conn.commit()
+        self.upsert_daily_bandwidth(summary)
+
+    def upsert_daily_bandwidth(self, summary: dict[str, Any]) -> None:
+        date_il = datetime.now(_israel_tz()).date().isoformat()
+        bytes_pdp = int(summary.get("net_bytes_pdp") or 0)
+        bytes_aes = int(summary.get("net_bytes_aes") or 0)
+        bytes_image = int(summary.get("net_bytes_image") or 0)
+        bytes_total = int(summary.get("net_bytes_total") or 0) + bytes_image
+        now = israel_now_iso()
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO daily_bandwidth (
+                    date_il, bytes_total, bytes_pdp, bytes_aes, bytes_image, cycles, updated_at_il
+                )
+                VALUES (?, ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(date_il) DO UPDATE SET
+                    bytes_total = bytes_total + excluded.bytes_total,
+                    bytes_pdp = bytes_pdp + excluded.bytes_pdp,
+                    bytes_aes = bytes_aes + excluded.bytes_aes,
+                    bytes_image = bytes_image + excluded.bytes_image,
+                    cycles = cycles + 1,
+                    updated_at_il = excluded.updated_at_il
+                """,
+                (date_il, bytes_total, bytes_pdp, bytes_aes, bytes_image, now),
             )
             self.conn.commit()
 

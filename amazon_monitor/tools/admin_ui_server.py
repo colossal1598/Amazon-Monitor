@@ -9,10 +9,12 @@ import json
 import logging
 import mimetypes
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -274,6 +276,101 @@ def _settings_for_client(db_path: str) -> dict[str, Any]:
     return cfg
 
 
+def _israel_tz():
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo("Asia/Jerusalem")
+    except Exception:
+        return timezone(timedelta(hours=3), name="Asia/Jerusalem")
+
+
+def _resolve_telemetry_db_path(monitor_db_path: str) -> Path:
+    bootstrap = _load_bootstrap_config()
+    runtime = load_runtime_config(monitor_db_path)
+    raw = str(
+        bootstrap.get("telemetry_db_path")
+        or runtime.get("telemetry_db_path")
+        or "data/telemetry.db"
+    ).strip()
+    db_path = Path(raw)
+    if not db_path.is_absolute():
+        db_path = ROOT / db_path
+    return db_path.resolve()
+
+
+def _bandwidth_summary(monitor_db_path: str) -> dict[str, Any]:
+    telemetry_path = _resolve_telemetry_db_path(monitor_db_path)
+    empty: dict[str, Any] = {
+        "last_cycle": None,
+        "today": None,
+        "last_7_days_gb": 0.0,
+        "recent_cycles": [],
+    }
+    if not telemetry_path.is_file():
+        return empty
+
+    tz = _israel_tz()
+    today_il = datetime.now(tz).date().isoformat()
+    week_start_il = (datetime.now(tz).date() - timedelta(days=6)).isoformat()
+
+    conn = sqlite3.connect(str(telemetry_path), timeout=5)
+    conn.row_factory = sqlite3.Row
+    try:
+        last_row = conn.execute(
+            """
+            SELECT recorded_at_il, net_bytes_total, net_bytes_pdp, net_bytes_aes,
+                   net_bytes_image, blocked_url, blocked_heavy, gb_est_total
+            FROM cycle_stats
+            WHERE net_bytes_total IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        last_cycle = dict(last_row) if last_row else None
+
+        today_row = conn.execute(
+            """
+            SELECT date_il, bytes_total, bytes_pdp, bytes_aes, bytes_image, cycles, updated_at_il
+            FROM daily_bandwidth
+            WHERE date_il = ?
+            """,
+            (today_il,),
+        ).fetchone()
+        today = dict(today_row) if today_row else None
+
+        week_sum = conn.execute(
+            """
+            SELECT COALESCE(SUM(bytes_total), 0) AS bytes_total
+            FROM daily_bandwidth
+            WHERE date_il >= ? AND date_il <= ?
+            """,
+            (week_start_il, today_il),
+        ).fetchone()
+        last_7_bytes = int(week_sum["bytes_total"] if week_sum else 0)
+        last_7_days_gb = round(last_7_bytes / (1024**3), 3)
+
+        recent_rows = conn.execute(
+            """
+            SELECT recorded_at_il, net_bytes_total
+            FROM cycle_stats
+            WHERE net_bytes_total IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 10
+            """
+        ).fetchall()
+        recent_cycles = [dict(r) for r in recent_rows]
+    finally:
+        conn.close()
+
+    return {
+        "last_cycle": last_cycle,
+        "today": today,
+        "last_7_days_gb": last_7_days_gb,
+        "recent_cycles": recent_cycles,
+    }
+
+
 def _parse_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     content_length = int(handler.headers.get("Content-Length", "0"))
     raw = handler.rfile.read(content_length) if content_length > 0 else b"{}"
@@ -395,6 +492,10 @@ class AdminUIHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/sqlite/status":
             self._json(200, sqlite_web_status())
+            return
+        if path == "/api/bandwidth/summary":
+            summary = _bandwidth_summary(self.db_path)
+            self._json(200, {"ok": True, **summary})
             return
 
         self._json(404, {"ok": False, "error": "not_found"})

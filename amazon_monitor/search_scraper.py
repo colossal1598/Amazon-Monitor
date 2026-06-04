@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import json
 import math
@@ -19,7 +20,6 @@ from image_urls import pick_amazon_image_url
 from filter_pipeline import normalize_title_line
 from pdp_helpers import is_not_shippable_text
 from serp_card_price import card_list_price
-from usage_metrics import NetMeter
 import usage_metrics
 
 LOGGER = logging.getLogger(__name__)
@@ -585,8 +585,9 @@ def _wait_serp_result_cards(
             _serp_captcha_or_raise(page, source)
 
 
-# Do one full scrape attempt across one or more pages, collecting product rows while respecting time and page limits.
-def _scrape_single_attempt(
+# Do one full scrape attempt across one or more pages on an existing sync context.
+def _scrape_single_attempt_on_context(
+    context,
     search_url: str,
     source: str,
     collect_debug: bool,
@@ -601,21 +602,16 @@ def _scrape_single_attempt(
     pagination_delay_range: tuple[float, float] = (2.0, 4.5),
     serp_inner_retries: int = 2,
     serp_scroll_profile: SerpScrollProfile = "full",
-    headless: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_products: list[dict[str, Any]] = []
     debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}, "scrape_outcome": {}}
-    context = create_stealth_context(persistent_dir=None, headless=headless)
     cycle_started = time.monotonic()
     total_pages_cap = 1
     page_meta_first: dict[str, Any] = {}
     cards_page1 = 0
 
-    aes_started = time.monotonic()
-    meter = NetMeter()
+    page = context.new_page()
     try:
-        page = context.new_page()
-        meter.attach_sync(page)
         page_num = 1
         while True:
             elapsed = time.monotonic() - cycle_started
@@ -653,10 +649,9 @@ def _scrape_single_attempt(
                 )
                 raise
             LOGGER.info(
-                "SERP navigation committed source=%s page=%s headless=%s; stabilizing DOM",
+                "SERP navigation committed source=%s page=%s; stabilizing DOM",
                 source,
                 page_num,
-                headless,
             )
             _serp_stabilize_page(page)
             _serp_captcha_or_raise(page, source)
@@ -778,8 +773,7 @@ def _scrape_single_attempt(
             page_num += 1
             time.sleep(random.uniform(pagination_delay_range[0], pagination_delay_range[1]))
     finally:
-        usage_metrics.record_aes_phase(time.monotonic() - aes_started, meter.total_bytes)
-        close_context(context)
+        page.close()
 
     total_result_count = page_meta_first.get("totalResultCount")
     debug_data["scrape_outcome"] = {
@@ -789,6 +783,48 @@ def _scrape_single_attempt(
     }
     deduped = _dedupe_products_by_asin(all_products)
     return deduped, debug_data
+
+
+# Do one full scrape attempt across one or more pages, collecting product rows while respecting time and page limits.
+def _scrape_single_attempt(
+    search_url: str,
+    source: str,
+    collect_debug: bool,
+    max_cycle_seconds: int,
+    html_dump_dir: str | Path | None,
+    scrape_mode: ScrapeMode,
+    pagination_mode: PaginationMode,
+    fixed_pages: int,
+    max_search_pages: int,
+    *,
+    scroll_delay_range: tuple[float, float] = (0.25, 0.65),
+    pagination_delay_range: tuple[float, float] = (2.0, 4.5),
+    serp_inner_retries: int = 2,
+    serp_scroll_profile: SerpScrollProfile = "full",
+    headless: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    context = create_stealth_context(persistent_dir=None, headless=headless)
+    aes_started = time.monotonic()
+    try:
+        return _scrape_single_attempt_on_context(
+            context,
+            search_url,
+            source,
+            collect_debug,
+            max_cycle_seconds,
+            html_dump_dir,
+            scrape_mode,
+            pagination_mode,
+            fixed_pages,
+            max_search_pages,
+            scroll_delay_range=scroll_delay_range,
+            pagination_delay_range=pagination_delay_range,
+            serp_inner_retries=serp_inner_retries,
+            serp_scroll_profile=serp_scroll_profile,
+        )
+    finally:
+        usage_metrics.record_aes_phase(time.monotonic() - aes_started, 0)
+        close_context(context)
 
 
 # Scrape Amazon search results with retries and simple modes so the monitor can gather candidates without visiting individual product pages.
@@ -859,3 +895,674 @@ def scrape_search(
     if last_error:
         raise last_error
     return [], {"selector_debug": [], "scrape_meta": {}, "scrape_outcome": {"navigation_ok": False, "cards_found": 0, "total_result_count": None}}
+
+
+def scrape_search_on_context(
+    context,
+    search_url: str,
+    *,
+    source: str = "main_search",
+    scrape_mode: ScrapeMode = "featured_full",
+    pagination_mode: PaginationMode = "auto",
+    fixed_pages: int = 1,
+    max_search_pages: int = 50,
+    collect_debug: bool = False,
+    max_cycle_seconds: int = 170,
+    html_dump_dir: str | Path | None = None,
+    scroll_delay_range: tuple[float, float] | None = None,
+    pagination_delay_range: tuple[float, float] | None = None,
+    serp_inner_retries: int = 2,
+    serp_scroll_profile: SerpScrollProfile = "full",
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """SERP scrape on an existing sync BrowserContext (caller records AES metrics)."""
+    sdr = scroll_delay_range if scroll_delay_range is not None else (0.25, 0.65)
+    pdr = pagination_delay_range if pagination_delay_range is not None else (2.0, 4.5)
+    return _scrape_single_attempt_on_context(
+        context,
+        search_url,
+        source,
+        collect_debug=collect_debug,
+        max_cycle_seconds=max_cycle_seconds,
+        html_dump_dir=html_dump_dir,
+        scrape_mode=scrape_mode,
+        pagination_mode=pagination_mode,
+        fixed_pages=fixed_pages,
+        max_search_pages=max_search_pages,
+        scroll_delay_range=sdr,
+        pagination_delay_range=pdr,
+        serp_inner_retries=serp_inner_retries,
+        serp_scroll_profile=serp_scroll_profile,
+    )
+
+
+async def _extract_by_selectors_async(card, selectors: tuple[str, ...]) -> tuple[str, str | None]:
+    for selector in selectors:
+        node = await card.query_selector(selector)
+        if not node:
+            continue
+        text = (await node.inner_text() or "").strip()
+        if text:
+            return text, selector
+    return "", None
+
+
+async def _extract_title_async(card) -> str:
+    selectors = (
+        "[data-cy='title-recipe']",
+        "h2",
+        "a.a-link-normal.s-line-clamp-2",
+        "h2 a span",
+        "h2 span",
+    )
+    for selector in selectors:
+        node = await card.query_selector(selector)
+        if not node:
+            continue
+        text = (await node.inner_text() or "").strip()
+        if text:
+            return normalize_title_line(text) or ""
+    return ""
+
+
+async def _extract_price_async(card) -> float | None:
+    price_recipe = await card.query_selector('[data-cy="price-recipe"]')
+    if price_recipe:
+        for off in await price_recipe.query_selector_all("span.a-price span.a-offscreen"):
+            raw = (await off.inner_text() or "").strip()
+            value = card_list_price(raw)
+            if value is not None:
+                return value
+        blob = (await price_recipe.inner_text() or "").strip()
+        value = card_list_price(blob)
+        if value is not None:
+            return value
+
+    for selector in ("span.a-price span.a-offscreen", "span[data-a-color='base'] span.a-offscreen"):
+        node = await card.query_selector(selector)
+        if not node:
+            continue
+        value = card_list_price((await node.inner_text() or "").strip())
+        if value is not None:
+            return value
+    return None
+
+
+async def _extract_price_text_async(card) -> tuple[str, str | None]:
+    price_recipe = await card.query_selector('[data-cy="price-recipe"]')
+    if price_recipe:
+        for off in await price_recipe.query_selector_all("span.a-price span.a-offscreen"):
+            text = (await off.inner_text() or "").strip()
+            if text:
+                return text, '[data-cy="price-recipe"] span.a-price span.a-offscreen'
+    selectors = (
+        "span.a-price span.a-offscreen",
+        "span[data-a-color='base'] span.a-offscreen",
+    )
+    return await _extract_by_selectors_async(card, selectors)
+
+
+async def _extract_availability_text_async(card, card_text: str) -> tuple[str, str | None]:
+    selectors = (
+        "span.a-size-base.a-color-price",
+        "span[class*='availability']",
+        "div[class*='availability'] span",
+    )
+    text, selector = await _extract_by_selectors_async(card, selectors)
+    return (text or card_text, selector)
+
+
+async def _extract_delivery_block_primary_async(card) -> tuple[str, str | None]:
+    block = await card.query_selector('div[data-cy="delivery-block"]')
+    if not block:
+        return "", None
+    primary = await block.query_selector(".udm-primary-delivery-message")
+    if primary:
+        text = (await primary.inner_text() or "").strip()
+        if text:
+            return text, 'div[data-cy="delivery-block"] .udm-primary-delivery-message'
+    text = (await block.inner_text() or "").strip()
+    if text:
+        return text, 'div[data-cy="delivery-block"]'
+    return "", None
+
+
+async def _extract_shipping_text_async(card) -> tuple[str, str | None]:
+    text, sel = await _extract_delivery_block_primary_async(card)
+    if text:
+        return text, sel
+    selectors = (
+        "span:has-text('FREE Shipping')",
+        "span:has-text('FREE delivery')",
+        "span:has-text('to Israel')",
+        "span.a-color-secondary",
+    )
+    return await _extract_by_selectors_async(card, selectors)
+
+
+async def _extract_seller_text_async(card) -> tuple[str, str | None]:
+    for selector in _SELLER_DOM_REGION_SELECTORS:
+        node = await card.query_selector(selector)
+        if not node:
+            continue
+        text = (await node.inner_text() or "").strip()
+        if _looks_like_seller_blob(text):
+            return text, selector
+    selectors = (
+        "span:has-text('Sold by')",
+        "span:has-text('Ships from')",
+        "div.a-row:has-text('Sold by')",
+        "div.a-row:has-text('Ships from')",
+        "[data-seller]",
+    )
+    for selector in selectors:
+        node = await card.query_selector(selector)
+        if not node:
+            continue
+        text = (await node.inner_text() or "").strip()
+        if _looks_like_seller_blob(text):
+            return text, selector
+    card_text = (await card.inner_text() or "").strip()
+    if _looks_like_seller_blob(card_text):
+        m = re.search(
+            r"(sold by[^\n]{0,120}|ships from[^\n]{0,120})",
+            card_text,
+            flags=re.IGNORECASE,
+        )
+        return (m.group(1).strip() if m else card_text), "card_text_fallback"
+    return "", None
+
+
+async def _extract_image_url_async(card) -> str | None:
+    image_el = await card.query_selector("img.s-image")
+    if not image_el:
+        return None
+    dynamic_attr = await image_el.get_attribute("data-a-dynamic-image") or ""
+    if dynamic_attr:
+        try:
+            candidates = json.loads(dynamic_attr)
+            if isinstance(candidates, dict) and candidates:
+                return pick_amazon_image_url(candidates, rank=1)
+        except Exception:
+            pass
+    srcset = await image_el.get_attribute("srcset") or ""
+    if srcset:
+        parts = [p.strip() for p in srcset.split(",") if p.strip()]
+        urls = [p.split(" ")[0] for p in parts if p]
+        if urls:
+            return pick_amazon_image_url(urls, rank=1)
+    src = await image_el.get_attribute("src")
+    return src.strip() if src else None
+
+
+async def _extract_product_url_async(card) -> str | None:
+    link = await card.query_selector("h2 a")
+    if not link:
+        return None
+    href = (await link.get_attribute("href") or "").strip()
+    if not href:
+        return None
+    return urljoin("https://www.amazon.com", href)
+
+
+async def _collect_product_row_async(
+    card,
+    *,
+    source: str,
+    current_url: str,
+) -> dict[str, Any] | None:
+    a = (await card.get_attribute("data-asin") or "").strip().upper()
+    if not _valid_asin(a):
+        return None
+
+    product_title = await _extract_title_async(card)
+    card_text = await card.inner_text()
+    price = await _extract_price_async(card)
+    price_text, price_selector = await _extract_price_text_async(card)
+    image_url = await _extract_image_url_async(card)
+    availability_text, availability_selector = await _extract_availability_text_async(card, card_text)
+    seller_text, seller_selector = await _extract_seller_text_async(card)
+    shipping_text, shipping_selector = await _extract_shipping_text_async(card)
+    product_url = await _extract_product_url_async(card)
+    inner_html = (await card.inner_html() or "")
+
+    return {
+        "asin": a,
+        "title": product_title,
+        "price": price,
+        "price_text": price_text,
+        "in_stock": _stock_flag(availability_text, shipping_text, price),
+        "availability_text": availability_text,
+        "seller": seller_text or source,
+        "seller_text": seller_text,
+        "shipping_text": shipping_text,
+        "image_url": image_url,
+        "product_url": product_url,
+        "source": source,
+        "search_url": current_url,
+        "_debug": {
+            "price_selector": price_selector,
+            "seller_selector": seller_selector,
+            "shipping_selector": shipping_selector,
+            "availability_selector": availability_selector,
+            "inner_html": inner_html,
+        },
+    }
+
+
+async def _fallback_main_slot_asin_roots_async(page) -> list[Any]:
+    roots: list[Any] = []
+    seen_id: set[int] = set()
+    for sel in (
+        "div.s-main-slot div.s-result-item.s-asin[data-asin]",
+        "div.s-main-slot div[role='listitem'][data-asin]",
+    ):
+        try:
+            nodes = await page.query_selector_all(sel)
+        except Exception:
+            nodes = []
+        for node in nodes:
+            try:
+                kid = id(node)
+            except Exception:
+                continue
+            if kid in seen_id:
+                continue
+            asin = (await node.get_attribute("data-asin") or "").strip()
+            if not _valid_asin(asin):
+                continue
+            seen_id.add(kid)
+            roots.append(node)
+    return roots
+
+
+async def _carousel_tile_roots_async(page) -> list[Any]:
+    roots: list[Any] = []
+    seen_el: set[int] = set()
+    for sel in (
+        ".s-searchgrid-carousel div[data-asin]",
+        "[cel_widget_id*='FEATURED_ASINS_LIST'] div[data-asin].s-result-item",
+    ):
+        try:
+            nodes = await page.query_selector_all(sel)
+        except Exception:
+            nodes = []
+        for node in nodes:
+            try:
+                key = id(node)
+            except Exception:
+                continue
+            if key in seen_el:
+                continue
+            seen_el.add(key)
+            asin = (await node.get_attribute("data-asin") or "").strip()
+            if not _valid_asin(asin):
+                continue
+            if not await node.query_selector('[data-cy="asin-faceout-container"]'):
+                continue
+            roots.append(node)
+    return roots
+
+
+async def _scroll_serp_to_settle_async(
+    page,
+    scroll_delay_range: tuple[float, float],
+    max_steps: int = 10,
+) -> None:
+    prev_h = -1
+    stable_rounds = 0
+    for _ in range(max_steps):
+        h = await page.evaluate(
+            "() => Math.max(document.documentElement.scrollHeight, document.body && document.body.scrollHeight || 0)"
+        )
+        try:
+            h_int = int(h) if h is not None else 0
+        except (TypeError, ValueError):
+            h_int = 0
+        vh = await page.evaluate("() => window.innerHeight") or 800
+        try:
+            vh_int = max(400, int(vh))
+        except (TypeError, ValueError):
+            vh_int = 800
+
+        if h_int > 0 and abs(h_int - prev_h) < 40:
+            stable_rounds += 1
+            if stable_rounds >= 2:
+                break
+        else:
+            stable_rounds = 0
+        prev_h = h_int
+
+        await page.mouse.wheel(0, random.randint(int(vh_int * 0.55), int(vh_int * 0.95)))
+        await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+
+
+async def _scroll_serp_more_results_into_view_async(page, scroll_delay_range: tuple[float, float]) -> None:
+    try:
+        await page.locator('h2:has-text("More results")').first.scroll_into_view_if_needed(timeout=5000)
+        await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+    except Exception as exc:
+        LOGGER.debug("serp_more_results_scroll skipped: %s", exc)
+
+
+async def _serp_stabilize_page_async(page, *, timeout_ms: int = 15_000) -> None:
+    await page.wait_for_selector("body", state="attached", timeout=timeout_ms)
+    await asyncio.sleep(0.25)
+
+
+async def _serp_captcha_or_raise_async(page, source: str) -> None:
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            title = ((await page.title()) or "").lower()
+            if "robot check" in title:
+                raise CaptchaBlocked(f"Captcha detected while scraping {source}")
+            if await page.query_selector("form[action*='validateCaptcha']"):
+                raise CaptchaBlocked(f"Captcha detected while scraping {source}")
+            return
+        except CaptchaBlocked:
+            raise
+        except PlaywrightError as exc:
+            msg = str(exc)
+            if "Execution context was destroyed" in msg or "Target closed" in msg or "Target page" in msg:
+                last_err = exc
+                LOGGER.debug(
+                    "SERP captcha check retry source=%s attempt=%s/%s: %s",
+                    source,
+                    attempt + 1,
+                    3,
+                    exc,
+                )
+                await asyncio.sleep(0.35 * (attempt + 1))
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
+
+
+async def _wait_serp_result_cards_async(
+    page,
+    current_url: str,
+    source: str,
+    *,
+    serp_inner_retries: int,
+    selector_timeout_ms: int = 25_000,
+    goto_timeout_ms: int = 45_000,
+) -> None:
+    recoveries = max(0, serp_inner_retries)
+    total_rounds = 1 + recoveries
+    for round_idx in range(total_rounds):
+        try:
+            await page.wait_for_selector(
+                "div[data-component-type='s-search-result']",
+                timeout=selector_timeout_ms,
+            )
+            return
+        except PlaywrightTimeoutError:
+            if round_idx >= total_rounds - 1:
+                raise
+            title_snip = (((await page.title()) or "").strip())[:160]
+            LOGGER.warning(
+                "SERP ready check: result cards not found source=%s round=%s/%s url=%s title=%r — retrying navigation (wait_until=%s)",
+                source,
+                round_idx + 1,
+                total_rounds,
+                page.url,
+                title_snip,
+                browser_factory.NAV_WAIT_UNTIL,
+            )
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            try:
+                await page.goto(current_url, wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=goto_timeout_ms)
+                LOGGER.info(
+                    "SERP navigation committed source=%s round=%s/%s url=%s",
+                    source,
+                    round_idx + 1,
+                    total_rounds,
+                    current_url,
+                )
+            except Exception as e:
+                if _is_network_error(e):
+                    raise NetworkAccessDenied(
+                        f"Network error during SERP recovery round {round_idx + 1}: {e}",
+                        e,
+                    ) from e
+                raise
+            await _serp_stabilize_page_async(page)
+            await _serp_captcha_or_raise_async(page, source)
+
+
+async def _scrape_single_attempt_on_context_async(
+    context,
+    search_url: str,
+    source: str,
+    collect_debug: bool,
+    max_cycle_seconds: int,
+    html_dump_dir: str | Path | None,
+    scrape_mode: ScrapeMode,
+    pagination_mode: PaginationMode,
+    fixed_pages: int,
+    max_search_pages: int,
+    *,
+    scroll_delay_range: tuple[float, float] = (0.25, 0.65),
+    pagination_delay_range: tuple[float, float] = (2.0, 4.5),
+    serp_inner_retries: int = 2,
+    serp_scroll_profile: SerpScrollProfile = "full",
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    all_products: list[dict[str, Any]] = []
+    debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}, "scrape_outcome": {}}
+    cycle_started = time.monotonic()
+    total_pages_cap = 1
+    page_meta_first: dict[str, Any] = {}
+    cards_page1 = 0
+
+    page = await context.new_page()
+    try:
+        page_num = 1
+        while True:
+            elapsed = time.monotonic() - cycle_started
+            if elapsed > max_cycle_seconds:
+                LOGGER.warning(
+                    "Stopping scrape early due to cycle budget: elapsed=%.1fs limit=%ss pages_done=%s",
+                    elapsed,
+                    max_cycle_seconds,
+                    page_num - 1,
+                )
+                break
+            if browser_factory.global_rate_limiter:
+                await asyncio.to_thread(browser_factory.global_rate_limiter.acquire)
+
+            current_url = _set_page_param(search_url, page_num) if page_num > 1 else search_url
+            LOGGER.info(
+                "Scraping %s page %s/%s url=%s wait_until=%s",
+                source,
+                page_num,
+                total_pages_cap,
+                current_url,
+                browser_factory.NAV_WAIT_UNTIL,
+            )
+            try:
+                await page.goto(current_url, wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=45000)
+            except Exception as e:
+                if _is_network_error(e):
+                    raise NetworkAccessDenied(f"Network error on page {page_num}: {e}", e)
+                LOGGER.warning(
+                    "SERP navigation failed source=%s page=%s wait_until=%s: %s",
+                    source,
+                    page_num,
+                    browser_factory.NAV_WAIT_UNTIL,
+                    e,
+                )
+                raise
+            LOGGER.info(
+                "SERP navigation committed source=%s page=%s; stabilizing DOM",
+                source,
+                page_num,
+            )
+            await _serp_stabilize_page_async(page)
+            await _serp_captcha_or_raise_async(page, source)
+
+            await _wait_serp_result_cards_async(
+                page,
+                current_url,
+                source,
+                serp_inner_retries=serp_inner_retries,
+            )
+            if serp_scroll_profile == "minimal":
+                await _scroll_serp_to_settle_async(page, scroll_delay_range, max_steps=3)
+            else:
+                await _scroll_serp_to_settle_async(page, scroll_delay_range)
+                await _scroll_serp_more_results_into_view_async(page, scroll_delay_range)
+                await _scroll_serp_to_settle_async(page, scroll_delay_range, max_steps=6)
+
+            html = await page.content()
+            if page_num == 1:
+                page_meta_first = parse_search_metadata(html)
+                cards_probe = await page.query_selector_all("div[data-component-type='s-search-result']")
+                card_count = len(cards_probe)
+                ipp = page_meta_first.get("asinOnPageCount") or card_count or 1
+                total = page_meta_first.get("totalResultCount") or card_count
+                if scrape_mode == "newest_front":
+                    total_pages_cap = 1
+                elif scrape_mode == "featured_full" and pagination_mode == "auto" and page_meta_first.get("totalResultCount"):
+                    computed = max(1, math.ceil(total / max(1, ipp)))
+                    total_pages_cap = min(max_search_pages, computed)
+                elif scrape_mode == "featured_full":
+                    total_pages_cap = min(max_search_pages, max(1, fixed_pages))
+                else:
+                    total_pages_cap = min(max_search_pages, max(1, fixed_pages))
+                debug_data["scrape_meta"] = {
+                    "total_pages_cap": total_pages_cap,
+                    "page_meta": page_meta_first,
+                    "scrape_mode": scrape_mode,
+                    "pagination_mode": pagination_mode,
+                }
+                LOGGER.info(
+                    "search_pagination source=%s mode=%s total_pages_cap=%s meta=%s",
+                    source,
+                    pagination_mode,
+                    total_pages_cap,
+                    page_meta_first,
+                )
+
+            if html_dump_dir is not None:
+                dump_dir = Path(html_dump_dir)
+                dump_dir.mkdir(parents=True, exist_ok=True)
+                safe_source = re.sub(r"[^\w\-]+", "_", source).strip("_")[:80] or "search"
+                out_path = dump_dir / f"{safe_source}_page{page_num}_raw.html"
+                try:
+                    out_path.write_text(html, encoding="utf-8")
+                    LOGGER.info("Wrote raw search page HTML to %s", out_path)
+                except OSError as exc:
+                    LOGGER.warning("Failed to write raw search HTML %s: %s", out_path, exc)
+
+            seen_asins_page: set[str] = set()
+            cards = await page.query_selector_all("div[data-component-type='s-search-result']")
+            n_primary = 0
+            for card in cards:
+                row = await _collect_product_row_async(card, source=source, current_url=current_url)
+                if not row:
+                    continue
+                if row["asin"] in seen_asins_page:
+                    continue
+                seen_asins_page.add(row["asin"])
+                n_primary += 1
+                if collect_debug:
+                    _append_debug_for_row(debug_data, row)
+                all_products.append(_strip_debug(dict(row)))
+
+            n_fallback = 0
+            for card in await _fallback_main_slot_asin_roots_async(page):
+                a = (await card.get_attribute("data-asin") or "").strip().upper()
+                if a in seen_asins_page:
+                    continue
+                row = await _collect_product_row_async(card, source=source, current_url=current_url)
+                if not row:
+                    continue
+                seen_asins_page.add(row["asin"])
+                n_fallback += 1
+                if collect_debug:
+                    _append_debug_for_row(debug_data, row)
+                all_products.append(_strip_debug(dict(row)))
+            LOGGER.debug(
+                "serp_card_counts source=%s page=%s primary=%s fallback_added=%s",
+                source,
+                page_num,
+                n_primary,
+                n_fallback,
+            )
+
+            for card in await _carousel_tile_roots_async(page):
+                a = (await card.get_attribute("data-asin") or "").strip().upper()
+                if a in seen_asins_page:
+                    continue
+                row = await _collect_product_row_async(card, source=source, current_url=current_url)
+                if not row:
+                    continue
+                seen_asins_page.add(row["asin"])
+                if collect_debug:
+                    _append_debug_for_row(debug_data, row)
+                all_products.append(_strip_debug(dict(row)))
+
+            if page_num == 1:
+                cards_page1 = len(seen_asins_page)
+
+            if page_num >= total_pages_cap:
+                break
+            if scrape_mode == "newest_front":
+                break
+            next_btn = await page.query_selector("a.s-pagination-next")
+            disabled = ((await next_btn.get_attribute("aria-disabled")) if next_btn else "true") == "true"
+            if not next_btn or disabled:
+                LOGGER.info("Stopping pagination: no next page (page=%s)", page_num)
+                break
+            page_num += 1
+            await asyncio.sleep(random.uniform(pagination_delay_range[0], pagination_delay_range[1]))
+    finally:
+        await page.close()
+
+    total_result_count = page_meta_first.get("totalResultCount")
+    debug_data["scrape_outcome"] = {
+        "navigation_ok": True,
+        "cards_found": cards_page1,
+        "total_result_count": int(total_result_count) if total_result_count is not None else None,
+    }
+    deduped = _dedupe_products_by_asin(all_products)
+    return deduped, debug_data
+
+
+async def scrape_search_on_context_async(
+    context,
+    search_url: str,
+    *,
+    source: str = "main_search",
+    scrape_mode: ScrapeMode = "featured_full",
+    pagination_mode: PaginationMode = "auto",
+    fixed_pages: int = 1,
+    max_search_pages: int = 50,
+    collect_debug: bool = False,
+    max_cycle_seconds: int = 170,
+    html_dump_dir: str | Path | None = None,
+    scroll_delay_range: tuple[float, float] | None = None,
+    pagination_delay_range: tuple[float, float] | None = None,
+    serp_inner_retries: int = 2,
+    serp_scroll_profile: SerpScrollProfile = "full",
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Async SERP scrape on an existing async BrowserContext (caller records AES metrics)."""
+    sdr = scroll_delay_range if scroll_delay_range is not None else (0.25, 0.65)
+    pdr = pagination_delay_range if pagination_delay_range is not None else (2.0, 4.5)
+    return await _scrape_single_attempt_on_context_async(
+        context,
+        search_url,
+        source,
+        collect_debug=collect_debug,
+        max_cycle_seconds=max_cycle_seconds,
+        html_dump_dir=html_dump_dir,
+        scrape_mode=scrape_mode,
+        pagination_mode=pagination_mode,
+        fixed_pages=fixed_pages,
+        max_search_pages=max_search_pages,
+        scroll_delay_range=sdr,
+        pagination_delay_range=pdr,
+        serp_inner_retries=serp_inner_retries,
+        serp_scroll_profile=serp_scroll_profile,
+    )

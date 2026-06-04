@@ -5,18 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import random
 import re
 import time
 from typing import Any
 
 import browser_factory
-from browser_factory import USER_AGENTS, STEALTH, register_heavy_resource_blocking_async
+from browser_factory import STEALTH, close_async_browser, create_async_stealth_context
 from exceptions import NetworkAccessDenied
 from image_urls import pick_amazon_image_url
 from pdp_helpers import is_not_shippable_text, normalize_ascii, valid_asin
-from usage_metrics import NetMeter
 import usage_metrics
 
 LOGGER = logging.getLogger(__name__)
@@ -929,7 +927,8 @@ async def _pdp_merchant_blob_async(page: Any) -> str:
     return "\n".join(parts)
 
 
-async def _run_pdp_watch_async(
+async def _scrape_pdp_on_context(
+    context: Any,
     normalized: list[str],
     allowed: list[str],
     *,
@@ -938,273 +937,166 @@ async def _run_pdp_watch_async(
     max_concurrent: int,
     jitter_range: tuple[float, float],
     max_attempts: int,
-    headless: bool = True,
     pdp_settle_seconds: float = _PDP_SETTLE_SECONDS_DEFAULT,
     pdp_continue_shopping_max_clicks: int = _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT,
-) -> list[dict[str, Any]]:
-    from playwright.async_api import async_playwright
-
+) -> tuple[list[dict[str, Any]], float]:
+    """Scrape watch ASINs on an existing async BrowserContext (caller owns bandwidth meter)."""
     cycle_started = time.monotonic()
     sem = asyncio.Semaphore(max_concurrent)
-    pdp_net_bytes = 0
-    net_lock = asyncio.Lock()
-    stealth_ctx_applied = False
+    stealth_ctx_applied = bool(getattr(context, "_stealth_ctx_applied", False))
     stealth_page_fallback_warned = False
     settle_s = _clamp_pdp_settle_seconds(pdp_settle_seconds)
     continue_clicks = _clamp_continue_shopping_clicks(pdp_continue_shopping_max_clicks)
     attempt = max(1, int(max_attempts))
     LOGGER.info(
-        "pdp_watch starting concurrent_tabs=%s jitter=%.2f-%.2f asins=%s headless=%s "
+        "pdp_watch starting concurrent_tabs=%s jitter=%.2f-%.2f asins=%s "
         "settle_seconds=%s continue_shopping_max_clicks=%s",
         max_concurrent,
         jitter_range[0],
         jitter_range[1],
         len(normalized),
-        headless,
         settle_s,
         continue_clicks,
         extra={"channel": "debug"},
     )
 
-    async with async_playwright() as pw:
-        proxy_url = os.getenv("PROXY_URL")
-        launch_kwargs: dict[str, Any] = {"channel": "chrome", "headless": headless}
-        if proxy_url:
-            launch_kwargs["proxy"] = {"server": proxy_url}
+    async def worker(idx: int, asin: str) -> tuple[int, dict[str, Any]]:
+        nonlocal stealth_page_fallback_warned
+        worker_started = time.monotonic()
+        async with sem:
+            if time.monotonic() - cycle_started > max_cycle_seconds:
+                return idx, _pdp_skip_row(asin, "cycle_budget_exceeded")
 
-        browser = await pw.chromium.launch(**launch_kwargs)
-        ua = random.choice(USER_AGENTS)
-        viewport = {"width": random.randint(1870, 1970), "height": random.randint(1030, 1130)}
-        ctx_kwargs = {
-            "user_agent": ua,
-            "viewport": viewport,
-            "locale": "en-IL",
-            "timezone_id": "Asia/Jerusalem",
-            "geolocation": {"latitude": 31.5, "longitude": 34.8},
-            "permissions": ["geolocation"],
-        }
-        context = await browser.new_context(**ctx_kwargs)
-        await register_heavy_resource_blocking_async(context)
-        await context.set_extra_http_headers({"Accept-Language": "en-IL,en;q=0.9"})
-        await context.add_cookies(
-            [
-                {
-                    "name": "i18n-prefs",
-                    "value": "USD",
-                    "domain": ".amazon.com",
-                    "path": "/",
-                    "secure": True,
-                },
-                {
-                    "name": "lc-main",
-                    "value": "en_US",
-                    "domain": ".amazon.com",
-                    "path": "/",
-                    "secure": True,
-                },
-            ]
-        )
+            await asyncio.sleep(random.uniform(jitter_range[0], jitter_range[1]))
+            if time.monotonic() - cycle_started > max_cycle_seconds:
+                return idx, _pdp_skip_row(asin, "cycle_budget_exceeded")
 
-        # Apply stealth at the BrowserContext level (async-safe). This should mirror browser_factory.create_stealth_context
-        # behavior where stealth is applied to all pages via a "page" event hook.
-        try:
+            if browser_factory.global_rate_limiter:
+                await asyncio.to_thread(browser_factory.global_rate_limiter.acquire)
+
+            url = f"https://www.amazon.com/dp/{asin}"
+            page = await context.new_page()
+            merchant_blob = ""
+            shipping = ""
+            image_url = None
             try:
-                # playwright-stealth >=2.0.x (2026) API
-                from playwright_stealth import Stealth as AsyncStealth  # type: ignore
-            except Exception:
-                # Older import style used in this repo for sync mode
-                from playwright_stealth.stealth import Stealth as AsyncStealth  # type: ignore
-
-            stealth_obj = AsyncStealth()
-            apply_ctx = getattr(stealth_obj, "apply_stealth_async", None)
-            if callable(apply_ctx):
-                await apply_ctx(context)
-                stealth_ctx_applied = True
-            else:
-                raise AttributeError("Stealth.apply_stealth_async not available")
-        except Exception as exc:
-            LOGGER.warning("pdp_watch stealth not applied (continuing): %s", exc)
-
-        async def worker(idx: int, asin: str) -> tuple[int, dict[str, Any]]:
-            nonlocal stealth_page_fallback_warned, pdp_net_bytes
-            worker_started = time.monotonic()
-            async with sem:
-                if time.monotonic() - cycle_started > max_cycle_seconds:
-                    return idx, _pdp_skip_row(asin, "cycle_budget_exceeded")
-
-                await asyncio.sleep(random.uniform(jitter_range[0], jitter_range[1]))
-                if time.monotonic() - cycle_started > max_cycle_seconds:
-                    return idx, _pdp_skip_row(asin, "cycle_budget_exceeded")
-
-                if browser_factory.global_rate_limiter:
-                    await asyncio.to_thread(browser_factory.global_rate_limiter.acquire)
-
-                url = f"https://www.amazon.com/dp/{asin}"
-                page = await context.new_page()
-                meter = NetMeter()
-                meter.attach_async(page)
-                merchant_blob = ""
-                shipping = ""
-                image_url = None
-                try:
-                    page.set_default_timeout(2_000)
-                    page.set_default_navigation_timeout(_PDP_GOTO_TIMEOUT_MS)
-                    if not stealth_ctx_applied:
-                        try:
-                            await asyncio.to_thread(STEALTH.apply_stealth_sync, page)
-                        except Exception as exc:
-                            if not stealth_page_fallback_warned:
-                                stealth_page_fallback_warned = True
-                                LOGGER.warning(
-                                    "pdp_watch per-page stealth fallback failed (continuing): %s",
-                                    exc,
-                                )
-
+                page.set_default_timeout(2_000)
+                page.set_default_navigation_timeout(_PDP_GOTO_TIMEOUT_MS)
+                if not stealth_ctx_applied:
                     try:
-                        await page.goto(
-                            url,
-                            wait_until=browser_factory.NAV_WAIT_UNTIL,
-                            timeout=_PDP_GOTO_TIMEOUT_MS,
-                        )
-                    except Exception as e:
-                        if _is_network_error(e):
-                            raise NetworkAccessDenied(f"PDP network error for {asin}: {e}", e) from e
-                        LOGGER.info(
-                            "PDP navigation failed asin=%s wait_until=%s: %s",
-                            asin,
-                            browser_factory.NAV_WAIT_UNTIL,
-                            e,
-                            extra={"channel": "debug"},
-                        )
-                        await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
-                        elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
-                        return idx, _pdp_skip_row(
-                            asin,
-                            "navigation_failed",
-                            scrape_attempts=attempt,
-                            scrape_elapsed_ms=elapsed_ms,
-                        )
+                        await asyncio.to_thread(STEALTH.apply_stealth_sync, page)
+                    except Exception as exc:
+                        if not stealth_page_fallback_warned:
+                            stealth_page_fallback_warned = True
+                            LOGGER.warning(
+                                "pdp_watch per-page stealth fallback failed (continuing): %s",
+                                exc,
+                            )
 
+                try:
+                    await page.goto(
+                        url,
+                        wait_until=browser_factory.NAV_WAIT_UNTIL,
+                        timeout=_PDP_GOTO_TIMEOUT_MS,
+                    )
+                except Exception as e:
+                    if _is_network_error(e):
+                        raise NetworkAccessDenied(f"PDP network error for {asin}: {e}", e) from e
                     LOGGER.info(
-                        "PDP navigation committed asin=%s",
+                        "PDP navigation failed asin=%s wait_until=%s: %s",
                         asin,
+                        browser_factory.NAV_WAIT_UNTIL,
+                        e,
                         extra={"channel": "debug"},
                     )
-
-                    if await _is_hard_captcha_async(page):
-                        LOGGER.info(
-                            "PDP hard captcha asin=%s (skipping update)",
-                            asin,
-                            extra={"channel": "debug"},
-                        )
-                        await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
-                        elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
-                        return idx, _pdp_skip_row(
-                            asin,
-                            "captcha",
-                            skip_detail="robot_check",
-                            scrape_attempts=attempt,
-                            scrape_elapsed_ms=elapsed_ms,
-                        )
-
-                    await _dismiss_continue_shopping_async(
-                        page, max_clicks=continue_clicks, asin=asin
-                    )
-                    await asyncio.sleep(settle_s)
-                    await _dismiss_continue_shopping_async(
-                        page, max_clicks=continue_clicks, asin=asin
-                    )
-
-                    availability_text = await _extract_availability_text_async(page)
-                    explicit_oos, explicit_reason = await _detect_explicit_oos_async(
-                        page, availability_text=availability_text
-                    )
-                    title = await _extract_pdp_title_async(page) or _product_title_from_page_title(
-                        await page.title() or ""
-                    )
-                    price = None if explicit_oos else await _extract_pdp_price_async(page)
-
-                    if not explicit_oos and price is None and title:
-                        inferred, infer_reason = await _detect_inferred_oos_async(
-                            page,
-                            availability_text=availability_text,
-                        )
-                        if inferred:
-                            explicit_oos = True
-                            explicit_reason = infer_reason
-                        elif await _buybox_purchasable_async(page):
-                            LOGGER.info(
-                                "PDP pay price missing with purchase action asin=%s (leaving unknown)",
-                                asin,
-                                extra={"channel": "debug"},
-                            )
-                        else:
-                            explicit_oos = True
-                            explicit_reason = "no_pay_price"
-                        if explicit_oos and explicit_reason:
-                            LOGGER.info(
-                                "PDP no pay price asin=%s reason=%s",
-                                asin,
-                                explicit_reason,
-                                extra={"channel": "debug"},
-                            )
-
-                    if explicit_oos:
-                        merchant_blob = ""
-                        shipping = ""
-                        image_url = None
-                    else:
-                        merchant_blob, shipping, image_url = await asyncio.gather(
-                            _pdp_merchant_blob_async(page),
-                            _extract_pdp_shipping_async(page),
-                            _extract_pdp_image_async(page),
-                        )
-
-                    if not explicit_oos and not title and price is None:
-                        LOGGER.info(
-                            "PDP scrape empty asin=%s (skipping update)",
-                            asin,
-                            extra={"channel": "debug"},
-                        )
-                        await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
-                        elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
-                        return idx, _pdp_skip_row(
-                            asin,
-                            "parse_failed",
-                            skip_detail="empty_parse",
-                            scrape_attempts=attempt,
-                            scrape_elapsed_ms=elapsed_ms,
-                            dom_ok=False,
-                        )
-
-                    row = _pdp_row(
-                        asin,
-                        title=title,
-                        price=price,
-                        shipping_text=shipping,
-                        image_url=image_url,
-                        merchant_blob=merchant_blob,
-                        allowed=allowed,
-                        availability_text=availability_text,
-                        explicit_oos=explicit_oos,
-                    )
-                    if explicit_oos and explicit_reason:
-                        row["stock_reason"] = explicit_reason
+                    await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                     elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
-                    _attach_scrape_meta(
-                        row,
+                    return idx, _pdp_skip_row(
+                        asin,
+                        "navigation_failed",
                         scrape_attempts=attempt,
                         scrape_elapsed_ms=elapsed_ms,
                     )
-                    await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
-                    return idx, row
-                except NetworkAccessDenied:
-                    raise
-                except Exception as exc:
+
+                LOGGER.info(
+                    "PDP navigation committed asin=%s",
+                    asin,
+                    extra={"channel": "debug"},
+                )
+
+                if await _is_hard_captcha_async(page):
                     LOGGER.info(
-                        "PDP row parse failed asin=%s: %s (skipping update)",
+                        "PDP hard captcha asin=%s (skipping update)",
                         asin,
-                        exc,
+                        extra={"channel": "debug"},
+                    )
+                    await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                    elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
+                    return idx, _pdp_skip_row(
+                        asin,
+                        "captcha",
+                        skip_detail="robot_check",
+                        scrape_attempts=attempt,
+                        scrape_elapsed_ms=elapsed_ms,
+                    )
+
+                await _dismiss_continue_shopping_async(
+                    page, max_clicks=continue_clicks, asin=asin
+                )
+                await asyncio.sleep(settle_s)
+                await _dismiss_continue_shopping_async(
+                    page, max_clicks=continue_clicks, asin=asin
+                )
+
+                availability_text = await _extract_availability_text_async(page)
+                explicit_oos, explicit_reason = await _detect_explicit_oos_async(
+                    page, availability_text=availability_text
+                )
+                title = await _extract_pdp_title_async(page) or _product_title_from_page_title(
+                    await page.title() or ""
+                )
+                price = None if explicit_oos else await _extract_pdp_price_async(page)
+
+                if not explicit_oos and price is None and title:
+                    inferred, infer_reason = await _detect_inferred_oos_async(
+                        page,
+                        availability_text=availability_text,
+                    )
+                    if inferred:
+                        explicit_oos = True
+                        explicit_reason = infer_reason
+                    elif await _buybox_purchasable_async(page):
+                        LOGGER.info(
+                            "PDP pay price missing with purchase action asin=%s (leaving unknown)",
+                            asin,
+                            extra={"channel": "debug"},
+                        )
+                    else:
+                        explicit_oos = True
+                        explicit_reason = "no_pay_price"
+                    if explicit_oos and explicit_reason:
+                        LOGGER.info(
+                            "PDP no pay price asin=%s reason=%s",
+                            asin,
+                            explicit_reason,
+                            extra={"channel": "debug"},
+                        )
+
+                if explicit_oos:
+                    merchant_blob = ""
+                    shipping = ""
+                    image_url = None
+                else:
+                    merchant_blob, shipping, image_url = await asyncio.gather(
+                        _pdp_merchant_blob_async(page),
+                        _extract_pdp_shipping_async(page),
+                        _extract_pdp_image_async(page),
+                    )
+
+                if not explicit_oos and not title and price is None:
+                    LOGGER.info(
+                        "PDP scrape empty asin=%s (skipping update)",
+                        asin,
                         extra={"channel": "debug"},
                     )
                     await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
@@ -1212,22 +1104,56 @@ async def _run_pdp_watch_async(
                     return idx, _pdp_skip_row(
                         asin,
                         "parse_failed",
-                        skip_detail="exception",
+                        skip_detail="empty_parse",
                         scrape_attempts=attempt,
                         scrape_elapsed_ms=elapsed_ms,
+                        dom_ok=False,
                     )
-                finally:
-                    await page.close()
-                    async with net_lock:
-                        pdp_net_bytes += meter.total_bytes
 
-        tasks = [worker(idx, asin) for idx, asin in enumerate(normalized)]
-        gathered: list[Any] = []
-        try:
-            gathered = await asyncio.gather(*tasks, return_exceptions=True)
-        finally:
-            await context.close()
-            await browser.close()
+                row = _pdp_row(
+                    asin,
+                    title=title,
+                    price=price,
+                    shipping_text=shipping,
+                    image_url=image_url,
+                    merchant_blob=merchant_blob,
+                    allowed=allowed,
+                    availability_text=availability_text,
+                    explicit_oos=explicit_oos,
+                )
+                if explicit_oos and explicit_reason:
+                    row["stock_reason"] = explicit_reason
+                elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
+                _attach_scrape_meta(
+                    row,
+                    scrape_attempts=attempt,
+                    scrape_elapsed_ms=elapsed_ms,
+                )
+                await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                return idx, row
+            except NetworkAccessDenied:
+                raise
+            except Exception as exc:
+                LOGGER.info(
+                    "PDP row parse failed asin=%s: %s (skipping update)",
+                    asin,
+                    exc,
+                    extra={"channel": "debug"},
+                )
+                await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
+                return idx, _pdp_skip_row(
+                    asin,
+                    "parse_failed",
+                    skip_detail="exception",
+                    scrape_attempts=attempt,
+                    scrape_elapsed_ms=elapsed_ms,
+                )
+            finally:
+                await page.close()
+
+    tasks = [worker(idx, asin) for idx, asin in enumerate(normalized)]
+    gathered = await asyncio.gather(*tasks, return_exceptions=True)
 
     for item in gathered:
         if isinstance(item, NetworkAccessDenied):
@@ -1244,16 +1170,63 @@ async def _run_pdp_watch_async(
 
     pairs.sort(key=lambda x: x[0])
     rows_out = [row for _, row in pairs]
-    ok = sum(1 for r in rows_out if isinstance(r, dict) and not r.get("_skip_update"))
-    skip = len(rows_out) - ok
     pdp_elapsed = time.monotonic() - cycle_started
-    usage_metrics.record_pdp_phase(
-        pdp_elapsed,
-        pdp_net_bytes,
-        ok=ok,
-        skip=skip,
-    )
     _emit_pdp_cycle_debug_report(rows_out, pdp_elapsed)
+    return rows_out, pdp_elapsed
+
+
+async def _run_pdp_watch_async(
+    normalized: list[str],
+    allowed: list[str],
+    *,
+    max_cycle_seconds: float,
+    scroll_delay_range: tuple[float, float],
+    max_concurrent: int,
+    jitter_range: tuple[float, float],
+    max_attempts: int,
+    headless: bool = True,
+    pdp_settle_seconds: float = _PDP_SETTLE_SECONDS_DEFAULT,
+    pdp_continue_shopping_max_clicks: int = _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT,
+    context: Any | None = None,
+    config: dict[str, Any] | None = None,
+    record_metrics: bool = True,
+) -> list[dict[str, Any]]:
+    """Run PDP watch on an existing context or launch a standalone browser."""
+    scrape_kwargs = {
+        "max_cycle_seconds": max_cycle_seconds,
+        "scroll_delay_range": scroll_delay_range,
+        "max_concurrent": max_concurrent,
+        "jitter_range": jitter_range,
+        "max_attempts": max_attempts,
+        "pdp_settle_seconds": pdp_settle_seconds,
+        "pdp_continue_shopping_max_clicks": pdp_continue_shopping_max_clicks,
+    }
+
+    if context is not None:
+        rows_out, pdp_elapsed = await _scrape_pdp_on_context(
+            context, normalized, allowed, **scrape_kwargs
+        )
+        if record_metrics:
+            ok = sum(1 for r in rows_out if isinstance(r, dict) and not r.get("_skip_update"))
+            skip = len(rows_out) - ok
+            usage_metrics.record_pdp_phase(pdp_elapsed, 0, ok=ok, skip=skip)
+        return rows_out
+
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as pw:
+        browser, ctx = await create_async_stealth_context(pw, headless=headless, config=config)
+        try:
+            rows_out, pdp_elapsed = await _scrape_pdp_on_context(
+                ctx, normalized, allowed, **scrape_kwargs
+            )
+        finally:
+            await close_async_browser(browser, ctx)
+
+    if record_metrics:
+        ok = sum(1 for r in rows_out if isinstance(r, dict) and not r.get("_skip_update"))
+        skip = len(rows_out) - ok
+        usage_metrics.record_pdp_phase(pdp_elapsed, 0, ok=ok, skip=skip)
     return rows_out
 
 
@@ -1269,8 +1242,16 @@ async def scrape_pdp_watch_async(
     headless: bool = True,
     pdp_settle_seconds: float = _PDP_SETTLE_SECONDS_DEFAULT,
     pdp_continue_shopping_max_clicks: int = _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT,
+    context: Any | None = None,
+    config: dict[str, Any] | None = None,
+    record_metrics: bool = True,
 ) -> list[dict[str, Any]]:
-    """Async version of scrape_pdp_watch for callers that already run an event loop."""
+    """Async PDP watch scrape.
+
+    When ``context`` is provided (main monitor cycle), reuses an existing async
+    BrowserContext with context-level BandwidthMeter attached by the caller.
+    Standalone callers omit ``context`` to launch and close their own browser.
+    """
     normalized: list[str] = []
     seen: set[str] = set()
     for raw in asins:
@@ -1300,6 +1281,9 @@ async def scrape_pdp_watch_async(
         headless=headless,
         pdp_settle_seconds=pdp_settle_seconds,
         pdp_continue_shopping_max_clicks=pdp_continue_shopping_max_clicks,
+        context=context,
+        config=config,
+        record_metrics=record_metrics,
     )
 
 
@@ -1320,6 +1304,8 @@ def scrape_pdp_watch(
     """Visit each watch ASIN on amazon.com PDP; return exactly one dict per unique valid ASIN (order preserved).
 
     Uses concurrent Playwright tabs (async API), capped at 3, sharing the global token bucket.
+    Launches its own browser (backward compat for tests). Production main uses
+    ``scrape_pdp_watch_async(..., context=...)`` via ``_scrape_pdp_on_context``.
 
     ``in_stock`` is True only when a parseable buy-box price exists and merchant blob matches
     ``allowed_seller_substrings`` (substring match after ASCII normalization).

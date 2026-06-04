@@ -112,6 +112,34 @@ SELECT recorded_at_il, total_sec, pdp_sec, aes_sec, exceeds_poll_interval, alert
 FROM cycle_stats ORDER BY id DESC LIMIT 20;
 ```
 
+## Bandwidth (cellular / metered link)
+
+The scraper records **Playwright browser** transfer only in `data/telemetry.db`. It does **not** measure OS-wide or cellular modem totals — other apps, updates, and background traffic on the PC are excluded but also mean `daily_bandwidth` can be **lower** than your ISP/cellular dashboard.
+
+| Source | What it measures |
+|--------|------------------|
+| Admin UI card **שימוש ברשת** / `GET /api/bandwidth/summary` | Last cycle + `daily_bandwidth` rollups from telemetry |
+| Windows / phone cellular usage | Whole device — compare to telemetry to spot drift |
+
+**Tables and columns**
+
+- `daily_bandwidth` — per Israel calendar day: `bytes_total`, `bytes_pdp`, `bytes_aes`, `bytes_image`, `cycles`.
+- `cycle_stats` (per cycle): `net_bytes_total`, `net_bytes_pdp`, `net_bytes_aes`, `net_bytes_image`, `blocked_url`, `gb_est_total`, plus existing `blocked_heavy`.
+
+**Planning target (500 GB / month plan)**
+
+- Rough budget: **under ~16 GB/day** on average (`500 ÷ 31`) if this PC is the main consumer of the cap.
+- If `daily_bandwidth.bytes_total` trends far below cellular usage, assume non-scraper traffic; if it is close or above scraper-only expectations, review image blocking, watch-list size, and concurrent tabs — not poll interval (see existing `pdp_poll_minutes` guidance elsewhere in this runbook).
+
+Example queries:
+
+```sql
+SELECT date_il, bytes_total, cycles FROM daily_bandwidth ORDER BY date_il DESC LIMIT 7;
+
+SELECT recorded_at_il, net_bytes_total, net_bytes_pdp, net_bytes_aes, blocked_url, blocked_heavy
+FROM cycle_stats ORDER BY id DESC LIMIT 10;
+```
+
 ## Client operational alerts (WhatsApp DM)
 
 When `wa_client_to` is set, short Hebrew alerts go to the client on captcha, cycle failure, network block, stall, chronic stall, or widespread scrape failures. Rate-limited (default: 30 min cooldown, max 3 per 6 h per kind). Full detail stays in `telemetry.db` and `monitor.log`.

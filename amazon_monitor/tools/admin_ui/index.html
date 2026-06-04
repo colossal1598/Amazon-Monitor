@@ -57,6 +57,48 @@
           <p class="hint">מספר נמוך = פחות עומס על Amazon</p>
         </div>
       </div>
+      <div class="row">
+        <div class="field">
+          <label for="pdp-settle-seconds">המתנה לפני קריאת מחיר מהדף (שניות)</label>
+          <input id="pdp-settle-seconds" type="number" min="1" max="30" step="0.5">
+          <p class="hint">אחרי טעינת דף המוצר — 1–30 (ברירת מחדל 8)</p>
+        </div>
+        <div class="field">
+          <label for="pdp-continue-shopping-max-clicks">מקסימום לחיצות «המשך לקנות»</label>
+          <input id="pdp-continue-shopping-max-clicks" type="number" min="0" max="10" step="1">
+          <p class="hint">כשמופיע מסך ביניים — 0–10 (ברירת מחדל 3)</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" id="bandwidth-card">
+      <h2>שימוש ברשת</h2>
+      <p class="muted">מדידת תעבורת דפדפן Playwright בלבד — לא כל תעבורת המחשב או הסלולר</p>
+      <div class="row">
+        <div class="field">
+          <label>סיבוב אחרון</label>
+          <p id="bw-last-cycle-mb" class="stat-value">—</p>
+          <p class="hint" id="bw-last-cycle-time"></p>
+        </div>
+        <div class="field">
+          <label>היום (מצטבר)</label>
+          <p id="bw-today-gb" class="stat-value">—</p>
+          <p class="hint" id="bw-today-cycles"></p>
+        </div>
+        <div class="field">
+          <label>7 ימים אחרונים</label>
+          <p id="bw-week-gb" class="stat-value">—</p>
+        </div>
+        <div class="field">
+          <label>חסימות בסיבוב אחרון</label>
+          <p id="bw-blocked" class="stat-value">—</p>
+          <p class="hint">blocked_url / blocked_heavy</p>
+        </div>
+      </div>
+      <div class="field">
+        <label for="bw-recent-cycles">10 סיבובים אחרונים (bytes)</label>
+        <textarea id="bw-recent-cycles" rows="6" readonly></textarea>
+      </div>
     </section>
 
     <section class="card">

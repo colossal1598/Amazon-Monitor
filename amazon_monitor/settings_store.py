@@ -94,6 +94,11 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "db_path": "data/monitor.db",
     "log_dir": "logs",
     "auth_dir": "auth",
+    # Empty list uses browser_factory.DEFAULT_BANDWIDTH_BLOCK_URL_SUBSTRINGS at runtime.
+    "bandwidth_block_url_substrings": [],
+    "bandwidth_block_stylesheets": False,
+    "bandwidth_block_non_amazon_script": False,
+    "bandwidth_meter_max_body_reads_per_cycle": 200,
 }
 
 

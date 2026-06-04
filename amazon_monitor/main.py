@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import json
 import logging
 import time
@@ -14,12 +15,12 @@ from dotenv import load_dotenv
 import client_alerts
 import fx_rate
 from alert_dedupe import dedupe_alerts_by_asin
-from browser_factory import init_global_rate_limiter
+from browser_factory import close_async_browser, create_async_stealth_context, init_global_rate_limiter, set_bandwidth_config
 from exceptions import CaptchaBlocked, NetworkAccessDenied
 from filter_pipeline import run_search_filter_pipeline
 from pdp_helpers import valid_asin
-from pdp_scraper import pdp_skip_log_label, scrape_pdp_watch
-from search_scraper import scrape_search
+from pdp_scraper import pdp_skip_log_label, scrape_pdp_watch_async
+from search_scraper import scrape_search, scrape_search_on_context_async
 from settings_store import list_asins, load_runtime_config, migrate_yaml_to_db
 from state_engine import StateEngine
 from telemetry_store import TelemetryStore
@@ -255,6 +256,113 @@ def _finish_cycle(
     )
 
 
+def _process_aes_discovery(
+    state_engine: StateEngine,
+    config: dict[str, Any],
+    *,
+    telemetry_store: TelemetryStore,
+    cycle_id: int,
+    aes_items: list[dict[str, Any]],
+    scrape_data: dict[str, Any],
+) -> tuple[int, int, list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    aes_outcome = scrape_data.get("scrape_outcome") if isinstance(scrape_data, dict) else {}
+    if not isinstance(aes_outcome, dict):
+        aes_outcome = {}
+    aes_pipeline_rows, _aes_meta = run_search_filter_pipeline(
+        aes_items,
+        config,
+        require_shipping_signal=False,
+    )
+    blocked_asins = _blacklist_asins(config)
+    aes_candidates = [
+        row for row in aes_pipeline_rows if (row.get("asin") or "").strip().upper() not in blocked_asins
+    ]
+    aes_alerts, aes_summary = state_engine.process_aes_serp_mirror(
+        aes_candidates,
+        source="aes_llc",
+        reconcile_absence=len(aes_candidates) > 0,
+        config=config,
+        telemetry=telemetry_store,
+        cycle_id=cycle_id,
+    )
+    return len(aes_items), len(aes_candidates), aes_alerts, aes_outcome, aes_summary
+
+
+async def _run_monitor_cycle_async(
+    config: dict[str, Any],
+    watch_list: list[str],
+    allowed_subs: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, float]]:
+    """Shared-browser scrape cycle: PDP then AES on one async context with BandwidthMeter."""
+    from playwright.async_api import async_playwright
+
+    usage_metrics.reset(config)
+    set_bandwidth_config(config)
+    headless = bool(config.get("playwright_headless", True))
+    max_cycle_seconds = int(config.get("max_cycle_seconds", 170))
+    delay_range = _coerce_range(config.get("pdp_watch_scroll_delay_seconds"), (0.25, 0.65))
+    timings: dict[str, float] = {}
+
+    pdp_rows: list[dict[str, Any]] = []
+    aes_items: list[dict[str, Any]] = []
+    aes_scrape_data: dict[str, Any] = {"scrape_outcome": {}}
+
+    async with async_playwright() as pw:
+        browser, context = await create_async_stealth_context(pw, headless=headless, config=config)
+        meter = usage_metrics.BandwidthMeter(config)
+        meter.attach_context_async(context)
+        try:
+            if watch_list:
+                meter.set_phase("pdp")
+                pdp_started = time.monotonic()
+                pdp_rows = await scrape_pdp_watch_async(
+                    watch_list,
+                    allowed_subs,
+                    max_cycle_seconds=max_cycle_seconds,
+                    scroll_delay_range=delay_range,
+                    max_concurrent_tabs=int(config.get("pdp_watch_max_concurrent_tabs", 3)),
+                    tab_jitter_seconds=config.get("pdp_watch_tab_jitter_seconds"),
+                    max_attempts=int(config.get("pdp_watch_max_attempts", 1)),
+                    headless=headless,
+                    pdp_settle_seconds=float(config.get("pdp_settle_seconds", 8.0)),
+                    pdp_continue_shopping_max_clicks=int(
+                        config.get("pdp_continue_shopping_max_clicks", 3)
+                    ),
+                    context=context,
+                    config=config,
+                    record_metrics=False,
+                )
+                pdp_elapsed = time.monotonic() - pdp_started
+                ok = sum(1 for r in pdp_rows if isinstance(r, dict) and not r.get("_skip_update"))
+                skip = len(pdp_rows) - ok
+                usage_metrics.record_pdp_phase(pdp_elapsed, 0, ok=ok, skip=skip)
+                timings["pdp_sec"] = pdp_elapsed
+
+            meter.set_phase("aes")
+            aes_started = time.monotonic()
+            aes_llc_url = resolve_aes_llc_url(config)
+            aes_items, aes_scrape_data = await scrape_search_on_context_async(
+                context,
+                aes_llc_url,
+                source="aes_llc",
+                scrape_mode="newest_front",
+                pagination_mode="fixed",
+                fixed_pages=1,
+                max_search_pages=1,
+                collect_debug=False,
+                max_cycle_seconds=max_cycle_seconds,
+                serp_scroll_profile="minimal",
+            )
+            aes_elapsed = time.monotonic() - aes_started
+            usage_metrics.record_aes_phase(aes_elapsed, 0)
+            timings["aes_sec"] = aes_elapsed
+            usage_metrics.flush_meter(meter)
+        finally:
+            await close_async_browser(browser, context)
+
+    return pdp_rows, aes_items, aes_scrape_data, timings
+
+
 def main() -> None:
     load_dotenv()
     bootstrap_config = load_config()
@@ -321,41 +429,31 @@ def main() -> None:
         *,
         telemetry_store: TelemetryStore,
         cycle_id: int,
+        aes_items: list[dict[str, Any]] | None = None,
+        scrape_data: dict[str, Any] | None = None,
     ) -> tuple[int, int, list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-        aes_llc_url = resolve_aes_llc_url(config)
-        aes_items, scrape_data = scrape_search(
-            aes_llc_url,
-            source="aes_llc",
-            scrape_mode="newest_front",
-            pagination_mode="fixed",
-            fixed_pages=1,
-            max_search_pages=1,
-            collect_debug=False,
-            max_cycle_seconds=int(config.get("max_cycle_seconds", 170)),
-            serp_scroll_profile="minimal",
-            headless=bool(config.get("playwright_headless", True)),
-        )
-        aes_outcome = scrape_data.get("scrape_outcome") if isinstance(scrape_data, dict) else {}
-        if not isinstance(aes_outcome, dict):
-            aes_outcome = {}
-        aes_pipeline_rows, _aes_meta = run_search_filter_pipeline(
-            aes_items,
+        if aes_items is None or scrape_data is None:
+            aes_llc_url = resolve_aes_llc_url(config)
+            aes_items, scrape_data = scrape_search(
+                aes_llc_url,
+                source="aes_llc",
+                scrape_mode="newest_front",
+                pagination_mode="fixed",
+                fixed_pages=1,
+                max_search_pages=1,
+                collect_debug=False,
+                max_cycle_seconds=int(config.get("max_cycle_seconds", 170)),
+                serp_scroll_profile="minimal",
+                headless=bool(config.get("playwright_headless", True)),
+            )
+        return _process_aes_discovery(
+            state_engine,
             config,
-            require_shipping_signal=False,
-        )
-        blocked_asins = _blacklist_asins(config)
-        aes_candidates = [
-            row for row in aes_pipeline_rows if (row.get("asin") or "").strip().upper() not in blocked_asins
-        ]
-        aes_alerts, aes_summary = state_engine.process_aes_serp_mirror(
-            aes_candidates,
-            source="aes_llc",
-            reconcile_absence=len(aes_candidates) > 0,
-            config=config,
-            telemetry=telemetry_store,
+            telemetry_store=telemetry_store,
             cycle_id=cycle_id,
+            aes_items=aes_items,
+            scrape_data=scrape_data,
         )
-        return len(aes_items), len(aes_candidates), aes_alerts, aes_outcome, aes_summary
 
     def pdp_loop() -> None:
         if scraping_paused["value"]:
@@ -380,7 +478,6 @@ def main() -> None:
         aes_state_summary: dict[str, Any] = {}
         try:
             telemetry.maybe_prune(config)
-            usage_metrics.reset(config)
             cycle_id = telemetry.begin_cycle(config)
             watch_list = _normalize_pdp_watch_asins(config.get("pdp_watch_asins"))
             log_lifecycle(
@@ -394,23 +491,12 @@ def main() -> None:
             aes_alert_count = 0
             tick_alerts: list[dict[str, Any]] = []
 
+            allowed_subs = _allowed_seller_substrings(config)
+            pdp_rows, aes_items, aes_scrape_data, _timings = asyncio.run(
+                _run_monitor_cycle_async(config, watch_list, allowed_subs)
+            )
+
             if watch_list:
-                allowed_subs = _allowed_seller_substrings(config)
-                delay_range = _coerce_range(config.get("pdp_watch_scroll_delay_seconds"), (0.25, 0.65))
-                pdp_rows = scrape_pdp_watch(
-                    watch_list,
-                    allowed_subs,
-                    max_cycle_seconds=int(config.get("max_cycle_seconds", 170)),
-                    scroll_delay_range=delay_range,
-                    max_concurrent_tabs=int(config.get("pdp_watch_max_concurrent_tabs", 3)),
-                    tab_jitter_seconds=config.get("pdp_watch_tab_jitter_seconds"),
-                    max_attempts=int(config.get("pdp_watch_max_attempts", 1)),
-                    headless=bool(config.get("playwright_headless", True)),
-                    pdp_settle_seconds=float(config.get("pdp_settle_seconds", 8.0)),
-                    pdp_continue_shopping_max_clicks=int(
-                        config.get("pdp_continue_shopping_max_clicks", 3)
-                    ),
-                )
                 skip_rows = sum(1 for r in pdp_rows if isinstance(r, dict) and r.get("_skip_update"))
                 ok_rows = len(pdp_rows) - skip_rows
                 for r in pdp_rows:
@@ -443,6 +529,11 @@ def main() -> None:
             else:
                 LOGGER.warning("No pdp_watch_asins configured; PDP cycle did nothing.")
                 ok_rows = 0
+                skip_rows = 0
+                in_stock_rows = 0
+                captcha_rows = 0
+                captcha_aborted_rows = 0
+                pdp_state_summary = {}
 
             if captcha_rows:
                 captcha_asins = sorted(
@@ -498,6 +589,8 @@ def main() -> None:
                 config,
                 telemetry_store=telemetry,
                 cycle_id=cycle_id,
+                aes_items=aes_items,
+                scrape_data=aes_scrape_data,
             )
             aes_alert_count = len(aes_alerts)
             tick_alerts.extend(aes_alerts)
