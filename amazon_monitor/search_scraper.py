@@ -29,6 +29,27 @@ PaginationMode = Literal["auto", "fixed"]
 SerpScrollProfile = Literal["full", "minimal"]
 
 
+class _AmazonSoftErrorPage(Exception):
+    """Amazon's generic 'Sorry! Something went wrong' interstitial.
+
+    Distinct from a captcha and from a genuinely slow-loading SERP: the page has already
+    fully rendered (title is present) but it is Amazon's own error page, not search
+    results. Waiting out the full result-card selector timeout on this page wastes time
+    for nothing, so it is detected and retried immediately instead.
+    """
+
+
+_SOFT_ERROR_TITLE_RE = re.compile(
+    r"sorry.{0,15}(something went wrong|we couldn.t find that page)|"
+    r"\b(503|500)\b.{0,20}(error|unavailable)|service unavailable|internal server error",
+    re.IGNORECASE,
+)
+
+
+def _is_amazon_soft_error_title(title: str) -> bool:
+    return bool(_SOFT_ERROR_TITLE_RE.search(title or ""))
+
+
 # Recognize the “internet is blocked/broken” kinds of failures so the monitor can pause and recover instead of just retrying a page forever.
 def _is_network_error(error: Exception) -> bool:
     err_str = str(error).lower()
@@ -541,27 +562,41 @@ def _wait_serp_result_cards(
     selector_timeout_ms: int = 25_000,
     goto_timeout_ms: int = 45_000,
 ) -> None:
-    """After navigation commit, wait for SERP result cards; on timeout, re-goto up to ``serp_inner_retries`` times."""
+    """After navigation commit, wait for SERP result cards; on timeout, re-goto up to ``serp_inner_retries`` times.
+
+    Checks the page title for Amazon's own "Sorry! Something went wrong" error interstitial
+    before waiting: that page is fully rendered immediately, so waiting out the full
+    ``selector_timeout_ms`` on it just wastes cycle time before the (identical) retry.
+    """
     recoveries = max(0, serp_inner_retries)
     total_rounds = 1 + recoveries
     for round_idx in range(total_rounds):
         try:
+            try:
+                title_now = page.title() or ""
+            except Exception:
+                title_now = ""
+            if _is_amazon_soft_error_title(title_now):
+                raise _AmazonSoftErrorPage(
+                    f"Amazon soft-error interstitial detected source={source} title={title_now!r}"
+                )
             page.wait_for_selector(
                 "div[data-component-type='s-search-result']",
                 timeout=selector_timeout_ms,
             )
             return
-        except PlaywrightTimeoutError:
+        except (PlaywrightTimeoutError, _AmazonSoftErrorPage) as exc:
             if round_idx >= total_rounds - 1:
                 raise
             title_snip = ((page.title() or "").strip())[:160]
             LOGGER.warning(
-                "SERP ready check: result cards not found source=%s round=%s/%s url=%s title=%r — retrying navigation (wait_until=%s)",
+                "SERP ready check: result cards not found source=%s round=%s/%s url=%s title=%r reason=%s — retrying navigation (wait_until=%s)",
                 source,
                 round_idx + 1,
                 total_rounds,
                 page.url,
                 title_snip,
+                type(exc).__name__,
                 browser_factory.NAV_WAIT_UNTIL,
             )
             time.sleep(random.uniform(0.5, 1.5))
@@ -1288,26 +1323,39 @@ async def _wait_serp_result_cards_async(
     selector_timeout_ms: int = 25_000,
     goto_timeout_ms: int = 45_000,
 ) -> None:
+    """Checks the page title for Amazon's own "Sorry! Something went wrong" error interstitial
+    before waiting: that page is fully rendered immediately, so waiting out the full
+    ``selector_timeout_ms`` on it just wastes cycle time before the (identical) retry.
+    """
     recoveries = max(0, serp_inner_retries)
     total_rounds = 1 + recoveries
     for round_idx in range(total_rounds):
         try:
+            try:
+                title_now = (await page.title()) or ""
+            except Exception:
+                title_now = ""
+            if _is_amazon_soft_error_title(title_now):
+                raise _AmazonSoftErrorPage(
+                    f"Amazon soft-error interstitial detected source={source} title={title_now!r}"
+                )
             await page.wait_for_selector(
                 "div[data-component-type='s-search-result']",
                 timeout=selector_timeout_ms,
             )
             return
-        except PlaywrightTimeoutError:
+        except (PlaywrightTimeoutError, _AmazonSoftErrorPage) as exc:
             if round_idx >= total_rounds - 1:
                 raise
             title_snip = (((await page.title()) or "").strip())[:160]
             LOGGER.warning(
-                "SERP ready check: result cards not found source=%s round=%s/%s url=%s title=%r — retrying navigation (wait_until=%s)",
+                "SERP ready check: result cards not found source=%s round=%s/%s url=%s title=%r reason=%s — retrying navigation (wait_until=%s)",
                 source,
                 round_idx + 1,
                 total_rounds,
                 page.url,
                 title_snip,
+                type(exc).__name__,
                 browser_factory.NAV_WAIT_UNTIL,
             )
             await asyncio.sleep(random.uniform(0.5, 1.5))
@@ -1347,6 +1395,7 @@ async def _scrape_single_attempt_on_context_async(
     pagination_delay_range: tuple[float, float] = (2.0, 4.5),
     serp_inner_retries: int = 2,
     serp_scroll_profile: SerpScrollProfile = "full",
+    selector_timeout_ms: int = 25_000,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     all_products: list[dict[str, Any]] = []
     debug_data: dict[str, Any] = {"selector_debug": [], "scrape_meta": {}, "scrape_outcome": {}}
@@ -1406,6 +1455,7 @@ async def _scrape_single_attempt_on_context_async(
                 current_url,
                 source,
                 serp_inner_retries=serp_inner_retries,
+                selector_timeout_ms=selector_timeout_ms,
             )
             if serp_scroll_profile == "minimal":
                 await _scroll_serp_to_settle_async(page, scroll_delay_range, max_steps=3)
@@ -1546,6 +1596,7 @@ async def scrape_search_on_context_async(
     pagination_delay_range: tuple[float, float] | None = None,
     serp_inner_retries: int = 2,
     serp_scroll_profile: SerpScrollProfile = "full",
+    selector_timeout_ms: int = 25_000,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Async SERP scrape on an existing async BrowserContext (caller records AES metrics)."""
     sdr = scroll_delay_range if scroll_delay_range is not None else (0.25, 0.65)
@@ -1565,4 +1616,5 @@ async def scrape_search_on_context_async(
         pagination_delay_range=pdr,
         serp_inner_retries=serp_inner_retries,
         serp_scroll_profile=serp_scroll_profile,
+        selector_timeout_ms=selector_timeout_ms,
     )

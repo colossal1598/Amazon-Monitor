@@ -364,6 +364,7 @@ async def _run_monitor_cycle_async(
                     max_cycle_seconds=max_cycle_seconds,
                     serp_scroll_profile="minimal",
                     serp_inner_retries=1,
+                    selector_timeout_ms=int(config.get("aes_selector_timeout_ms", 12_000)),
                 )
             except CaptchaBlocked as exc:
                 aes_error = f"captcha:{exc}"

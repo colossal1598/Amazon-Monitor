@@ -38,6 +38,10 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "pdp_continue_shopping_max_clicks": 3,
     "pdp_title_wait_ms": 6_000,
     "pdp_price_wait_ms": 2_000,
+    # AES/SERP result-card wait per attempt. Kept short: this is a lightweight 1-page
+    # check and normally resolves in a few seconds; a long timeout here just delays
+    # detection of dead/error pages and risks overlapping the next scheduled cycle.
+    "aes_selector_timeout_ms": 12_000,
     "fx_enabled": True,
     "fx_refresh_every_runs": 10,
     "fx_cache_path": "data/fx_usd_ils.json",
