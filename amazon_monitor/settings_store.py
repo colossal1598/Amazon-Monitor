@@ -31,7 +31,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "title_blacklist_phrases": [],
     "pdp_allowed_seller_substrings": ["amazon.com", "amazon export"],
     "pdp_watch_max_concurrent_tabs": 3,
-    "pdp_watch_max_attempts": 1,
+    "pdp_watch_max_attempts": 2,
     "pdp_watch_tab_jitter_seconds": [0.15, 0.55],
     "pdp_watch_scroll_delay_seconds": [0.25, 0.65],
     "pdp_settle_seconds": 8.0,

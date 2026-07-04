@@ -292,9 +292,18 @@ async def _run_monitor_cycle_async(
     config: dict[str, Any],
     watch_list: list[str],
     allowed_subs: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, float]]:
-    """Shared-browser scrape cycle: PDP then AES on one async context with BandwidthMeter."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, float], str | None]:
+    """Shared-browser scrape cycle: PDP then AES on one async context with BandwidthMeter.
+
+    IMPORTANT: PDP results are always returned, even when the AES/SERP phase afterward
+    fails. AES/SERP (captcha, network blip, or a slow "selector wait" timeout) is a
+    separate, best-effort discovery feature and must never discard PDP watch data that
+    already scraped successfully, nor delay PDP alerts. AES failures are reported back
+    via the ``aes_error`` string instead of raising, so the caller can still process and
+    send PDP alerts for this cycle.
+    """
     from playwright.async_api import async_playwright
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutErrorAsync
 
     usage_metrics.reset(config)
     set_bandwidth_config(config)
@@ -306,6 +315,7 @@ async def _run_monitor_cycle_async(
     pdp_rows: list[dict[str, Any]] = []
     aes_items: list[dict[str, Any]] = []
     aes_scrape_data: dict[str, Any] = {"scrape_outcome": {}}
+    aes_error: str | None = None
 
     async with async_playwright() as pw:
         browser, context = await create_async_stealth_context(pw, headless=headless, config=config)
@@ -322,7 +332,7 @@ async def _run_monitor_cycle_async(
                     scroll_delay_range=delay_range,
                     max_concurrent_tabs=int(config.get("pdp_watch_max_concurrent_tabs", 3)),
                     tab_jitter_seconds=config.get("pdp_watch_tab_jitter_seconds"),
-                    max_attempts=int(config.get("pdp_watch_max_attempts", 1)),
+                    max_attempts=int(config.get("pdp_watch_max_attempts", 2)),
                     headless=headless,
                     pdp_settle_seconds=float(config.get("pdp_settle_seconds", 8.0)),
                     pdp_continue_shopping_max_clicks=int(
@@ -340,27 +350,52 @@ async def _run_monitor_cycle_async(
 
             meter.set_phase("aes")
             aes_started = time.monotonic()
-            aes_llc_url = resolve_aes_llc_url(config)
-            aes_items, aes_scrape_data = await scrape_search_on_context_async(
-                context,
-                aes_llc_url,
-                source="aes_llc",
-                scrape_mode="newest_front",
-                pagination_mode="fixed",
-                fixed_pages=1,
-                max_search_pages=1,
-                collect_debug=False,
-                max_cycle_seconds=max_cycle_seconds,
-                serp_scroll_profile="minimal",
-            )
+            try:
+                aes_llc_url = resolve_aes_llc_url(config)
+                aes_items, aes_scrape_data = await scrape_search_on_context_async(
+                    context,
+                    aes_llc_url,
+                    source="aes_llc",
+                    scrape_mode="newest_front",
+                    pagination_mode="fixed",
+                    fixed_pages=1,
+                    max_search_pages=1,
+                    collect_debug=False,
+                    max_cycle_seconds=max_cycle_seconds,
+                    serp_scroll_profile="minimal",
+                    serp_inner_retries=1,
+                )
+            except CaptchaBlocked as exc:
+                aes_error = f"captcha:{exc}"
+            except NetworkAccessDenied as exc:
+                aes_error = f"network:{exc}"
+            except PlaywrightTimeoutErrorAsync as exc:
+                aes_error = f"timeout:{exc}"
+            except Exception as exc:  # noqa: BLE001 - AES is best-effort; never lose PDP data
+                aes_error = f"other:{exc}"
             aes_elapsed = time.monotonic() - aes_started
             usage_metrics.record_aes_phase(aes_elapsed, 0)
             timings["aes_sec"] = aes_elapsed
+            if aes_error:
+                LOGGER.warning(
+                    "AES/SERP scrape failed this cycle; PDP results kept: %s",
+                    aes_error,
+                    extra={"channel": "debug"},
+                )
+                aes_scrape_data = {
+                    "scrape_outcome": {
+                        "navigation_ok": False,
+                        "cards_found": 0,
+                        "total_result_count": None,
+                    },
+                    "error": aes_error,
+                }
+                aes_items = []
             usage_metrics.flush_meter(meter)
         finally:
             await close_async_browser(browser, context)
 
-    return pdp_rows, aes_items, aes_scrape_data, timings
+    return pdp_rows, aes_items, aes_scrape_data, timings, aes_error
 
 
 def main() -> None:
@@ -492,7 +527,7 @@ def main() -> None:
             tick_alerts: list[dict[str, Any]] = []
 
             allowed_subs = _allowed_seller_substrings(config)
-            pdp_rows, aes_items, aes_scrape_data, _timings = asyncio.run(
+            pdp_rows, aes_items, aes_scrape_data, _timings, aes_error = asyncio.run(
                 _run_monitor_cycle_async(config, watch_list, allowed_subs)
             )
 
@@ -585,13 +620,37 @@ def main() -> None:
                 handle_captcha_or_network_pause(config)
                 return
 
-            aes_raw_count, aes_pipeline_count, aes_alerts, aes_outcome, aes_state_summary = aes_discovery_loop(
-                config,
-                telemetry_store=telemetry,
-                cycle_id=cycle_id,
-                aes_items=aes_items,
-                scrape_data=aes_scrape_data,
-            )
+            if aes_error:
+                # AES/SERP failed after PDP already succeeded: never drop the PDP alerts
+                # that were already computed above. Record the failure for visibility and
+                # move on — the next cycle will retry AES independently of PDP.
+                aes_raw_count = 0
+                aes_pipeline_count = 0
+                aes_alerts = []
+                aes_outcome = (
+                    aes_scrape_data.get("scrape_outcome") if isinstance(aes_scrape_data, dict) else {}
+                ) or {}
+                aes_state_summary = {}
+                LOGGER.warning(
+                    "AES/SERP skipped this cycle due to scrape failure (PDP alerts still sent): %s",
+                    aes_error,
+                    extra={"channel": "lifecycle"},
+                )
+                telemetry.debug(cycle_id, "aes_scrape_failed", detail=aes_error)
+                if aes_error.startswith("captcha:"):
+                    client_alerts.maybe_alert("captcha", config, telemetry, cycle_id=cycle_id, detail=aes_error)
+                elif aes_error.startswith("network:"):
+                    client_alerts.maybe_alert(
+                        "network_blocked", config, telemetry, cycle_id=cycle_id, detail=aes_error
+                    )
+            else:
+                aes_raw_count, aes_pipeline_count, aes_alerts, aes_outcome, aes_state_summary = aes_discovery_loop(
+                    config,
+                    telemetry_store=telemetry,
+                    cycle_id=cycle_id,
+                    aes_items=aes_items,
+                    scrape_data=aes_scrape_data,
+                )
             aes_alert_count = len(aes_alerts)
             tick_alerts.extend(aes_alerts)
             deduped_alerts = dedupe_alerts_by_asin(tick_alerts)
@@ -608,6 +667,7 @@ def main() -> None:
                     ("AES", aes_pipeline_count),
                     ("Alerts", sent_alerts),
                     ("captcha", bool(captcha_rows)),
+                    ("aes_error", aes_error or "none"),
                     ("total_sec", cycle_timing["total_sec"]),
                 ],
             )
@@ -632,6 +692,9 @@ def main() -> None:
             )
             mark_job_success("pdp")
             fx_rate.bump_monitor_tick(config)
+            if aes_error and (aes_error.startswith("captcha:") or aes_error.startswith("network:")):
+                # Pause only after PDP alerts for this cycle were already sent above.
+                handle_captcha_or_network_pause(config)
         except CaptchaBlocked:
             mark_job_error("pdp", "CaptchaBlocked")
             LOGGER.warning("CaptchaBlocked during PDP cycle")

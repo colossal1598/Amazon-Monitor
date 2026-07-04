@@ -752,8 +752,15 @@ def _emit_pdp_cycle_debug_report(rows: list[dict[str, Any]], pdp_sec: float) -> 
             status = "in_stock" if row.get("in_stock") else "oos"
             price = row.get("price")
             price_s = f"${price:.2f}" if isinstance(price, (int, float)) else "-"
+            extra = ""
+            if not row.get("in_stock"):
+                reason = row.get("stock_reason") or "?"
+                extra = f"  reason={reason}"
+                if reason == "seller_mismatch":
+                    snippet = " ".join(str(row.get("seller_text") or "").split())[:120]
+                    extra += f"  seller_text={snippet!r}" if snippet else "  seller_text=<empty>"
             lines.append(
-                f"{asin}  ok       {status:<9}  {price_s:<8}  attempts={attempts}  {elapsed_s}"
+                f"{asin}  ok       {status:<9}  {price_s:<8}  attempts={attempts}  {elapsed_s}{extra}"
             )
     lines.append(f"--- end pdp cycle ok={ok} skip={skip} ---")
     LOGGER.info("\n".join(lines), extra={"channel": "debug"})
@@ -993,20 +1000,42 @@ async def _scrape_pdp_on_context(
                                 exc,
                             )
 
-                try:
-                    await page.goto(
-                        url,
-                        wait_until=browser_factory.NAV_WAIT_UNTIL,
-                        timeout=_PDP_GOTO_TIMEOUT_MS,
-                    )
-                except Exception as e:
-                    if _is_network_error(e):
-                        raise NetworkAccessDenied(f"PDP network error for {asin}: {e}", e) from e
+                nav_error: Exception | None = None
+                nav_tries_used = 0
+                for nav_try in range(1, attempt + 1):
+                    nav_tries_used = nav_try
+                    try:
+                        await page.goto(
+                            url,
+                            wait_until=browser_factory.NAV_WAIT_UNTIL,
+                            timeout=_PDP_GOTO_TIMEOUT_MS,
+                        )
+                        nav_error = None
+                        break
+                    except Exception as e:
+                        if _is_network_error(e):
+                            raise NetworkAccessDenied(f"PDP network error for {asin}: {e}", e) from e
+                        nav_error = e
+                        if nav_try >= attempt or time.monotonic() - cycle_started > max_cycle_seconds:
+                            break
+                        LOGGER.info(
+                            "PDP navigation failed asin=%s try=%s/%s wait_until=%s (retrying): %s",
+                            asin,
+                            nav_try,
+                            attempt,
+                            browser_factory.NAV_WAIT_UNTIL,
+                            e,
+                            extra={"channel": "debug"},
+                        )
+                        await asyncio.sleep(random.uniform(0.4, 0.9))
+                if nav_error is not None:
                     LOGGER.info(
-                        "PDP navigation failed asin=%s wait_until=%s: %s",
+                        "PDP navigation failed asin=%s tries=%s/%s wait_until=%s: %s",
                         asin,
+                        nav_tries_used,
+                        attempt,
                         browser_factory.NAV_WAIT_UNTIL,
-                        e,
+                        nav_error,
                         extra={"channel": "debug"},
                     )
                     await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
@@ -1014,7 +1043,7 @@ async def _scrape_pdp_on_context(
                     return idx, _pdp_skip_row(
                         asin,
                         "navigation_failed",
-                        scrape_attempts=attempt,
+                        scrape_attempts=nav_tries_used,
                         scrape_elapsed_ms=elapsed_ms,
                     )
 

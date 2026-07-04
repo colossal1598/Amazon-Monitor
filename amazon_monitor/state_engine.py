@@ -286,8 +286,15 @@ class StateEngine:
 
                 old_price = _as_float(row["price"])
                 old_stock = int(row["in_stock"] or 0)
+                seller_snippet = " ".join(str(item.get("seller_text") or "").split())[:200] or None
                 if confidence == "unknown":
-                    _tel("pdp_watch_unknown_stock", asin=asin, reason=reason or "unknown")
+                    _tel(
+                        "pdp_watch_unknown_stock",
+                        asin=asin,
+                        reason=reason or "unknown",
+                        price=new_price,
+                        seller_snippet=seller_snippet,
+                    )
                     skipped_update_count += 1
                     continue
                 if new_stock == 0:
@@ -300,6 +307,8 @@ class StateEngine:
                             asin=asin,
                             confidence=confidence,
                             reason=reason or "unknown",
+                            price=new_price,
+                            seller_snippet=seller_snippet,
                         )
                         skipped_update_count += 1
                         continue

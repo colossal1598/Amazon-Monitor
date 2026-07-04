@@ -58,6 +58,11 @@ module.exports = {
       max_restarts: 20,
       exp_backoff_restart_delay: 3000,
       watch: false,
+      // Daily off-peak restart: cheap insurance against any slow in-process drift
+      // (rate limiter state, memory growth, long-lived event loop) after days of
+      // continuous scraping. Browsers are already relaunched fresh every cycle, so
+      // this only resets the Python process itself, not scrape state (SQLite-backed).
+      cron_restart: "0 5 * * *",
       env: {
         PYTHONUNBUFFERED: "1",
         ...dotEnv,
