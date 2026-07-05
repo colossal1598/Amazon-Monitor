@@ -103,6 +103,11 @@ module.exports = {
       autorestart: false,
       watch: false,
       cron_restart: "*/10 * * * *",
+      // Needs WA_API_URL/WA_API_KEY to send a WhatsApp ping when the monitor is stuck/dead.
+      env: {
+        PYTHONUNBUFFERED: "1",
+        ...dotEnv,
+      },
     },
   ],
 };

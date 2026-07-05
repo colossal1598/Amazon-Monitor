@@ -15,6 +15,7 @@ import usage_metrics
 LOGGER = logging.getLogger(__name__)
 
 STALL_TRACKER_KIND = "_stall_tracker"
+AES_FAIL_TRACKER_KIND = "_aes_fail_tracker"
 
 
 def _israel_tz():
@@ -317,6 +318,35 @@ class TelemetryStore:
                 ON CONFLICT(kind) DO UPDATE SET payload_json = excluded.payload_json
                 """,
                 (STALL_TRACKER_KIND, now, now, payload),
+            )
+            self.conn.commit()
+
+    def get_aes_fail_tracker(self) -> dict[str, Any]:
+        """Consecutive-AES-failure counter, so a single self-recovering SERP hiccup never alerts."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT payload_json FROM client_alert_state WHERE kind = ?",
+                (AES_FAIL_TRACKER_KIND,),
+            ).fetchone()
+        if not row:
+            return {"consecutive_fail_count": 0}
+        try:
+            data = json.loads(str(row[0]))
+        except json.JSONDecodeError:
+            data = {}
+        return {"consecutive_fail_count": int(data.get("consecutive_fail_count") or 0)}
+
+    def set_aes_fail_tracker(self, data: dict[str, Any]) -> None:
+        payload = json.dumps(data, ensure_ascii=False)
+        now = israel_now_iso()
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO client_alert_state (kind, last_sent_at_il, sent_count_in_window, window_started_il, payload_json)
+                VALUES (?, ?, 0, ?, ?)
+                ON CONFLICT(kind) DO UPDATE SET payload_json = excluded.payload_json
+                """,
+                (AES_FAIL_TRACKER_KIND, now, now, payload),
             )
             self.conn.commit()
 

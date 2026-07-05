@@ -21,6 +21,7 @@ CLIENT_MESSAGES: dict[str, str] = {
     "chronically_stalled": "הסריקה איטית באופן ממושך. מומלץ לבדוק את המערכת.",
     "scrape_degraded": "חלק ניכר מהדפים לא נסרק בהצלחה. ייתכנו פערים בעדכונים.",
     "recovery": "הסריקה חודשה והמערכת פועלת כרגיל.",
+    "health_check_failed": "בדיקת התקינות נכשלה: יתכן שהמעקב תקוע או שהתהליך לא רץ. כדאי לבדוק את המערכת.",
 }
 
 
@@ -149,12 +150,20 @@ def check_stalled(
     tracker["consecutive_stall_count"] = int(tracker.get("consecutive_stall_count") or 0) + 1
     telemetry.set_stall_tracker(tracker)
 
+    # A single cycle running a little over the poll interval (e.g. one AES/SERP hiccup
+    # that already recovered within the same cycle) is not worth paging about — only
+    # alert once it happens on back-to-back cycles.
+    min_consecutive = max(1, int(config.get("client_alert_stall_min_consecutive", 2)))
+    if tracker["consecutive_stall_count"] < min_consecutive:
+        check_chronically_stalled(config, telemetry, cycle_id=cycle_id)
+        return
+
     sent = maybe_alert(
         "stalled",
         config,
         telemetry,
         cycle_id=cycle_id,
-        detail=f"total_sec={summary.get('total_sec')}",
+        detail=f"total_sec={summary.get('total_sec')} consecutive={tracker['consecutive_stall_count']}",
     )
     if not sent:
         tracker = telemetry.get_stall_tracker()
@@ -205,15 +214,33 @@ def check_scrape_degraded(
 
     pdp_degraded = watch_count >= 1 and scrape_errors >= min_fail and (scrape_errors / watch_count) >= ratio_threshold
 
-    aes_degraded = False
+    aes_bad_this_cycle = False
     if isinstance(aes_outcome, dict):
         nav_ok = aes_outcome.get("navigation_ok")
         cards = int(aes_outcome.get("cards_found") or 0)
         total = aes_outcome.get("total_result_count")
         if nav_ok is False:
-            aes_degraded = True
+            aes_bad_this_cycle = True
         elif nav_ok and cards == 0 and total is not None and int(total) > 0:
-            aes_degraded = True
+            aes_bad_this_cycle = True
+
+    # AES/SERP is a single lightweight page check that now fails fast and retries on its
+    # own within the same cycle (see search_scraper soft-error detection). One isolated
+    # bad cycle is not "a significant portion of pages failed" — only alert once AES has
+    # been unhealthy for several consecutive cycles in a row.
+    aes_degraded = False
+    aes_consecutive = 0
+    if telemetry:
+        tracker = telemetry.get_aes_fail_tracker()
+        aes_consecutive = int(tracker.get("consecutive_fail_count") or 0) + 1 if aes_bad_this_cycle else 0
+        tracker["consecutive_fail_count"] = aes_consecutive
+        telemetry.set_aes_fail_tracker(tracker)
+        min_consecutive = max(1, int(config.get("client_alert_aes_fail_consecutive", 3)))
+        aes_degraded = aes_bad_this_cycle and aes_consecutive >= min_consecutive
+    else:
+        # No telemetry available to track consecutiveness (e.g. direct/test calls) —
+        # fall back to alerting immediately, matching prior behavior.
+        aes_degraded = aes_bad_this_cycle
 
     if not pdp_degraded and not aes_degraded:
         return
@@ -222,7 +249,7 @@ def check_scrape_degraded(
     if pdp_degraded:
         detail_parts.append(f"pdp_errors={scrape_errors}/{watch_count}")
     if aes_degraded:
-        detail_parts.append(f"aes_outcome={aes_outcome}")
+        detail_parts.append(f"aes_outcome={aes_outcome} consecutive_fails={aes_consecutive}")
     maybe_alert(
         "scrape_degraded",
         config,
@@ -238,6 +265,12 @@ def maybe_recovery(config: dict[str, Any], telemetry: TelemetryStore | None) -> 
     tracker = telemetry.get_stall_tracker()
     if not tracker.get("pending_recovery"):
         return
+    # Clear the flag either way so a later re-enable doesn't fire a stale "recovered"
+    # ping for an incident that's long gone. The "all clear" follow-up message was
+    # judged pure noise (every alert already implies things will retry on their own),
+    # so it's off by default; flip client_alert_recovery_enabled on to restore it.
     tracker["pending_recovery"] = False
     telemetry.set_stall_tracker(tracker)
+    if not bool(config.get("client_alert_recovery_enabled", False)):
+        return
     send_client_message(CLIENT_MESSAGES["recovery"], config)

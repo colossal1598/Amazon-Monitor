@@ -58,6 +58,17 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "client_alert_scrape_fail_ratio": 0.5,
     "client_alert_chronic_stall_consecutive": 5,
     "client_alert_chronic_stall_cooldown_hours": 24,
+    # A single cycle that runs a bit long (e.g. one AES/SERP hiccup that already
+    # self-recovered) shouldn't page anyone — require this many *consecutive*
+    # over-poll-interval cycles before sending the "stalled" client alert.
+    "client_alert_stall_min_consecutive": 2,
+    # Same idea for AES/SERP scrape degradation: require this many consecutive bad
+    # AES cycles in a row before sending "scrape_degraded" for AES-only causes.
+    # PDP-side degradation (client_alert_scrape_fail_min/ratio above) is unaffected.
+    "client_alert_aes_fail_consecutive": 3,
+    # The "all clear, back to normal" follow-up ping sent after a stalled/degraded
+    # alert recovers. Considered noise on its own — off by default.
+    "client_alert_recovery_enabled": False,
     "fx_fallback_usd_ils": 3,
     "fx_request_timeout_seconds": 5,
     "affiliate_tag": "yourclient-20",

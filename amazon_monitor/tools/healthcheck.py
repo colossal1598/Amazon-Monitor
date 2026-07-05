@@ -3,6 +3,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 HEALTH_FILE = Path("data/health.json")
 
 
@@ -16,10 +18,44 @@ def parse_dt(value: str | None) -> datetime | None:
         return None
 
 
+# Best-effort WhatsApp ping so a stuck/crashed/silently-hung monitor doesn't go unnoticed
+# just because nobody is watching PM2 logs or this cron job's exit code. Rate-limited via
+# the normal client-alert cooldown/window (shared SQLite state), so this can safely run
+# every 10 minutes without spamming once a real incident is already reported.
+def _notify(failed_items: list[str]) -> None:
+    try:
+        from dotenv import load_dotenv
+
+        import client_alerts
+        from settings_store import load_runtime_config
+        from telemetry_store import TelemetryStore
+
+        load_dotenv()
+        try:
+            import yaml
+
+            bootstrap = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8")) or {}
+        except Exception:
+            bootstrap = {}
+        db_path = str(bootstrap.get("db_path", "data/monitor.db"))
+        telemetry_db_path = str(bootstrap.get("telemetry_db_path", "data/telemetry.db"))
+        config = load_runtime_config(db_path)
+        telemetry = TelemetryStore(telemetry_db_path)
+        client_alerts.maybe_alert(
+            "health_check_failed",
+            config,
+            telemetry,
+            detail="; ".join(failed_items),
+        )
+    except Exception as exc:  # noqa: BLE001 - notification is best-effort, never crash the check
+        print(f"(healthcheck notify failed: {exc})")
+
+
 # Check the monitor’s health file and exit with a non-zero code when jobs are stale or have recent errors.
 def main() -> int:
     if not HEALTH_FILE.exists():
         print("FAIL: health file not found at data/health.json")
+        _notify(["health file not found at data/health.json"])
         return 2
 
     data = json.loads(HEALTH_FILE.read_text(encoding="utf-8"))
@@ -49,6 +85,7 @@ def main() -> int:
         print("FAIL")
         for item in failed:
             print(f"- {item}")
+        _notify(failed)
         return 1
 
     print("PASS: all monitored jobs are healthy")

@@ -64,9 +64,58 @@ def test_count_pdp_scrape_errors() -> None:
     assert reasons["parse_failed"] == 1
 
 
-def test_recovery_after_timely_cycle(tmp_path) -> None:
+def test_scrape_degraded_aes_needs_consecutive_failures(tmp_path) -> None:
+    """A single isolated AES/SERP hiccup (now fast-failing and self-recovering) must not alert."""
+    store = TelemetryStore(str(tmp_path / "t.db"))
+    cfg = _config(client_alert_aes_fail_consecutive=3)
+    rows = [{"asin": "A", "in_stock": 1, "price": 10}]
+    aes_bad = {"navigation_ok": False, "cards_found": 0, "total_result_count": None}
+    aes_ok = {"navigation_ok": True, "cards_found": 5, "total_result_count": 100}
+    with patch("client_alerts.send_client_message") as send:
+        client_alerts.check_scrape_degraded(rows, aes_bad, 1, cfg, store)
+        client_alerts.check_scrape_degraded(rows, aes_bad, 1, cfg, store)
+        send.assert_not_called()
+        client_alerts.check_scrape_degraded(rows, aes_bad, 1, cfg, store)
+        send.assert_called_once()
+
+    # A subsequent healthy cycle resets the counter.
+    with patch("client_alerts.send_client_message") as send:
+        client_alerts.check_scrape_degraded(rows, aes_ok, 1, cfg, store)
+        client_alerts.check_scrape_degraded(rows, aes_bad, 1, cfg, store)
+        client_alerts.check_scrape_degraded(rows, aes_bad, 1, cfg, store)
+        send.assert_not_called()
+
+
+def test_stalled_needs_consecutive_cycles(tmp_path) -> None:
+    """One over-poll-interval cycle (e.g. a single AES hiccup) should not page anyone."""
+    store = TelemetryStore(str(tmp_path / "t.db"))
+    cfg = _config(client_alert_stall_min_consecutive=2)
+    summary = {"exceeds_poll_interval": True, "total_sec": 130}
+    with patch("client_alerts.send_client_message") as send:
+        client_alerts.on_cycle_timing(summary, cfg, store)
+        send.assert_not_called()
+        client_alerts.on_cycle_timing(summary, cfg, store)
+        send.assert_called_once()
+
+    # A timely cycle afterwards resets the streak. The "all clear" recovery ping is
+    # off by default (judged noise on its own), so nothing further should be sent.
+    with patch("client_alerts.send_client_message") as send:
+        client_alerts.on_cycle_timing({"exceeds_poll_interval": False}, cfg, store)
+        send.assert_not_called()
+
+
+def test_recovery_disabled_by_default(tmp_path) -> None:
     store = TelemetryStore(str(tmp_path / "t.db"))
     cfg = _config()
+    with patch("client_alerts.send_client_message") as send:
+        client_alerts.maybe_alert("stalled", cfg, store, detail="slow")
+        client_alerts.on_cycle_timing({"exceeds_poll_interval": False}, cfg, store)
+        assert send.call_count == 1
+
+
+def test_recovery_when_explicitly_enabled(tmp_path) -> None:
+    store = TelemetryStore(str(tmp_path / "t.db"))
+    cfg = _config(client_alert_recovery_enabled=True)
     with patch("client_alerts.send_client_message") as send:
         client_alerts.maybe_alert("stalled", cfg, store, detail="slow")
         client_alerts.on_cycle_timing({"exceeds_poll_interval": False}, cfg, store)
