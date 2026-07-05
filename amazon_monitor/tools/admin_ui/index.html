@@ -7,263 +7,384 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+  <!-- ===== Login ===== -->
   <div id="login-screen" class="login-screen">
     <form id="login-form" class="login-card">
-      <h2>התחברות</h2>
-      <p class="muted">שם משתמש וסיסמה מהגדרות השרת</p>
-      <label>משתמש</label>
+      <div class="login-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+      </div>
+      <h2>מעקב אמזון</h2>
+      <p class="muted">התחברות לפאנל הניהול</p>
+      <label for="login-user">שם משתמש</label>
       <input id="login-user" type="text" autocomplete="username" required>
-      <label>סיסמה</label>
+      <label for="login-pass">סיסמה</label>
       <input id="login-pass" type="password" autocomplete="current-password" required>
       <button class="btn btn-primary" type="submit">כניסה</button>
       <p id="login-error" class="login-error hidden"></p>
     </form>
   </div>
 
-  <div id="app-shell" class="hidden">
-  <header class="topbar">
-    <div class="topbar-inner">
-      <div>
-        <h1>פאנל ניהול — מעקב אמזון</h1>
-        <p class="muted">עדכון הגדרות ורשימות מוצרים</p>
-      </div>
-      <a class="topbar-link" href="/help.html">מדריך קצר</a>
-    </div>
-  </header>
+  <!-- ===== App shell ===== -->
+  <div id="app-shell" class="app-shell hidden">
 
-  <main class="container">
-    <section class="card card-ops">
-      <h2>תפעול</h2>
-      <p class="muted">מפעיל מחדש את כל השירותים במחשב. הדף עלול להתנתק לכמה שניות.</p>
-      <button id="pm2-restart-btn" class="btn btn-danger-wide" type="button">הפעלה מחדש של המערכת</button>
-    </section>
-
-    <section class="card">
-      <h2>זמנים ועומס</h2>
-      <div class="row">
-        <div class="field">
-          <label for="pdp-poll-minutes">כל כמה דקות לבדוק מוצרים</label>
-          <input id="pdp-poll-minutes" type="number" min="1" step="1">
-          <p class="hint">כמה דקות בין סיבוב לסיבוב</p>
-        </div>
-        <div class="field">
-          <label for="max-cycle-seconds">מקסימום זמן לסיבוב אחד (שניות)</label>
-          <input id="max-cycle-seconds" type="number" min="30" step="5">
-          <p class="hint">אם הסיבוב לא נגמר בזמן — נעצר</p>
-        </div>
-        <div class="field">
-          <label for="max-concurrent-tabs">כמה מוצרים לפתוח בו-זמנית</label>
-          <input id="max-concurrent-tabs" type="number" min="1" max="10" step="1">
-          <p class="hint">מספר נמוך = פחות עומס על Amazon</p>
-        </div>
-      </div>
-      <div class="row">
-        <div class="field">
-          <label for="pdp-settle-seconds">המתנה לפני קריאת מחיר מהדף (שניות)</label>
-          <input id="pdp-settle-seconds" type="number" min="1" max="30" step="0.5">
-          <p class="hint">אחרי טעינת דף המוצר — 1–30 (ברירת מחדל 8)</p>
-        </div>
-        <div class="field">
-          <label for="pdp-continue-shopping-max-clicks">מקסימום לחיצות «המשך לקנות»</label>
-          <input id="pdp-continue-shopping-max-clicks" type="number" min="0" max="10" step="1">
-          <p class="hint">כשמופיע מסך ביניים — 0–10 (ברירת מחדל 3)</p>
-        </div>
-      </div>
-    </section>
-
-    <section class="card" id="bandwidth-card">
-      <h2>שימוש ברשת</h2>
-      <p class="muted">מדידת תעבורת דפדפן Playwright בלבד — לא כל תעבורת המחשב או הסלולר</p>
-      <div class="row">
-        <div class="field">
-          <label>סיבוב אחרון</label>
-          <p id="bw-last-cycle-mb" class="stat-value">—</p>
-          <p class="hint" id="bw-last-cycle-time"></p>
-        </div>
-        <div class="field">
-          <label>היום (מצטבר)</label>
-          <p id="bw-today-gb" class="stat-value">—</p>
-          <p class="hint" id="bw-today-cycles"></p>
-        </div>
-        <div class="field">
-          <label>7 ימים אחרונים</label>
-          <p id="bw-week-gb" class="stat-value">—</p>
-        </div>
-        <div class="field">
-          <label>חסימות בסיבוב אחרון</label>
-          <p id="bw-blocked" class="stat-value">—</p>
-          <p class="hint">blocked_url / blocked_heavy</p>
-        </div>
-      </div>
-      <div class="field">
-        <label for="bw-recent-cycles">10 סיבובים אחרונים (bytes)</label>
-        <textarea id="bw-recent-cycles" rows="6" readonly></textarea>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>הגדרות דפדפן</h2>
-      <div class="switch-row">
-        <label class="switch-label" for="playwright-headless">דפדפן נסתר</label>
-        <label class="switch">
-          <input id="playwright-headless" type="checkbox">
-          <span class="switch-slider" aria-hidden="true"></span>
-        </label>
-      </div>
-      <p class="hint">כבוי = רואים חלון כרום (לפעמים עוזר לתקלות)</p>
-    </section>
-
-    <section class="card">
-      <h2>וואטסאפ</h2>
-      <label for="wa-group-id">קבוצת וואטסאפ להתראות</label>
-      <input id="wa-group-id" type="text" dir="ltr" placeholder="120363...@g.us">
-      <p class="hint">מזהה שמתקבל מהשרת — שורה שמתחילה ב־120…</p>
-
-      <label for="wa-client-to">וואטסאפ ללקוח (הודעות מערכת)</label>
-      <input id="wa-client-to" type="text" dir="ltr" placeholder="972...@c.us">
-      <p class="hint">ריק = משתמשים בקבוצה</p>
-
-      <div class="templates-block" aria-label="עריכת תבניות הודעה">
-        <h3>תבניות הודעה</h3>
-        <p class="hint">
-          שדות נתמכים: <code>{title}</code> <code>{price_text}</code> <code>{shipping}</code> <code>{affiliate_link}</code>
-        </p>
-
-        <label for="tpl-new-product">מוצר חדש</label>
-        <textarea id="tpl-new-product" class="tpl-editor" rows="8"></textarea>
-
-        <label for="tpl-price-drop">ירידת מחיר</label>
-        <textarea id="tpl-price-drop" class="tpl-editor" rows="8"></textarea>
-
-        <label for="tpl-back-in-stock">חזרה למלאי</label>
-        <textarea id="tpl-back-in-stock" class="tpl-editor" rows="8"></textarea>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>התראות</h2>
-      <div class="row">
-        <div class="field">
-          <label for="price-drop-percent">אחוז ירידת מחיר להתראה</label>
-          <input id="price-drop-percent" type="number" min="1" max="99" step="1">
-          <p class="hint">למשל 10 = התראה מעל 10% ירידה</p>
-        </div>
-        <div class="field">
-          <label for="max-requests-per-minute">מקסימום פניות לדקה</label>
-          <input id="max-requests-per-minute" type="number" min="1" max="60" step="1">
-          <p class="hint">נמוך יותר = פחות סיכון לחסימה</p>
-        </div>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>קישורי שותפים</h2>
-      <label for="affiliate-tag">תג שותפים בקישורים</label>
-      <input id="affiliate-tag" type="text" dir="ltr" placeholder="לדוגמה: השותף-20">
-      <p class="hint">הקוד אחרי tag= בלינק Amazon</p>
-    </section>
-
-    <section class="card">
-      <div class="card-head">
-        <h2>מעקב מוצרים</h2>
-        <button id="watch-bulk-btn" class="btn btn-secondary" type="button">הדבקה מרובה</button>
-      </div>
-      <table class="asin-table">
-        <thead>
-          <tr>
-            <th>קוד מוצר</th>
-            <th>הערות</th>
-            <th>פעולה</th>
-          </tr>
-        </thead>
-        <tbody id="watch-body"></tbody>
-      </table>
-      <div class="row add-row">
-        <input id="watch-asin-input" type="text" maxlength="10" placeholder="10 תווים באנגלית">
-        <input id="watch-notes-input" type="text" placeholder="הערות (אופציונלי)">
-        <button id="watch-add-btn" class="btn" type="button">הוסף</button>
-      </div>
-    </section>
-
-    <section class="card">
-      <div class="card-head">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="brand-dot" aria-hidden="true"></span>
         <div>
-          <h2>רשימה שחורה</h2>
-          <p class="muted">מוצרים שלא יופיעו בחיפוש מהספק</p>
+          <strong>מעקב אמזון</strong>
+          <span class="brand-sub">פאנל ניהול</span>
         </div>
-        <button id="blacklist-bulk-btn" class="btn btn-secondary" type="button">הדבקה מרובה</button>
       </div>
-      <table class="asin-table">
-        <thead>
-          <tr>
-            <th>קוד מוצר</th>
-            <th>הערות</th>
-            <th>פעולה</th>
-          </tr>
-        </thead>
-        <tbody id="blacklist-body"></tbody>
-      </table>
-      <div class="row add-row">
-        <input id="blacklist-asin-input" type="text" maxlength="10" placeholder="10 תווים באנגלית">
-        <input id="blacklist-notes-input" type="text" placeholder="הערות (אופציונלי)">
-        <button id="blacklist-add-btn" class="btn" type="button">הוסף</button>
+
+      <nav class="sidebar-nav" id="sidebar-nav">
+        <button class="nav-item active" data-tab="overview" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
+          <span>סקירה כללית</span>
+        </button>
+        <button class="nav-item" data-tab="products" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/></svg>
+          <span>מוצרים במעקב</span>
+          <span class="nav-badge" id="nav-watch-count"></span>
+        </button>
+        <button class="nav-item" data-tab="whatsapp" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.6L3 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5z"/></svg>
+          <span>וואטסאפ והתראות</span>
+        </button>
+        <button class="nav-item" data-tab="filters" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16l-6 7v6l-4 2v-8z"/></svg>
+          <span>סינון וחיפוש</span>
+        </button>
+        <button class="nav-item" data-tab="advanced" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h.01a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+          <span>הגדרות מתקדמות</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <a class="nav-item nav-link" href="/help.html">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 4.9.8c0 1.6-2.4 2.2-2.4 3.7"/><line x1="12" y1="17" x2="12" y2="17.01"/></svg>
+          <span>מדריך קצר</span>
+        </a>
+        <button class="nav-item nav-link" id="logout-btn" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          <span>התנתקות</span>
+        </button>
       </div>
-    </section>
+    </aside>
 
-    <section class="card">
-      <h2>חיפוש מהספק</h2>
-      <label for="aes-url">קישור חיפוש מהספק</label>
-      <input id="aes-url" type="url" placeholder="https://www.amazon.com/s?...">
-      <p class="hint">לא לשנות אלא אם יודעים למה</p>
-    </section>
+    <div class="main-area">
 
-    <section class="card">
-      <h2>סינון כותרות</h2>
-      <label for="required-keywords">מילים שחייבות להופיע בכותרת</label>
-      <p class="hint">שורה אחת לכל מילה</p>
-      <textarea id="required-keywords" rows="4"></textarea>
-      <label for="title-blacklist-phrases">ביטויים אסורים בכותרת</label>
-      <p class="hint">שורה אחת לכל ביטוי</p>
-      <textarea id="title-blacklist-phrases" rows="4"></textarea>
-    </section>
+      <!-- ============ Tab: Overview ============ -->
+      <section class="tab-panel active" id="tab-overview">
+        <header class="page-head">
+          <h1>סקירה כללית</h1>
+          <p class="muted">מצב המערכת ופעולות מהירות</p>
+        </header>
 
-    <section class="card">
-      <h2>מוכרים מותרים</h2>
-      <label for="allowed-sellers">שמות מוכרים מותרים</label>
-      <p class="hint">שורה אחת לכל שם (למשל amazon.com)</p>
-      <textarea id="allowed-sellers" rows="4"></textarea>
-    </section>
+        <div class="stat-grid">
+          <div class="stat-card">
+            <span class="stat-label">מוצרים במעקב</span>
+            <span class="stat-big" id="ov-watch-count">—</span>
+            <span class="stat-sub">רשימה שחורה: <span id="ov-blacklist-count">—</span></span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">סיבובים היום</span>
+            <span class="stat-big" id="ov-cycles-today">—</span>
+            <span class="stat-sub" id="ov-poll-summary"></span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">תעבורה היום</span>
+            <span class="stat-big" id="bw-today-gb">—</span>
+            <span class="stat-sub">7 ימים: <span id="bw-week-gb">—</span></span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">סיבוב אחרון</span>
+            <span class="stat-big" id="bw-last-cycle-mb">—</span>
+            <span class="stat-sub" id="bw-last-cycle-time"></span>
+          </div>
+        </div>
 
-    <section class="card">
-      <h2>מסד נתונים (מתקדם)</h2>
-      <p class="muted">לצפייה בטבלאות — רק במחשב המקומי, עד 10 דקות.</p>
-      <div class="row">
-        <button id="sqlite-ro-btn" class="btn btn-secondary" type="button">קריאה בלבד</button>
-        <button id="sqlite-rw-btn" class="btn btn-secondary" type="button">עריכה</button>
-        <button id="sqlite-stop-btn" class="btn btn-danger" type="button">סגור</button>
-      </div>
-      <p id="sqlite-status" class="status-line">מצב: לא פעיל</p>
-      <a id="sqlite-link" class="hidden" href="#" target="_blank" rel="noopener noreferrer">פתח צפייה במסד</a>
-    </section>
-  </main>
+        <div class="card card-ops">
+          <div class="card-head">
+            <div>
+              <h2>הפעלה מחדש של המערכת</h2>
+              <p class="muted">מפעיל מחדש את כל השירותים. הדף עלול להתנתק לכ־20 שניות.</p>
+            </div>
+            <button id="pm2-restart-btn" class="btn btn-danger" type="button">הפעלה מחדש</button>
+          </div>
+        </div>
 
-  <footer class="sticky-footer">
-    <button id="save-btn" class="btn btn-primary" type="button">שמור</button>
-  </footer>
+        <div class="card">
+          <h2>סיבובים אחרונים</h2>
+          <p class="muted">תעבורת דפדפן בכל סיבוב (10 אחרונים)</p>
+          <table class="data-table" id="bw-recent-table">
+            <thead>
+              <tr><th>זמן</th><th>תעבורה</th></tr>
+            </thead>
+            <tbody id="bw-recent-body">
+              <tr><td colspan="2" class="empty-cell">אין נתונים עדיין</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
 
-  <div id="bulk-modal" class="modal hidden" role="dialog" aria-modal="true">
-    <div class="modal-content">
-      <h3 id="bulk-modal-title">הדבקה מרובה</h3>
-      <p class="muted">הדביקו רשימת מוצרים, מופרדים ברווח או שורה.</p>
-      <textarea id="bulk-text" rows="8" placeholder="B012345678"></textarea>
-      <div class="row">
-        <button id="bulk-cancel-btn" class="btn btn-secondary" type="button">ביטול</button>
-        <button id="bulk-apply-btn" class="btn btn-primary" type="button">הוסף רשימה</button>
+      <!-- ============ Tab: Products ============ -->
+      <section class="tab-panel" id="tab-products">
+        <header class="page-head">
+          <h1>מוצרים במעקב</h1>
+          <p class="muted">הוספה והסרה נשמרות מיד — אין צורך בכפתור שמירה</p>
+        </header>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>רשימת מעקב</h2>
+              <p class="muted">המוצרים שהמערכת בודקת בכל סיבוב</p>
+            </div>
+            <button id="watch-bulk-btn" class="btn btn-secondary" type="button">הדבקת רשימה</button>
+          </div>
+          <div class="add-row">
+            <input id="watch-asin-input" type="text" dir="ltr" maxlength="10" placeholder="קוד מוצר (ASIN)">
+            <input id="watch-notes-input" type="text" placeholder="הערה (לא חובה)">
+            <button id="watch-add-btn" class="btn btn-primary" type="button">הוספה</button>
+          </div>
+          <table class="data-table asin-table">
+            <thead>
+              <tr><th>קוד מוצר</th><th>הערות</th><th class="th-action"></th></tr>
+            </thead>
+            <tbody id="watch-body"></tbody>
+          </table>
+          <p class="empty-note hidden" id="watch-empty">אין מוצרים במעקב — הוסיפו קוד מוצר למעלה</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>רשימה שחורה</h2>
+              <p class="muted">מוצרים שלא יופיעו בהתראות מחיפוש הספק</p>
+            </div>
+            <button id="blacklist-bulk-btn" class="btn btn-secondary" type="button">הדבקת רשימה</button>
+          </div>
+          <div class="add-row">
+            <input id="blacklist-asin-input" type="text" dir="ltr" maxlength="10" placeholder="קוד מוצר (ASIN)">
+            <input id="blacklist-notes-input" type="text" placeholder="הערה (לא חובה)">
+            <button id="blacklist-add-btn" class="btn btn-primary" type="button">הוספה</button>
+          </div>
+          <table class="data-table asin-table">
+            <thead>
+              <tr><th>קוד מוצר</th><th>הערות</th><th class="th-action"></th></tr>
+            </thead>
+            <tbody id="blacklist-body"></tbody>
+          </table>
+          <p class="empty-note hidden" id="blacklist-empty">הרשימה השחורה ריקה</p>
+        </div>
+      </section>
+
+      <!-- ============ Tab: WhatsApp & alerts ============ -->
+      <section class="tab-panel" id="tab-whatsapp">
+        <header class="page-head">
+          <h1>וואטסאפ והתראות</h1>
+          <p class="muted">לאן נשלחות ההתראות ואיך הן נראות</p>
+        </header>
+
+        <div class="card">
+          <h2>יעדי שליחה</h2>
+          <div class="field">
+            <label for="wa-group-id">קבוצת וואטסאפ להתראות מוצרים</label>
+            <input id="wa-group-id" type="text" dir="ltr" placeholder="120363...@g.us">
+            <p class="hint">מזהה הקבוצה — שורה שמתחילה ב־120…</p>
+          </div>
+          <div class="field">
+            <label for="wa-client-to">וואטסאפ להודעות מערכת (תקלות)</label>
+            <input id="wa-client-to" type="text" dir="ltr" placeholder="972...@c.us">
+            <p class="hint">אם ריק — הודעות המערכת יישלחו לקבוצה</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>מתי לשלוח התראה</h2>
+          <div class="row">
+            <div class="field">
+              <label for="price-drop-percent">אחוז ירידת מחיר להתראה</label>
+              <input id="price-drop-percent" type="number" min="1" max="99" step="1">
+              <p class="hint">לדוגמה 10 — התראה רק כשהמחיר יורד ב־10% או יותר</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>תבניות הודעה</h2>
+          <p class="hint">
+            שדות נתמכים:
+            <code>{title}</code> <code>{price_text}</code> <code>{shipping}</code> <code>{affiliate_link}</code>
+          </p>
+          <div class="field">
+            <label for="tpl-new-product">מוצר חדש</label>
+            <textarea id="tpl-new-product" class="tpl-editor" rows="7"></textarea>
+          </div>
+          <div class="field">
+            <label for="tpl-price-drop">ירידת מחיר</label>
+            <textarea id="tpl-price-drop" class="tpl-editor" rows="7"></textarea>
+          </div>
+          <div class="field">
+            <label for="tpl-back-in-stock">חזרה למלאי</label>
+            <textarea id="tpl-back-in-stock" class="tpl-editor" rows="7"></textarea>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>קישורי שותפים</h2>
+          <div class="field">
+            <label for="affiliate-tag">תג שותפים בקישורים</label>
+            <input id="affiliate-tag" type="text" dir="ltr" placeholder="yourtag-20">
+            <p class="hint">הקוד שמופיע אחרי tag= בקישורי אמזון בהודעות</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Tab: Filters ============ -->
+      <section class="tab-panel" id="tab-filters">
+        <header class="page-head">
+          <h1>סינון וחיפוש</h1>
+          <p class="muted">אילו מוצרים מחיפוש הספק נכנסים להתראות</p>
+        </header>
+
+        <div class="card">
+          <h2>סינון לפי כותרת</h2>
+          <div class="row row-top">
+            <div class="field">
+              <label for="required-keywords">מילים שחייבות להופיע</label>
+              <textarea id="required-keywords" rows="5" placeholder="pokemon&#10;tcg"></textarea>
+              <p class="hint">שורה לכל מילה — הכותרת חייבת להכיל את כולן</p>
+            </div>
+            <div class="field">
+              <label for="title-blacklist-phrases">ביטויים אסורים</label>
+              <textarea id="title-blacklist-phrases" rows="5"></textarea>
+              <p class="hint">שורה לכל ביטוי — כותרת שמכילה אחד מהם תידלג</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>מוכרים מותרים</h2>
+          <div class="field">
+            <label for="allowed-sellers">שמות מוכרים מותרים בדף מוצר</label>
+            <textarea id="allowed-sellers" rows="4" placeholder="amazon.com&#10;amazon export"></textarea>
+            <p class="hint">שורה לכל שם — התראה תישלח רק אם המוכר מכיל אחד מהשמות</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>קישור חיפוש מהספק</h2>
+          <div class="field">
+            <label for="aes-url">כתובת עמוד החיפוש באמזון</label>
+            <input id="aes-url" type="url" dir="ltr" placeholder="https://www.amazon.com/s?...">
+            <p class="hint">לא לשנות אלא אם יודעים בדיוק למה</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ Tab: Advanced ============ -->
+      <section class="tab-panel" id="tab-advanced">
+        <header class="page-head">
+          <h1>הגדרות מתקדמות</h1>
+          <p class="muted">קצב סריקה, עומס ותחזוקה — לשינוי זהיר בלבד</p>
+        </header>
+
+        <div class="card">
+          <h2>קצב וזמנים</h2>
+          <div class="row">
+            <div class="field">
+              <label for="pdp-poll-minutes">כל כמה דקות לבדוק מוצרים <span class="badge-restart">דורש הפעלה מחדש</span></label>
+              <input id="pdp-poll-minutes" type="number" min="1" step="1">
+              <p class="hint">שינוי נכנס לתוקף רק אחרי «הפעלה מחדש של המערכת»</p>
+            </div>
+            <div class="field">
+              <label for="max-cycle-seconds">מקסימום זמן לסיבוב (שניות)</label>
+              <input id="max-cycle-seconds" type="number" min="30" step="5">
+              <p class="hint">סיבוב שלא נגמר בזמן — נעצר</p>
+            </div>
+            <div class="field">
+              <label for="max-requests-per-minute">מקסימום פניות לדקה</label>
+              <input id="max-requests-per-minute" type="number" min="1" max="60" step="1">
+              <p class="hint">נמוך יותר = פחות סיכון לחסימה מאמזון</p>
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="max-concurrent-tabs">מוצרים בו־זמנית</label>
+              <input id="max-concurrent-tabs" type="number" min="1" max="10" step="1">
+              <p class="hint">כמה דפי מוצר נפתחים במקביל (1–10)</p>
+            </div>
+            <div class="field">
+              <label for="pdp-settle-seconds">המתנה לפני קריאת מחיר (שניות)</label>
+              <input id="pdp-settle-seconds" type="number" min="1" max="30" step="0.5">
+              <p class="hint">אחרי טעינת דף המוצר (ברירת מחדל 8)</p>
+            </div>
+            <div class="field">
+              <label for="pdp-continue-shopping-max-clicks">לחיצות «המשך לקנות»</label>
+              <input id="pdp-continue-shopping-max-clicks" type="number" min="0" max="10" step="1">
+              <p class="hint">כשאמזון מציגה מסך ביניים (ברירת מחדל 3)</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>דפדפן</h2>
+          <div class="switch-row">
+            <div>
+              <label class="switch-label" for="playwright-headless">דפדפן נסתר</label>
+              <p class="hint no-margin">כבוי = חלון כרום גלוי (עוזר לאבחון תקלות)</p>
+            </div>
+            <label class="switch">
+              <input id="playwright-headless" type="checkbox">
+              <span class="switch-slider" aria-hidden="true"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>צפייה במסד הנתונים</h2>
+              <p class="muted">נפתח רק במחשב המקומי, נסגר אוטומטית אחרי 10 דקות</p>
+            </div>
+          </div>
+          <div class="btn-row">
+            <button id="sqlite-ro-btn" class="btn btn-secondary" type="button">פתח לקריאה בלבד</button>
+            <button id="sqlite-rw-btn" class="btn btn-secondary" type="button">פתח לעריכה</button>
+            <button id="sqlite-stop-btn" class="btn btn-ghost-danger" type="button">סגירה</button>
+          </div>
+          <p id="sqlite-status" class="status-line">מצב: לא פעיל</p>
+          <a id="sqlite-link" class="hidden" href="#" target="_blank" rel="noopener noreferrer">פתיחת חלון צפייה במסד ←</a>
+        </div>
+      </section>
+
+    </div><!-- /main-area -->
+
+    <!-- Save bar (appears when there are unsaved changes) -->
+    <div id="save-bar" class="save-bar hidden">
+      <span class="save-bar-text">יש שינויים שלא נשמרו</span>
+      <div class="save-bar-actions">
+        <button id="discard-btn" class="btn btn-ghost" type="button">ביטול שינויים</button>
+        <button id="save-btn" class="btn btn-primary" type="button">שמירה</button>
       </div>
     </div>
-  </div>
 
-  <div id="toast" class="toast hidden"></div>
+    <!-- Bulk paste modal -->
+    <div id="bulk-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-content">
+        <h3 id="bulk-modal-title">הדבקת רשימה</h3>
+        <p class="muted">הדביקו קודי מוצר, מופרדים ברווח, פסיק או שורה חדשה.</p>
+        <textarea id="bulk-text" rows="8" dir="ltr" placeholder="B0ABC12345&#10;B0DEF67890"></textarea>
+        <div class="modal-actions">
+          <button id="bulk-cancel-btn" class="btn btn-ghost" type="button">ביטול</button>
+          <button id="bulk-apply-btn" class="btn btn-primary" type="button">הוספת הרשימה</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
   </div>
 
   <script src="/app.js"></script>

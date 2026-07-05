@@ -1,5 +1,8 @@
 $ErrorActionPreference = "Stop"
 
+$AdminUiPort = 80
+$AdminUiUrl = "http://127.0.0.1"
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "pm2-stack.ps1")
 
@@ -27,10 +30,10 @@ try {
 
 Start-Sleep -Seconds 2
 
-$listening = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue
+$listening = Get-NetTCPConnection -LocalPort $AdminUiPort -State Listen -ErrorAction SilentlyContinue
 if (-not $listening) {
     Write-Host ""
-    Write-Host "ERROR: Port 8765 is not listening." -ForegroundColor Red
+    Write-Host "ERROR: Port $AdminUiPort is not listening." -ForegroundColor Red
     Write-Host "Run: .\scripts\check_admin_ui.ps1"
     Write-Host "Common fix: add ADMIN_UI_USER and ADMIN_UI_PASSWORD to .env, then pm2 restart admin-ui"
     if (Get-Command pm2 -ErrorAction SilentlyContinue) {
@@ -39,5 +42,5 @@ if (-not $listening) {
     exit 1
 }
 
-Start-Process "http://127.0.0.1:8765" | Out-Null
-Write-Host "Admin UI: http://127.0.0.1:8765 (use .env credentials when prompted)"
+Start-Process $AdminUiUrl | Out-Null
+Write-Host "Admin UI: $AdminUiUrl (use .env credentials when prompted)"

@@ -3,65 +3,68 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>מדריך קצר — Amazon Monitor</title>
+  <title>מדריך קצר — מעקב אמזון</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body class="help-page">
   <main class="help-wrap">
-    <p class="help-nav"><a href="/">← חזרה לפאנל</a></p>
+    <p class="help-nav"><a href="/">→ חזרה לפאנל</a></p>
     <h1>מדריך קצר</h1>
 
     <section class="help-block">
       <h2>מה המערכת עושה</h2>
       <ul>
-        <li>בודקת מוצרים ב-Amazon לפי רשימת מעקב</li>
+        <li>בודקת מוצרים באמזון לפי רשימת המעקב, כל כמה דקות</li>
         <li>שולחת התראות לוואטסאפ כשיש מוצר חדש, ירידת מחיר או חזרה למלאי</li>
       </ul>
     </section>
 
     <section class="help-block">
-      <h2>פתיחת הפאנל</h2>
+      <h2>מבנה הפאנל</h2>
       <ul>
-        <li>כתובת שקיבלתם מהטכנאי (בדרך כלל במחשב המקומי בלבד)</li>
-        <li>שם משתמש וסיסמה — כמו בקובץ ההגדרות של השרת</li>
-        <li>אם לא נפתח — לבקש הפעלה מחדש מהכפתור בפאנל</li>
+        <li><strong>סקירה כללית</strong> — מצב המערכת, כמה מוצרים במעקב, הפעלה מחדש</li>
+        <li><strong>מוצרים במעקב</strong> — הוספה והסרה של מוצרים ורשימה שחורה</li>
+        <li><strong>וואטסאפ והתראות</strong> — לאן שולחים ואיך נראות ההודעות</li>
+        <li><strong>סינון וחיפוש</strong> — אילו מוצרים מהחיפוש נכנסים להתראות</li>
+        <li><strong>הגדרות מתקדמות</strong> — קצב סריקה ותחזוקה, לשינוי זהיר בלבד</li>
       </ul>
     </section>
 
     <section class="help-block">
       <h2>שמירת שינויים</h2>
       <ul>
-        <li>אחרי כל שינוי בהגדרות — ללחוץ <strong>שמור</strong> בתחתית הפאנל</li>
-        <li>הוספת מוצר לרשימה נשמרת מיד (בלי כפתור שמור)</li>
+        <li>כששינית הגדרה — מופיע סרגל <strong>שמירה</strong> בתחתית המסך. חובה ללחוץ עליו</li>
+        <li>הוספה והסרה של מוצרים נשמרות מיד, בלי כפתור שמירה</li>
+        <li>שינוי «כל כמה דקות לבדוק מוצרים» נכנס לתוקף רק אחרי <strong>הפעלה מחדש של המערכת</strong> (בטאב הסקירה)</li>
       </ul>
     </section>
 
     <section class="help-block">
       <h2>אין התראות בוואטסאפ</h2>
       <ul>
-        <li>לוודא שמולאה <strong>קבוצת וואטסאפ להתראות</strong></li>
-        <li>לוודא שיש מוצרים ברשימת <strong>מעקב מוצרים</strong></li>
-        <li>לוודא שמילות הסינון לא חוסמות את כל המוצרים</li>
+        <li>לוודא שמולאה <strong>קבוצת וואטסאפ להתראות</strong> (בטאב וואטסאפ והתראות)</li>
+        <li>לוודא שיש מוצרים ברשימת <strong>מוצרים במעקב</strong></li>
+        <li>לוודא שמילות הסינון (בטאב סינון וחיפוש) לא חוסמות את כל המוצרים</li>
       </ul>
     </section>
 
     <section class="help-block">
       <h2>הכל נתקע</h2>
       <ul>
-        <li>בפאנל: <strong>הפעלה מחדש של המערכת</strong></li>
-        <li>להמתין דקה ולפתוח שוב את הפאנל</li>
+        <li>בטאב <strong>סקירה כללית</strong>: ללחוץ <strong>הפעלה מחדש</strong></li>
+        <li>להמתין כדקה ולרענן את הדף</li>
       </ul>
     </section>
 
-    <section class="help-block help-advanced">
+    <section class="help-block">
       <h2>למתקדמים — לוגים</h2>
       <ul>
         <li>תיקיית <code>logs</code> — קובץ <code>monitor.log</code></li>
-        <li>בחלון הניהול של השרת — לראות אם כל השירותים רצים</li>
+        <li>בחלון הניהול של השרת — לבדוק שכל השירותים רצים</li>
       </ul>
     </section>
 
-    <p class="help-nav"><a href="/">← חזרה לפאנל</a></p>
+    <p class="help-nav"><a href="/">→ חזרה לפאנל</a></p>
   </main>
 </body>
 </html>

@@ -3,7 +3,7 @@
 import logging
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,8 @@ from alert_decisions import decide_back_in_stock, decide_new_product, decide_pri
 from pdp_helpers import normalize_title_line, shipping_display_hebrew
 
 LOGGER = logging.getLogger(__name__)
+
+_STOCK_ALERT_TYPES = frozenset({"new_product", "back_in_stock"})
 
 
 # Get “right now” in UTC so all timestamps in the database and alerts line up.
@@ -166,6 +168,86 @@ class StateEngine:
             ),
         )
 
+    def _cross_source_dedupe_minutes(self, config: dict[str, Any] | None) -> int:
+        if not config:
+            return 15
+        try:
+            return max(0, int(config.get("cross_source_alert_dedupe_minutes", 15)))
+        except (TypeError, ValueError):
+            return 15
+
+    def _cross_source_duplicate(
+        self,
+        asin: str,
+        alert_type: str,
+        source: str,
+        window_minutes: int,
+    ) -> sqlite3.Row | None:
+        """Return the most recent matching alert from a different source within the window."""
+        if alert_type not in _STOCK_ALERT_TYPES or window_minutes <= 0:
+            return None
+        row = self.conn.execute(
+            """
+            SELECT source, sent_at FROM alerts
+            WHERE asin = ? AND alert_type = ? AND source != ?
+            ORDER BY sent_at DESC LIMIT 1
+            """,
+            (asin, alert_type, source),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            sent_at = datetime.fromisoformat(str(row["sent_at"]))
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tinfo=timezone.utc)
+        except ValueError:
+            return None
+        age = utc_now() - sent_at
+        if age < timedelta(minutes=window_minutes):
+            return row
+        return None
+
+    def _emit_stock_alert_if_allowed(
+        self,
+        *,
+        alert_type: str,
+        source: str,
+        asin: str,
+        title: str | None,
+        price: float | None,
+        image_url: str | None,
+        shipping: str,
+        config: dict[str, Any] | None,
+        telemetry: Any,
+        cycle_id: int,
+        _tel: Any,
+    ) -> dict[str, Any] | None:
+        """Build and return a stock alert, or None when suppressed as a cross-source duplicate."""
+        window = self._cross_source_dedupe_minutes(config)
+        prior = self._cross_source_duplicate(asin, alert_type, source, window)
+        if prior is not None:
+            _tel(
+                "cross_source_alert_suppressed",
+                asin=asin,
+                alert_type=alert_type,
+                source=source,
+                other_source=prior["source"],
+                other_sent_at=prior["sent_at"],
+                window_minutes=window,
+            )
+            return None
+        alert = self._build_alert(
+            alert_type,
+            source,
+            asin,
+            title,
+            price,
+            image_url=image_url,
+            shipping=shipping,
+        )
+        self._record_alert(alert)
+        return alert
+
     # Create the standard alert dictionary that the WhatsApp sender expects, including percent drop when relevant.
     def _build_alert(
         self,
@@ -270,18 +352,22 @@ class StateEngine:
                     if _should_emit_new_product_alert(new_stock, new_price):
                         nd = decide_new_product(is_first_observation=True)
                         assert nd.emit and nd.alert_type is not None
-                        alert = self._build_alert(
-                            nd.alert_type,
-                            row_source,
-                            asin,
-                            title,
-                            new_price,
+                        alert = self._emit_stock_alert_if_allowed(
+                            alert_type=nd.alert_type,
+                            source=row_source,
+                            asin=asin,
+                            title=title,
+                            price=new_price,
                             image_url=image_url,
                             shipping=ship_line,
+                            config=config,
+                            telemetry=telemetry,
+                            cycle_id=cycle_id,
+                            _tel=_tel,
                         )
-                        alerts.append(alert)
-                        self._record_alert(alert)
-                        new_count += 1
+                        if alert is not None:
+                            alerts.append(alert)
+                            new_count += 1
                     continue
 
                 old_price = _as_float(row["price"])
@@ -352,20 +438,27 @@ class StateEngine:
                 stock_decision = decide_back_in_stock(old_stock, 1)
                 emitted_back_in_stock = False
                 if stock_decision.emit:
-                    alert = self._build_alert(
-                        "back_in_stock",
-                        row_source,
-                        asin,
-                        title,
-                        new_price,
+                    alert = self._emit_stock_alert_if_allowed(
+                        alert_type="back_in_stock",
+                        source=row_source,
+                        asin=asin,
+                        title=title,
+                        price=new_price,
                         image_url=image_url,
                         shipping=ship_line,
+                        config=config,
+                        telemetry=telemetry,
+                        cycle_id=cycle_id,
+                        _tel=_tel,
                     )
-                    alerts.append(alert)
-                    self._record_alert(alert)
-                    self.conn.execute("UPDATE products SET last_stock_alert = ? WHERE asin = ?", (now, asin))
-                    back_in_stock_count += 1
-                    emitted_back_in_stock = True
+                    if alert is not None:
+                        alerts.append(alert)
+                        self.conn.execute(
+                            "UPDATE products SET last_stock_alert = ? WHERE asin = ?",
+                            (now, asin),
+                        )
+                        back_in_stock_count += 1
+                        emitted_back_in_stock = True
                 if not emitted_back_in_stock:
                     price_decision = decide_price_drop(
                         old_price,
@@ -478,18 +571,22 @@ class StateEngine:
                     if _should_emit_new_product_alert(new_stock, new_price):
                         nd = decide_new_product(is_first_observation=True)
                         assert nd.emit and nd.alert_type is not None
-                        alert = self._build_alert(
-                            nd.alert_type,
-                            source,
-                            asin,
-                            title,
-                            new_price,
+                        alert = self._emit_stock_alert_if_allowed(
+                            alert_type=nd.alert_type,
+                            source=source,
+                            asin=asin,
+                            title=title,
+                            price=new_price,
                             image_url=image_url,
                             shipping=ship_line,
+                            config=config,
+                            telemetry=telemetry,
+                            cycle_id=cycle_id,
+                            _tel=_tel,
                         )
-                        alerts.append(alert)
-                        self._record_alert(alert)
-                        new_count += 1
+                        if alert is not None:
+                            alerts.append(alert)
+                            new_count += 1
                     continue
 
                 old_price = _as_float(row["price"])
@@ -540,20 +637,27 @@ class StateEngine:
                 stock_decision = decide_back_in_stock(old_stock, 1)
                 emitted_back_in_stock = False
                 if stock_decision.emit:
-                    alert = self._build_alert(
-                        "back_in_stock",
-                        source,
-                        asin,
-                        title,
-                        new_price,
+                    alert = self._emit_stock_alert_if_allowed(
+                        alert_type="back_in_stock",
+                        source=source,
+                        asin=asin,
+                        title=title,
+                        price=new_price,
                         image_url=image_url,
                         shipping=ship_line,
+                        config=config,
+                        telemetry=telemetry,
+                        cycle_id=cycle_id,
+                        _tel=_tel,
                     )
-                    alerts.append(alert)
-                    self._record_alert(alert)
-                    self.conn.execute("UPDATE aes_products SET last_stock_alert = ? WHERE asin = ?", (now, asin))
-                    back_in_stock_count += 1
-                    emitted_back_in_stock = True
+                    if alert is not None:
+                        alerts.append(alert)
+                        self.conn.execute(
+                            "UPDATE aes_products SET last_stock_alert = ? WHERE asin = ?",
+                            (now, asin),
+                        )
+                        back_in_stock_count += 1
+                        emitted_back_in_stock = True
                 if not emitted_back_in_stock:
                     price_decision = decide_price_drop(
                         old_price,

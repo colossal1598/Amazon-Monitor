@@ -48,7 +48,7 @@ CONFIG_PATH = ROOT / "config.yaml"
 STATIC_DIR = ROOT / "tools" / "admin_ui"
 
 HOST = "127.0.0.1"
-PORT = 8765
+PORT = 80
 
 SQLITE_WEB_HOST = "127.0.0.1"
 SQLITE_WEB_PORT = 8768
@@ -642,7 +642,8 @@ def main() -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     server = create_server(db_path=db_path, admin_user=admin_user, admin_password=admin_password)
-    LOG.info("Admin UI running at http://%s:%s", HOST, PORT)
+    admin_url = f"http://{HOST}" if PORT == 80 else f"http://{HOST}:{PORT}"
+    LOG.info("Admin UI running at %s", admin_url)
     LOG.info(
         "sqlite-web is exposed only locally at http://%s:%s and auto-stops after %ss",
         SQLITE_WEB_HOST,

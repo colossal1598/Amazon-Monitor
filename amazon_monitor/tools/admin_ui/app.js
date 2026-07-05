@@ -1,9 +1,12 @@
 const AUTH_KEY = "admin_ui_auth";
+const ACTIVE_TAB_KEY = "admin_ui_tab";
 
 const state = {
   sqlitePollId: null,
   bulkRole: null,
   toastTimer: null,
+  savedSettings: null, // snapshot of last loaded/saved form values (JSON string)
+  loadedPollMinutes: null, // pdp_poll_minutes value the monitor is currently running with
 };
 
 function byId(id) {
@@ -38,12 +41,11 @@ function userFacingError(payload, status) {
   return "הפעולה נכשלה";
 }
 
+/* ===== Auth ===== */
+
 function getAuthHeader() {
   const token = sessionStorage.getItem(AUTH_KEY);
-  if (!token) {
-    return null;
-  }
-  return `Basic ${token}`;
+  return token ? `Basic ${token}` : null;
 }
 
 function setAuth(user, pass) {
@@ -71,6 +73,8 @@ function showApp() {
   byId("app-shell").classList.remove("hidden");
 }
 
+/* ===== Toast ===== */
+
 function showToast(message, isError = false) {
   const toast = byId("toast");
   toast.textContent = message;
@@ -82,10 +86,16 @@ function showToast(message, isError = false) {
   state.toastTimer = window.setTimeout(() => toast.classList.add("hidden"), 4000);
 }
 
+function isAuthError(err) {
+  return err.message === "unauthorized" || err.message === "not_logged_in";
+}
+
+/* ===== API ===== */
+
 async function apiJson(url, options = {}) {
   const auth = getAuthHeader();
   if (!auth) {
-    showLogin("יש להתחברות קודם");
+    showLogin("יש להתחבר קודם");
     throw new Error("not_logged_in");
   }
 
@@ -110,15 +120,48 @@ async function apiJson(url, options = {}) {
     throw new Error("unauthorized");
   }
   if (!res.ok) {
-    const msg = userFacingError(payload, res.status);
-    throw new Error(msg);
+    throw new Error(userFacingError(payload, res.status));
   }
   return payload;
 }
 
+/* ===== Tabs ===== */
+
+function switchTab(tabId) {
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.id === `tab-${tabId}`);
+  });
+  document.querySelectorAll(".nav-item[data-tab]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tab === tabId);
+  });
+  sessionStorage.setItem(ACTIVE_TAB_KEY, tabId);
+}
+
+function restoreTab() {
+  const saved = sessionStorage.getItem(ACTIVE_TAB_KEY);
+  if (saved && byId(`tab-${saved}`)) {
+    switchTab(saved);
+  }
+}
+
+/* ===== ASIN lists ===== */
+
+function updateAsinCounts(role, count) {
+  if (role === "watch") {
+    byId("nav-watch-count").textContent = count > 0 ? String(count) : "";
+    byId("ov-watch-count").textContent = String(count);
+  } else {
+    byId("ov-blacklist-count").textContent = String(count);
+  }
+}
+
 function renderAsinTable(role, items) {
   const tbody = byId(role === "watch" ? "watch-body" : "blacklist-body");
+  const emptyNote = byId(role === "watch" ? "watch-empty" : "blacklist-empty");
   tbody.innerHTML = "";
+  emptyNote.classList.toggle("hidden", items.length > 0);
+  updateAsinCounts(role, items.length);
+
   for (const item of items) {
     const tr = document.createElement("tr");
 
@@ -135,15 +178,15 @@ function renderAsinTable(role, items) {
     const actionTd = document.createElement("td");
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
-    removeBtn.className = "btn btn-danger";
-    removeBtn.textContent = "הסר";
+    removeBtn.className = "btn-remove";
+    removeBtn.textContent = "הסרה";
     removeBtn.addEventListener("click", async () => {
       try {
         await apiJson(`/api/asins/${encodeURIComponent(item.asin)}/${role}`, { method: "DELETE" });
-        showToast(`קוד ${item.asin} הוסר`);
+        showToast(`הקוד ${item.asin} הוסר`);
         await loadAsins(role);
       } catch (err) {
-        if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
+        if (!isAuthError(err)) {
           showToast(`שגיאה בהסרה: ${err.message}`, true);
         }
       }
@@ -159,6 +202,89 @@ async function loadAsins(role) {
   const payload = await apiJson(`/api/asins?role=${encodeURIComponent(role)}`);
   renderAsinTable(role, payload.items || []);
 }
+
+async function addAsin(role) {
+  const asinInput = byId(role === "watch" ? "watch-asin-input" : "blacklist-asin-input");
+  const notesInput = byId(role === "watch" ? "watch-notes-input" : "blacklist-notes-input");
+  const asin = String(asinInput.value || "").trim().toUpperCase();
+  const notes = String(notesInput.value || "").trim();
+  if (!isValidAsin(asin)) {
+    showToast("יש להזין קוד מוצר תקין — 10 אותיות/ספרות באנגלית", true);
+    asinInput.focus();
+    return;
+  }
+  try {
+    await apiJson("/api/asins", {
+      method: "POST",
+      body: JSON.stringify({ asin, role, notes }),
+    });
+    asinInput.value = "";
+    notesInput.value = "";
+    showToast(`הקוד ${asin} נוסף`);
+    await loadAsins(role);
+  } catch (err) {
+    if (!isAuthError(err)) {
+      showToast(`שגיאה בהוספה: ${err.message}`, true);
+    }
+  }
+}
+
+/* ===== Bulk paste ===== */
+
+function openBulkModal(role) {
+  state.bulkRole = role;
+  byId("bulk-modal-title").textContent =
+    role === "watch" ? "הדבקת רשימה — מוצרים במעקב" : "הדבקת רשימה — רשימה שחורה";
+  byId("bulk-text").value = "";
+  byId("bulk-modal").classList.remove("hidden");
+  byId("bulk-text").focus();
+}
+
+function closeBulkModal() {
+  byId("bulk-modal").classList.add("hidden");
+  state.bulkRole = null;
+}
+
+async function applyBulk() {
+  const role = state.bulkRole;
+  if (!role) {
+    return;
+  }
+  const parts = byId("bulk-text").value
+    .split(/[^A-Za-z0-9]+/g)
+    .map((x) => x.trim().toUpperCase())
+    .filter(Boolean);
+  const seen = new Set();
+  const valid = [];
+  for (const value of parts) {
+    if (!seen.has(value) && isValidAsin(value)) {
+      seen.add(value);
+      valid.push(value);
+    }
+  }
+  if (!valid.length) {
+    showToast("לא נמצאו קודי מוצר תקינים ברשימה", true);
+    return;
+  }
+
+  let success = 0;
+  for (const asin of valid) {
+    try {
+      await apiJson("/api/asins", {
+        method: "POST",
+        body: JSON.stringify({ asin, role }),
+      });
+      success += 1;
+    } catch (_err) {
+      // continue with the rest
+    }
+  }
+  closeBulkModal();
+  await loadAsins(role);
+  showToast(`נוספו ${success} מתוך ${valid.length} מוצרים`);
+}
+
+/* ===== Settings form ===== */
 
 function parsePositiveInt(raw, fallback) {
   const n = parseInt(String(raw || "").trim(), 10);
@@ -198,150 +324,10 @@ function fillSettings(settings) {
   byId("tpl-new-product").value = templates.new_product || "";
   byId("tpl-price-drop").value = templates.price_drop || "";
   byId("tpl-back-in-stock").value = templates.back_in_stock || "";
-}
 
-async function loadSettings() {
-  const payload = await apiJson("/api/settings");
-  fillSettings(payload.settings || {});
-}
-
-function formatMb(bytes) {
-  const n = Number(bytes) || 0;
-  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
-}
-
-function formatGbFromBytes(bytes) {
-  const n = Number(bytes) || 0;
-  return `${(n / 1024 ** 3).toFixed(3)} GB`;
-}
-
-function fillBandwidthSummary(data) {
-  const last = data.last_cycle;
-  if (last && last.net_bytes_total != null) {
-    byId("bw-last-cycle-mb").textContent = formatMb(last.net_bytes_total);
-    byId("bw-last-cycle-time").textContent = last.recorded_at_il || "";
-  } else {
-    byId("bw-last-cycle-mb").textContent = "—";
-    byId("bw-last-cycle-time").textContent = "אין נתוני סיבוב עדיין";
-  }
-
-  const today = data.today;
-  if (today && today.bytes_total != null) {
-    byId("bw-today-gb").textContent = formatGbFromBytes(today.bytes_total);
-    const cycles = Number(today.cycles) || 0;
-    byId("bw-today-cycles").textContent = `${cycles} סיבובים היום`;
-  } else {
-    byId("bw-today-gb").textContent = "0.000 GB";
-    byId("bw-today-cycles").textContent = "0 סיבובים היום";
-  }
-
-  const weekGb = Number(data.last_7_days_gb);
-  byId("bw-week-gb").textContent = Number.isFinite(weekGb) ? `${weekGb.toFixed(3)} GB` : "—";
-
-  if (last) {
-    const url = Number(last.blocked_url) || 0;
-    const heavy = Number(last.blocked_heavy) || 0;
-    byId("bw-blocked").textContent = `${url} / ${heavy}`;
-  } else {
-    byId("bw-blocked").textContent = "—";
-  }
-
-  const lines = (data.recent_cycles || []).map((row) => {
-    const ts = row.recorded_at_il || "?";
-    const bytes = row.net_bytes_total != null ? row.net_bytes_total : "?";
-    return `${ts}\t${bytes}`;
-  });
-  byId("bw-recent-cycles").value = lines.length ? lines.join("\n") : "";
-}
-
-async function loadBandwidthSummary() {
-  try {
-    const data = await apiJson("/api/bandwidth/summary");
-    fillBandwidthSummary(data);
-  } catch (err) {
-    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
-      byId("bw-last-cycle-mb").textContent = "שגיאה בטעינה";
-    }
-  }
-}
-
-async function addAsin(role) {
-  const asinInput = byId(role === "watch" ? "watch-asin-input" : "blacklist-asin-input");
-  const notesInput = byId(role === "watch" ? "watch-notes-input" : "blacklist-notes-input");
-  const asin = String(asinInput.value || "").trim().toUpperCase();
-  const notes = String(notesInput.value || "").trim();
-  if (!isValidAsin(asin)) {
-    showToast("יש להזין קוד מוצר תקין — 10 תווים באנגלית", true);
-    asinInput.focus();
-    return;
-  }
-  try {
-    await apiJson("/api/asins", {
-      method: "POST",
-      body: JSON.stringify({ asin, role, notes }),
-    });
-    asinInput.value = "";
-    notesInput.value = "";
-    showToast(`קוד ${asin} נוסף`);
-    await loadAsins(role);
-  } catch (err) {
-    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
-      showToast(`שגיאה בהוספה: ${err.message}`, true);
-    }
-  }
-}
-
-function openBulkModal(role) {
-  state.bulkRole = role;
-  byId("bulk-modal-title").textContent =
-    role === "watch" ? "הדבקה מרובה — מעקב מוצרים" : "הדבקה מרובה — רשימה שחורה";
-  byId("bulk-text").value = "";
-  byId("bulk-modal").classList.remove("hidden");
-}
-
-function closeBulkModal() {
-  byId("bulk-modal").classList.add("hidden");
-  state.bulkRole = null;
-}
-
-async function applyBulk() {
-  const role = state.bulkRole;
-  if (!role) {
-    return;
-  }
-  const raw = byId("bulk-text").value;
-  const parts = raw
-    .split(/[^A-Za-z0-9]+/g)
-    .map((x) => x.trim().toUpperCase())
-    .filter(Boolean);
-  const seen = new Set();
-  const valid = [];
-  for (const value of parts) {
-    if (!seen.has(value) && isValidAsin(value)) {
-      seen.add(value);
-      valid.push(value);
-    }
-  }
-  if (!valid.length) {
-    showToast("לא נמצאו קודי מוצר תקינים להוספה", true);
-    return;
-  }
-
-  let success = 0;
-  for (const asin of valid) {
-    try {
-      await apiJson("/api/asins", {
-        method: "POST",
-        body: JSON.stringify({ asin, role }),
-      });
-      success += 1;
-    } catch (_err) {
-      // continue
-    }
-  }
-  closeBulkModal();
-  await loadAsins(role);
-  showToast(`נוספו ${success} מתוך ${valid.length} מוצרים`);
+  state.loadedPollMinutes = settings.pdp_poll_minutes ?? null;
+  byId("ov-poll-summary").textContent =
+    settings.pdp_poll_minutes != null ? `בדיקה כל ${settings.pdp_poll_minutes} דקות` : "";
 }
 
 function collectSettingsPayload() {
@@ -381,38 +367,171 @@ function collectSettingsPayload() {
   };
 }
 
+/* ===== Dirty tracking / save bar ===== */
+
+function snapshotForm() {
+  state.savedSettings = JSON.stringify(collectSettingsPayload());
+  updateSaveBar();
+}
+
+function isDirty() {
+  if (state.savedSettings == null) {
+    return false;
+  }
+  return JSON.stringify(collectSettingsPayload()) !== state.savedSettings;
+}
+
+function updateSaveBar() {
+  byId("save-bar").classList.toggle("hidden", !isDirty());
+}
+
+function bindDirtyTracking() {
+  const ids = [
+    "pdp-poll-minutes", "max-cycle-seconds", "max-concurrent-tabs",
+    "pdp-settle-seconds", "pdp-continue-shopping-max-clicks", "playwright-headless",
+    "wa-group-id", "wa-client-to", "price-drop-percent", "max-requests-per-minute",
+    "affiliate-tag", "aes-url", "required-keywords", "title-blacklist-phrases",
+    "allowed-sellers", "tpl-new-product", "tpl-price-drop", "tpl-back-in-stock",
+  ];
+  for (const id of ids) {
+    const el = byId(id);
+    el.addEventListener("input", updateSaveBar);
+    el.addEventListener("change", updateSaveBar);
+  }
+}
+
+async function loadSettings() {
+  const payload = await apiJson("/api/settings");
+  fillSettings(payload.settings || {});
+  snapshotForm();
+}
+
 async function saveSettings() {
   const button = byId("save-btn");
   button.disabled = true;
   button.textContent = "שומר...";
   try {
     const settings = collectSettingsPayload();
+    const pollChanged =
+      state.loadedPollMinutes != null && settings.pdp_poll_minutes !== state.loadedPollMinutes;
     await apiJson("/api/settings", {
       method: "PUT",
       body: JSON.stringify({ settings }),
     });
-    showToast("ההגדרות נשמרו בהצלחה");
+    state.loadedPollMinutes = settings.pdp_poll_minutes;
+    byId("ov-poll-summary").textContent = `בדיקה כל ${settings.pdp_poll_minutes} דקות`;
+    snapshotForm();
+    if (pollChanged) {
+      showToast("ההגדרות נשמרו. שינוי תדירות הבדיקה ייכנס לתוקף אחרי הפעלה מחדש של המערכת");
+    } else {
+      showToast("ההגדרות נשמרו בהצלחה");
+    }
   } catch (err) {
-    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
-      showToast(`שמירה נכשלה: ${err.message}`, true);
+    if (!isAuthError(err)) {
+      showToast(`השמירה נכשלה: ${err.message}`, true);
     }
   } finally {
     button.disabled = false;
-    button.textContent = "שמור";
+    button.textContent = "שמירה";
   }
 }
+
+async function discardChanges() {
+  try {
+    await loadSettings();
+    showToast("השינויים בוטלו");
+  } catch (err) {
+    if (!isAuthError(err)) {
+      showToast("לא ניתן לטעון מחדש את ההגדרות", true);
+    }
+  }
+}
+
+/* ===== Bandwidth / overview ===== */
+
+function formatMb(bytes) {
+  const n = Number(bytes) || 0;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function formatGbFromBytes(bytes) {
+  const n = Number(bytes) || 0;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function fillBandwidthSummary(data) {
+  const last = data.last_cycle;
+  if (last && last.net_bytes_total != null) {
+    byId("bw-last-cycle-mb").textContent = formatMb(last.net_bytes_total);
+    byId("bw-last-cycle-time").textContent = last.recorded_at_il || "";
+  } else {
+    byId("bw-last-cycle-mb").textContent = "—";
+    byId("bw-last-cycle-time").textContent = "אין נתונים עדיין";
+  }
+
+  const today = data.today;
+  if (today && today.bytes_total != null) {
+    byId("bw-today-gb").textContent = formatGbFromBytes(today.bytes_total);
+    byId("ov-cycles-today").textContent = String(Number(today.cycles) || 0);
+  } else {
+    byId("bw-today-gb").textContent = "0.00 GB";
+    byId("ov-cycles-today").textContent = "0";
+  }
+
+  const weekGb = Number(data.last_7_days_gb);
+  byId("bw-week-gb").textContent = Number.isFinite(weekGb) ? `${weekGb.toFixed(2)} GB` : "—";
+
+  const tbody = byId("bw-recent-body");
+  tbody.innerHTML = "";
+  const rows = data.recent_cycles || [];
+  if (!rows.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 2;
+    td.className = "empty-cell";
+    td.textContent = "אין נתונים עדיין";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    const tsTd = document.createElement("td");
+    tsTd.textContent = row.recorded_at_il || "?";
+    const bytesTd = document.createElement("td");
+    bytesTd.textContent = row.net_bytes_total != null ? formatMb(row.net_bytes_total) : "?";
+    tr.appendChild(tsTd);
+    tr.appendChild(bytesTd);
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadBandwidthSummary() {
+  try {
+    const data = await apiJson("/api/bandwidth/summary");
+    fillBandwidthSummary(data);
+  } catch (err) {
+    if (!isAuthError(err)) {
+      byId("bw-last-cycle-mb").textContent = "שגיאה";
+    }
+  }
+}
+
+/* ===== sqlite-web ===== */
 
 function renderSqliteStatus(status) {
   const line = byId("sqlite-status");
   const link = byId("sqlite-link");
   if (!status.running) {
     line.textContent = "מצב: לא פעיל";
+    line.classList.remove("active");
     link.classList.add("hidden");
     link.href = "#";
     return;
   }
   const mode = status.read_only ? "קריאה בלבד" : "עריכה";
-  line.textContent = `מצב: פעיל (${mode}) - נותרו ${status.seconds_remaining || 0} שניות`;
+  line.textContent = `מצב: פעיל (${mode}) — נותרו ${status.seconds_remaining || 0} שניות`;
+  line.classList.add("active");
   if (status.url) {
     link.href = status.url;
     link.classList.remove("hidden");
@@ -421,14 +540,14 @@ function renderSqliteStatus(status) {
   }
 }
 
-async function refreshSqliteStatus() {
+async function refreshSqliteStatus(silent = true) {
   try {
     const status = await apiJson("/api/sqlite/status");
     renderSqliteStatus(status);
   } catch (err) {
     renderSqliteStatus({ running: false });
-    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
-      showToast("לא ניתן לבדוק מצב צפייה במסד", true);
+    if (!silent && !isAuthError(err)) {
+      showToast("לא ניתן לבדוק את מצב הצפייה במסד", true);
     }
   }
 }
@@ -442,15 +561,29 @@ async function startSqlite(readOnly) {
     renderSqliteStatus(payload);
     showToast(readOnly ? "נפתחה צפייה במסד (קריאה בלבד)" : "נפתחה עריכת מסד (10 דקות)");
   } catch (err) {
-    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
+    if (!isAuthError(err)) {
       showToast("לא ניתן לפתוח צפייה במסד", true);
     }
   }
 }
 
+async function stopSqlite() {
+  try {
+    await apiJson("/api/sqlite/stop", { method: "POST", body: JSON.stringify({}) });
+    await refreshSqliteStatus();
+    showToast("הצפייה במסד נסגרה");
+  } catch (err) {
+    if (!isAuthError(err)) {
+      showToast("לא ניתן לסגור את הצפייה במסד", true);
+    }
+  }
+}
+
+/* ===== PM2 restart ===== */
+
 async function restartPm2Stack() {
   const ok = window.confirm(
-    "להפעיל מחדש את כל השירותים?\n\nהדף עלול להתנתק. אחרי כ-20 שניות פתחו שוב את הפאנל."
+    "להפעיל מחדש את כל השירותים?\n\nהדף עלול להתנתק לכ־20 שניות ואז אפשר לרענן."
   );
   if (!ok) {
     return;
@@ -464,10 +597,10 @@ async function restartPm2Stack() {
       method: "POST",
       body: JSON.stringify({}),
     });
-    showToast(payload.message || "המערכת הופעלה מחדש");
+    showToast(payload.message || "המערכת מופעלת מחדש");
   } catch (err) {
-    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
-      showToast(err.message || "הפעלה מחדש נכשלה", true);
+    if (!isAuthError(err)) {
+      showToast(err.message || "ההפעלה מחדש נכשלה", true);
     }
   } finally {
     button.disabled = false;
@@ -475,17 +608,7 @@ async function restartPm2Stack() {
   }
 }
 
-async function stopSqlite() {
-  try {
-    await apiJson("/api/sqlite/stop", { method: "POST", body: JSON.stringify({}) });
-    await refreshSqliteStatus();
-    showToast("צפייה במסד נסגרה");
-  } catch (err) {
-    if (err.message !== "unauthorized" && err.message !== "not_logged_in") {
-      showToast("לא ניתן לסגור צפייה במסד", true);
-    }
-  }
-}
+/* ===== Wiring ===== */
 
 function bindEvents() {
   byId("login-form").addEventListener("submit", async (ev) => {
@@ -496,17 +619,34 @@ function bindEvents() {
     try {
       await loadAppData();
       showApp();
+      startSqlitePolling();
     } catch (err) {
       clearAuth();
       if (err.message === "unauthorized") {
         return;
       }
-      showLogin(err.message === "not_logged_in" ? "יש להתחברות" : `שגיאה: ${err.message}`);
+      showLogin(err.message === "not_logged_in" ? "יש להתחבר" : `שגיאה: ${err.message}`);
     }
+  });
+
+  byId("logout-btn").addEventListener("click", () => {
+    clearAuth();
+    stopSqlitePolling();
+    showLogin();
+  });
+
+  document.querySelectorAll(".nav-item[data-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
 
   byId("watch-add-btn").addEventListener("click", () => addAsin("watch"));
   byId("blacklist-add-btn").addEventListener("click", () => addAsin("blacklist"));
+  byId("watch-asin-input").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); addAsin("watch"); }
+  });
+  byId("blacklist-asin-input").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); addAsin("blacklist"); }
+  });
   byId("watch-bulk-btn").addEventListener("click", () => openBulkModal("watch"));
   byId("blacklist-bulk-btn").addEventListener("click", () => openBulkModal("blacklist"));
   byId("bulk-cancel-btn").addEventListener("click", closeBulkModal);
@@ -521,26 +661,54 @@ function bindEvents() {
       closeBulkModal();
     }
   });
+
   byId("save-btn").addEventListener("click", saveSettings);
+  byId("discard-btn").addEventListener("click", discardChanges);
   byId("pm2-restart-btn").addEventListener("click", restartPm2Stack);
   byId("sqlite-ro-btn").addEventListener("click", () => startSqlite(true));
   byId("sqlite-rw-btn").addEventListener("click", () => startSqlite(false));
   byId("sqlite-stop-btn").addEventListener("click", stopSqlite);
+
+  bindDirtyTracking();
+
+  window.addEventListener("beforeunload", (ev) => {
+    if (isDirty()) {
+      ev.preventDefault();
+      ev.returnValue = "";
+    }
+  });
+}
+
+function startSqlitePolling() {
+  stopSqlitePolling();
+  state.sqlitePollId = window.setInterval(refreshSqliteStatus, 2000);
+}
+
+function stopSqlitePolling() {
+  if (state.sqlitePollId) {
+    window.clearInterval(state.sqlitePollId);
+    state.sqlitePollId = null;
+  }
 }
 
 async function loadAppData() {
   await loadSettings();
-  await loadBandwidthSummary();
-  await Promise.all([loadAsins("watch"), loadAsins("blacklist"), refreshSqliteStatus()]);
+  await Promise.all([
+    loadBandwidthSummary(),
+    loadAsins("watch"),
+    loadAsins("blacklist"),
+    refreshSqliteStatus(),
+  ]);
 }
 
 async function init() {
   bindEvents();
+  restoreTab();
   if (getAuthHeader()) {
     try {
       await loadAppData();
       showApp();
-      state.sqlitePollId = window.setInterval(refreshSqliteStatus, 1000);
+      startSqlitePolling();
       return;
     } catch (err) {
       clearAuth();
@@ -552,10 +720,5 @@ async function init() {
   showLogin();
 }
 
-window.addEventListener("beforeunload", () => {
-  if (state.sqlitePollId) {
-    window.clearInterval(state.sqlitePollId);
-  }
-});
-
+window.addEventListener("beforeunload", stopSqlitePolling);
 window.addEventListener("DOMContentLoaded", init);

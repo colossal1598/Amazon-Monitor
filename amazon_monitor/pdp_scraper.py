@@ -108,6 +108,14 @@ def _clamp_pdp_settle_seconds(raw: float) -> float:
     return max(1.0, min(30.0, float(raw)))
 
 
+def _clamp_pdp_settle_poll_interval(raw: float) -> float:
+    return max(0.1, min(5.0, float(raw)))
+
+
+def _clamp_pdp_unknown_retry_seconds(raw: float) -> float:
+    return max(0.0, min(10.0, float(raw)))
+
+
 def _clamp_continue_shopping_clicks(raw: int) -> int:
     return max(0, min(10, int(raw)))
 
@@ -352,6 +360,85 @@ async def _pdp_buybox_present_async(page: Any) -> bool:
         except Exception:
             continue
     return False
+
+
+async def _wait_for_buybox_ready_async(
+    page: Any,
+    *,
+    timeout_s: float,
+    poll_interval_s: float,
+) -> bool:
+    """Poll until buybox region appears or timeout elapses."""
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    interval = max(0.1, min(float(poll_interval_s), float(timeout_s) or 0.1))
+    while time.monotonic() < deadline:
+        if await _pdp_buybox_present_async(page):
+            return True
+        await asyncio.sleep(interval)
+    return await _pdp_buybox_present_async(page)
+
+
+async def _extract_pdp_page_state_async(
+    page: Any,
+    *,
+    asin: str,
+    allowed: list[str],
+) -> dict[str, Any]:
+    """Extract title, price, merchant, shipping, OOS signals from a loaded PDP page."""
+    availability_text = await _extract_availability_text_async(page)
+    explicit_oos, explicit_reason = await _detect_explicit_oos_async(
+        page, availability_text=availability_text
+    )
+    title = await _extract_pdp_title_async(page) or _product_title_from_page_title(
+        await page.title() or ""
+    )
+    price = None if explicit_oos else await _extract_pdp_price_async(page)
+
+    if not explicit_oos and price is None and title:
+        inferred, infer_reason = await _detect_inferred_oos_async(
+            page,
+            availability_text=availability_text,
+        )
+        if inferred:
+            explicit_oos = True
+            explicit_reason = infer_reason
+        elif await _buybox_purchasable_async(page):
+            LOGGER.info(
+                "PDP pay price missing with purchase action asin=%s (leaving unknown)",
+                asin,
+                extra={"channel": "debug"},
+            )
+        else:
+            explicit_oos = True
+            explicit_reason = "no_pay_price"
+        if explicit_oos and explicit_reason:
+            LOGGER.info(
+                "PDP no pay price asin=%s reason=%s",
+                asin,
+                explicit_reason,
+                extra={"channel": "debug"},
+            )
+
+    merchant_blob = ""
+    shipping = ""
+    image_url = None
+    if not explicit_oos:
+        merchant_blob, shipping, image_url = await asyncio.gather(
+            _pdp_merchant_blob_async(page),
+            _extract_pdp_shipping_async(page),
+            _extract_pdp_image_async(page),
+        )
+
+    return {
+        "availability_text": availability_text,
+        "explicit_oos": explicit_oos,
+        "explicit_reason": explicit_reason,
+        "title": title,
+        "price": price,
+        "merchant_blob": merchant_blob,
+        "shipping": shipping,
+        "image_url": image_url,
+    }
 
 
 def _product_title_from_page_title(raw: str) -> str:
@@ -669,6 +756,33 @@ def _pdp_row(
     }
 
 
+def _pdp_row_would_be_unknown(
+    *,
+    asin: str,
+    title: str,
+    price: float | None,
+    shipping_text: str,
+    image_url: str | None,
+    merchant_blob: str,
+    allowed: list[str],
+    availability_text: str = "",
+    explicit_oos: bool = False,
+) -> bool:
+    """True when _pdp_row would classify stock_confidence as unknown (retry candidate)."""
+    row = _pdp_row(
+        asin,
+        title=title,
+        price=price,
+        shipping_text=shipping_text,
+        image_url=image_url,
+        merchant_blob=merchant_blob,
+        allowed=allowed,
+        availability_text=availability_text,
+        explicit_oos=explicit_oos,
+    )
+    return str(row.get("stock_confidence") or "") == "unknown"
+
+
 # Create a “do not update this ASIN” marker when a single product page fails, so a bad scrape doesn’t flip the database state.
 def _pdp_skip_row(
     asin: str,
@@ -945,6 +1059,8 @@ async def _scrape_pdp_on_context(
     jitter_range: tuple[float, float],
     max_attempts: int,
     pdp_settle_seconds: float = _PDP_SETTLE_SECONDS_DEFAULT,
+    pdp_settle_poll_interval_seconds: float = 1.0,
+    pdp_unknown_retry_seconds: float = 2.5,
     pdp_continue_shopping_max_clicks: int = _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT,
 ) -> tuple[list[dict[str, Any]], float]:
     """Scrape watch ASINs on an existing async BrowserContext (caller owns bandwidth meter)."""
@@ -953,16 +1069,20 @@ async def _scrape_pdp_on_context(
     stealth_ctx_applied = bool(getattr(context, "_stealth_ctx_applied", False))
     stealth_page_fallback_warned = False
     settle_s = _clamp_pdp_settle_seconds(pdp_settle_seconds)
+    settle_poll_s = _clamp_pdp_settle_poll_interval(pdp_settle_poll_interval_seconds)
+    unknown_retry_s = _clamp_pdp_unknown_retry_seconds(pdp_unknown_retry_seconds)
     continue_clicks = _clamp_continue_shopping_clicks(pdp_continue_shopping_max_clicks)
     attempt = max(1, int(max_attempts))
     LOGGER.info(
         "pdp_watch starting concurrent_tabs=%s jitter=%.2f-%.2f asins=%s "
-        "settle_seconds=%s continue_shopping_max_clicks=%s",
+        "settle_seconds=%s settle_poll=%s unknown_retry=%s continue_shopping_max_clicks=%s",
         max_concurrent,
         jitter_range[0],
         jitter_range[1],
         len(normalized),
         settle_s,
+        settle_poll_s,
+        unknown_retry_s,
         continue_clicks,
         extra={"channel": "debug"},
     )
@@ -1072,54 +1192,75 @@ async def _scrape_pdp_on_context(
                 await _dismiss_continue_shopping_async(
                     page, max_clicks=continue_clicks, asin=asin
                 )
-                await asyncio.sleep(settle_s)
+                buybox_ready = await _wait_for_buybox_ready_async(
+                    page,
+                    timeout_s=settle_s,
+                    poll_interval_s=settle_poll_s,
+                )
                 await _dismiss_continue_shopping_async(
                     page, max_clicks=continue_clicks, asin=asin
                 )
-
-                availability_text = await _extract_availability_text_async(page)
-                explicit_oos, explicit_reason = await _detect_explicit_oos_async(
-                    page, availability_text=availability_text
-                )
-                title = await _extract_pdp_title_async(page) or _product_title_from_page_title(
-                    await page.title() or ""
-                )
-                price = None if explicit_oos else await _extract_pdp_price_async(page)
-
-                if not explicit_oos and price is None and title:
-                    inferred, infer_reason = await _detect_inferred_oos_async(
-                        page,
-                        availability_text=availability_text,
+                if not buybox_ready:
+                    LOGGER.info(
+                        "PDP buybox not ready after settle asin=%s timeout_s=%s",
+                        asin,
+                        settle_s,
+                        extra={"channel": "debug"},
                     )
-                    if inferred:
-                        explicit_oos = True
-                        explicit_reason = infer_reason
-                    elif await _buybox_purchasable_async(page):
-                        LOGGER.info(
-                            "PDP pay price missing with purchase action asin=%s (leaving unknown)",
-                            asin,
-                            extra={"channel": "debug"},
-                        )
-                    else:
-                        explicit_oos = True
-                        explicit_reason = "no_pay_price"
-                    if explicit_oos and explicit_reason:
-                        LOGGER.info(
-                            "PDP no pay price asin=%s reason=%s",
-                            asin,
-                            explicit_reason,
-                            extra={"channel": "debug"},
-                        )
 
-                if explicit_oos:
-                    merchant_blob = ""
-                    shipping = ""
-                    image_url = None
-                else:
-                    merchant_blob, shipping, image_url = await asyncio.gather(
-                        _pdp_merchant_blob_async(page),
-                        _extract_pdp_shipping_async(page),
-                        _extract_pdp_image_async(page),
+                state = await _extract_pdp_page_state_async(page, asin=asin, allowed=allowed)
+                availability_text = state["availability_text"]
+                explicit_oos = bool(state["explicit_oos"])
+                explicit_reason = state.get("explicit_reason")
+                title = str(state.get("title") or "")
+                price = state.get("price")
+                merchant_blob = str(state.get("merchant_blob") or "")
+                shipping = str(state.get("shipping") or "")
+                image_url = state.get("image_url")
+
+                if _pdp_row_would_be_unknown(
+                    asin=asin,
+                    title=title,
+                    price=price if isinstance(price, (int, float)) else None,
+                    shipping_text=shipping,
+                    image_url=image_url if isinstance(image_url, str) else None,
+                    merchant_blob=merchant_blob,
+                    allowed=allowed,
+                    availability_text=availability_text,
+                    explicit_oos=explicit_oos,
+                ) and unknown_retry_s > 0:
+                    LOGGER.info(
+                        "PDP unknown confidence asin=%s reason=initial_pass retry_s=%s",
+                        asin,
+                        unknown_retry_s,
+                        extra={"channel": "debug"},
+                    )
+                    await asyncio.sleep(unknown_retry_s)
+                    state = await _extract_pdp_page_state_async(page, asin=asin, allowed=allowed)
+                    availability_text = state["availability_text"]
+                    explicit_oos = bool(state["explicit_oos"])
+                    explicit_reason = state.get("explicit_reason")
+                    title = str(state.get("title") or "")
+                    price = state.get("price")
+                    merchant_blob = str(state.get("merchant_blob") or "")
+                    shipping = str(state.get("shipping") or "")
+                    image_url = state.get("image_url")
+                    resolved = not _pdp_row_would_be_unknown(
+                        asin=asin,
+                        title=title,
+                        price=price if isinstance(price, (int, float)) else None,
+                        shipping_text=shipping,
+                        image_url=image_url if isinstance(image_url, str) else None,
+                        merchant_blob=merchant_blob,
+                        allowed=allowed,
+                        availability_text=availability_text,
+                        explicit_oos=explicit_oos,
+                    )
+                    LOGGER.info(
+                        "PDP unknown retry asin=%s resolved=%s",
+                        asin,
+                        resolved,
+                        extra={"channel": "debug"},
                     )
 
                 if not explicit_oos and not title and price is None:
@@ -1215,6 +1356,8 @@ async def _run_pdp_watch_async(
     max_attempts: int,
     headless: bool = True,
     pdp_settle_seconds: float = _PDP_SETTLE_SECONDS_DEFAULT,
+    pdp_settle_poll_interval_seconds: float = 1.0,
+    pdp_unknown_retry_seconds: float = 2.5,
     pdp_continue_shopping_max_clicks: int = _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT,
     context: Any | None = None,
     config: dict[str, Any] | None = None,
@@ -1228,6 +1371,8 @@ async def _run_pdp_watch_async(
         "jitter_range": jitter_range,
         "max_attempts": max_attempts,
         "pdp_settle_seconds": pdp_settle_seconds,
+        "pdp_settle_poll_interval_seconds": pdp_settle_poll_interval_seconds,
+        "pdp_unknown_retry_seconds": pdp_unknown_retry_seconds,
         "pdp_continue_shopping_max_clicks": pdp_continue_shopping_max_clicks,
     }
 
@@ -1270,6 +1415,8 @@ async def scrape_pdp_watch_async(
     max_attempts: int = _PDP_MAX_ATTEMPTS,
     headless: bool = True,
     pdp_settle_seconds: float = _PDP_SETTLE_SECONDS_DEFAULT,
+    pdp_settle_poll_interval_seconds: float = 1.0,
+    pdp_unknown_retry_seconds: float = 2.5,
     pdp_continue_shopping_max_clicks: int = _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT,
     context: Any | None = None,
     config: dict[str, Any] | None = None,
@@ -1298,6 +1445,9 @@ async def scrape_pdp_watch_async(
 
     jitter = _coerce_tab_jitter_pair(tab_jitter_seconds, (0.15, 0.55))
     conc = _clamp_pdp_concurrency(max_concurrent_tabs)
+    cfg = config if isinstance(config, dict) else {}
+    settle_poll = float(cfg.get("pdp_settle_poll_interval_seconds", pdp_settle_poll_interval_seconds))
+    unknown_retry = float(cfg.get("pdp_unknown_retry_seconds", pdp_unknown_retry_seconds))
 
     return await _run_pdp_watch_async(
         normalized,
@@ -1309,6 +1459,8 @@ async def scrape_pdp_watch_async(
         max_attempts=max(1, int(max_attempts)),
         headless=headless,
         pdp_settle_seconds=pdp_settle_seconds,
+        pdp_settle_poll_interval_seconds=settle_poll,
+        pdp_unknown_retry_seconds=unknown_retry,
         pdp_continue_shopping_max_clicks=pdp_continue_shopping_max_clicks,
         context=context,
         config=config,

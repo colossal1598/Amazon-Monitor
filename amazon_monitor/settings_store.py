@@ -35,7 +35,10 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "pdp_watch_tab_jitter_seconds": [0.15, 0.55],
     "pdp_watch_scroll_delay_seconds": [0.25, 0.65],
     "pdp_settle_seconds": 8.0,
+    "pdp_settle_poll_interval_seconds": 1.0,
+    "pdp_unknown_retry_seconds": 2.5,
     "pdp_continue_shopping_max_clicks": 3,
+    "cross_source_alert_dedupe_minutes": 15,
     "pdp_title_wait_ms": 6_000,
     "pdp_price_wait_ms": 2_000,
     # AES/SERP result-card wait per attempt. Kept short: this is a lightweight 1-page

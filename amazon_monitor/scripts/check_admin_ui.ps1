@@ -1,6 +1,7 @@
-# Diagnose admin UI (port 8765) and PM2 status.
+# Diagnose admin UI (port 80) and PM2 status.
 $ErrorActionPreference = "Continue"
 
+$AdminUiPort = 80
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $projectRoot ".env"
 $venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
@@ -39,12 +40,12 @@ if (Test-Path $envFile) {
 }
 
 Write-Host ""
-Write-Host "=== Port 8765 ===" -ForegroundColor Cyan
-$listeners = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue
+Write-Host "=== Port $AdminUiPort ===" -ForegroundColor Cyan
+$listeners = Get-NetTCPConnection -LocalPort $AdminUiPort -State Listen -ErrorAction SilentlyContinue
 if ($listeners) {
-    Write-Host "OK: Something is listening on 127.0.0.1:8765"
+    Write-Host "OK: Something is listening on 127.0.0.1:$AdminUiPort"
 } else {
-    Write-Host "FAIL: Nothing listening on port 8765 (browser = connection refused)" -ForegroundColor Red
+    Write-Host "FAIL: Nothing listening on port $AdminUiPort (browser = connection refused)" -ForegroundColor Red
 }
 
 Write-Host ""
@@ -71,5 +72,5 @@ Write-Host @"
 2. pip install -r requirements.txt
 3. pm2 delete admin-ui 2>`$null; pm2 start ecosystem.config.cjs --only admin-ui
 4. pm2 save
-5. Open http://127.0.0.1:8765 (browser will ask for basic auth)
+5. Open http://127.0.0.1 (browser will ask for basic auth; port 80 requires admin/elevated PM2 on Windows)
 "@
