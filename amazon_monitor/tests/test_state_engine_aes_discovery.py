@@ -141,14 +141,81 @@ class TestProcessAesSerpMirror(unittest.TestCase):
             finally:
                 se.conn.close()
 
-    def test_reconcile_absence_marks_missing_rows_out_of_stock(self) -> None:
+    def test_reconcile_absence_marks_missing_rows_out_of_stock_after_confirm_cycles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            config = {"aes_oos_confirm_cycles": 3}
             try:
                 _seed_aes_row(se, "B044444444", in_stock=1, price=24.99)
-                se.process_aes_serp_mirror([], source="aes_llc", reconcile_absence=True)
+                # First two absent cycles are debounced; third flips to OOS.
+                for expected_stock in (1, 1, 0):
+                    se.process_aes_serp_mirror(
+                        [], source="aes_llc", reconcile_absence=True, config=config
+                    )
+                    _, _, stock = _aes_row(se, "B044444444")
+                    self.assertEqual(stock, expected_stock)
+            finally:
+                se.conn.close()
+
+    def test_reconcile_absence_immediate_with_confirm_cycles_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            config = {"aes_oos_confirm_cycles": 1}
+            try:
+                _seed_aes_row(se, "B044444444", in_stock=1, price=24.99)
+                se.process_aes_serp_mirror(
+                    [], source="aes_llc", reconcile_absence=True, config=config
+                )
                 _, _, stock = _aes_row(se, "B044444444")
                 self.assertEqual(stock, 0)
+            finally:
+                se.conn.close()
+
+    def test_brief_absence_does_not_trigger_back_in_stock_on_return(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            config = {"aes_oos_confirm_cycles": 3}
+            try:
+                _seed_aes_row(se, "B066666666", in_stock=1, price=24.99)
+                # One cycle off the page (page churn / filter blip)...
+                se.process_aes_serp_mirror(
+                    [], source="aes_llc", reconcile_absence=True, config=config
+                )
+                _, _, stock = _aes_row(se, "B066666666")
+                self.assertEqual(stock, 1)
+                # ...then it returns: no phantom back_in_stock, streak resets.
+                alerts, _ = se.process_aes_serp_mirror(
+                    [_aes_candidate("B066666666", in_stock=True, price=24.99)],
+                    source="aes_llc",
+                    reconcile_absence=True,
+                    config=config,
+                )
+                self.assertEqual(alerts, [])
+                streak = se.conn.execute(
+                    "SELECT oos_miss_streak FROM aes_products WHERE asin = ?",
+                    ("B066666666",),
+                ).fetchone()[0]
+                self.assertEqual(int(streak), 0)
+            finally:
+                se.conn.close()
+
+    def test_nonqualifying_row_debounced_before_oos(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            config = {"aes_oos_confirm_cycles": 3}
+            try:
+                _seed_aes_row(se, "B077777777", in_stock=1, price=24.99)
+                # Row present but non-qualifying (e.g. missing price): debounced twice,
+                # confirmed OOS on the third consecutive cycle.
+                for expected_stock in (1, 1, 0):
+                    se.process_aes_serp_mirror(
+                        [_aes_candidate("B077777777", in_stock=False, price=24.99)],
+                        source="aes_llc",
+                        reconcile_absence=True,
+                        config=config,
+                    )
+                    _, _, stock = _aes_row(se, "B077777777")
+                    self.assertEqual(stock, expected_stock)
             finally:
                 se.conn.close()
 

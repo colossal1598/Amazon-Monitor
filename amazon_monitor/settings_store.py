@@ -39,6 +39,18 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "pdp_unknown_retry_seconds": 2.5,
     "pdp_continue_shopping_max_clicks": 3,
     "cross_source_alert_dedupe_minutes": 15,
+    # Minimum gap between two identical stock alerts (same ASIN + type) from ANY
+    # source. Stops flapping state (page-1 churn, transient scrape misses) from
+    # spamming repeated back_in_stock/new_product messages. 0 disables.
+    "stock_alert_cooldown_minutes": 60,
+    # Shorter cooldown used instead when the item's previous out-of-stock was backed
+    # by explicit evidence (PDP/card said "currently unavailable" etc.). Real
+    # sell-out -> restock cycles are common for Pokemon drops and must re-alert fast.
+    "stock_alert_confirmed_cooldown_minutes": 10,
+    # Consecutive AES/SERP cycles an item must look out-of-stock (absent from the
+    # filtered page or non-qualifying row) before the mirror flips to OOS. 1 = old
+    # immediate behavior.
+    "aes_oos_confirm_cycles": 3,
     "pdp_title_wait_ms": 6_000,
     "pdp_price_wait_ms": 2_000,
     # AES/SERP result-card wait per attempt. Kept short: this is a lightweight 1-page

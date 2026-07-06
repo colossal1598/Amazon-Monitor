@@ -16,6 +16,17 @@ LOGGER = logging.getLogger(__name__)
 
 _STOCK_ALERT_TYPES = frozenset({"new_product", "back_in_stock"})
 
+# PDP stock_reason values that mean the page *explicitly* said out-of-stock, as opposed
+# to inferred/heuristic OOS (missing price, "see all buying options", no buy button).
+_STRONG_OOS_REASONS = frozenset(
+    {
+        "explicit_oos",
+        "explicit_oos_text",
+        "outofstock_container",
+        "explicit_oos_buybox_text",
+    }
+)
+
 
 # Get “right now” in UTC so all timestamps in the database and alerts line up.
 def utc_now() -> datetime:
@@ -78,7 +89,8 @@ class StateEngine:
                     last_seen TEXT,
                     last_price_alert TEXT,
                     last_stock_alert TEXT,
-                    image_url TEXT
+                    image_url TEXT,
+                    last_oos_confirmed INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS aes_products (
@@ -90,7 +102,9 @@ class StateEngine:
                     last_seen TEXT,
                     last_price_alert TEXT,
                     last_stock_alert TEXT,
-                    image_url TEXT
+                    image_url TEXT,
+                    oos_miss_streak INTEGER NOT NULL DEFAULT 0,
+                    last_oos_confirmed INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS alerts (
@@ -132,6 +146,13 @@ class StateEngine:
         for table in ("products", "aes_products"):
             if not self._table_has_column(table, "image_url"):
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN image_url TEXT")
+        if not self._table_has_column("aes_products", "oos_miss_streak"):
+            self.conn.execute("ALTER TABLE aes_products ADD COLUMN oos_miss_streak INTEGER NOT NULL DEFAULT 0")
+        for table in ("products", "aes_products"):
+            if not self._table_has_column(table, "last_oos_confirmed"):
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN last_oos_confirmed INTEGER NOT NULL DEFAULT 0"
+                )
 
     def _maybe_cache_image(
         self,
@@ -168,38 +189,54 @@ class StateEngine:
             ),
         )
 
-    def _cross_source_dedupe_minutes(self, config: dict[str, Any] | None) -> int:
+    @staticmethod
+    def _config_minutes(config: dict[str, Any] | None, key: str, default: int) -> int:
         if not config:
-            return 15
+            return default
         try:
-            return max(0, int(config.get("cross_source_alert_dedupe_minutes", 15)))
+            return max(0, int(config.get(key, default)))
         except (TypeError, ValueError):
-            return 15
+            return default
 
-    def _cross_source_duplicate(
+    def _recent_stock_alert(
         self,
         asin: str,
         alert_type: str,
-        source: str,
         window_minutes: int,
+        *,
+        exclude_source: str | None = None,
     ) -> sqlite3.Row | None:
-        """Return the most recent matching alert from a different source within the window."""
+        """Most recent matching alert within the window; optionally ignoring one source.
+
+        With ``exclude_source`` set this is the cross-source dedupe check; without it,
+        it is the global per-ASIN cooldown that stops repeat alerts from any source.
+        """
         if alert_type not in _STOCK_ALERT_TYPES or window_minutes <= 0:
             return None
-        row = self.conn.execute(
-            """
-            SELECT source, sent_at FROM alerts
-            WHERE asin = ? AND alert_type = ? AND source != ?
-            ORDER BY sent_at DESC LIMIT 1
-            """,
-            (asin, alert_type, source),
-        ).fetchone()
+        if exclude_source is not None:
+            row = self.conn.execute(
+                """
+                SELECT source, sent_at FROM alerts
+                WHERE asin = ? AND alert_type = ? AND source != ?
+                ORDER BY sent_at DESC LIMIT 1
+                """,
+                (asin, alert_type, exclude_source),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                """
+                SELECT source, sent_at FROM alerts
+                WHERE asin = ? AND alert_type = ?
+                ORDER BY sent_at DESC LIMIT 1
+                """,
+                (asin, alert_type),
+            ).fetchone()
         if row is None:
             return None
         try:
             sent_at = datetime.fromisoformat(str(row["sent_at"]))
             if sent_at.tzinfo is None:
-                sent_at = sent_at.replace(tinfo=timezone.utc)
+                sent_at = sent_at.replace(tzinfo=timezone.utc)
         except ValueError:
             return None
         age = utc_now() - sent_at
@@ -221,10 +258,35 @@ class StateEngine:
         telemetry: Any,
         cycle_id: int,
         _tel: Any,
+        confirmed_transition: bool = False,
     ) -> dict[str, Any] | None:
-        """Build and return a stock alert, or None when suppressed as a cross-source duplicate."""
-        window = self._cross_source_dedupe_minutes(config)
-        prior = self._cross_source_duplicate(asin, alert_type, source, window)
+        """Build and return a stock alert, or None when suppressed by dedupe/cooldown.
+
+        ``confirmed_transition`` marks a back-in-stock whose preceding OOS was backed by
+        strong evidence (explicit "unavailable"/OOS on the page or card). Those are real
+        sell-out -> restock events, so they only respect the short confirmed cooldown;
+        weak-evidence transitions (SERP absence, missing price, inferred OOS) use the
+        long cooldown because they are usually scrape noise.
+        """
+        if confirmed_transition:
+            cooldown = self._config_minutes(config, "stock_alert_confirmed_cooldown_minutes", 10)
+        else:
+            cooldown = self._config_minutes(config, "stock_alert_cooldown_minutes", 60)
+        recent = self._recent_stock_alert(asin, alert_type, cooldown)
+        if recent is not None:
+            _tel(
+                "stock_alert_cooldown_suppressed",
+                asin=asin,
+                alert_type=alert_type,
+                source=source,
+                prior_source=recent["source"],
+                prior_sent_at=recent["sent_at"],
+                cooldown_minutes=cooldown,
+                confirmed_transition=confirmed_transition,
+            )
+            return None
+        window = self._config_minutes(config, "cross_source_alert_dedupe_minutes", 15)
+        prior = self._recent_stock_alert(asin, alert_type, window, exclude_source=source)
         if prior is not None:
             _tel(
                 "cross_source_alert_suppressed",
@@ -398,14 +460,16 @@ class StateEngine:
                         )
                         skipped_update_count += 1
                         continue
+                    oos_confirmed = 1 if (reason or "") in _STRONG_OOS_REASONS else 0
                     self.conn.execute(
                         """
                         UPDATE products
                         SET in_stock = 0,
+                            last_oos_confirmed = ?,
                             image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (image_url, asin),
+                        (oos_confirmed, image_url, asin),
                     )
                     self._maybe_cache_image(asin, image_url, config)
                     continue
@@ -450,6 +514,7 @@ class StateEngine:
                         telemetry=telemetry,
                         cycle_id=cycle_id,
                         _tel=_tel,
+                        confirmed_transition=bool(row["last_oos_confirmed"]),
                     )
                     if alert is not None:
                         alerts.append(alert)
@@ -536,7 +601,17 @@ class StateEngine:
         back_in_stock_count = 0
         price_drop_count = 0
         reconciled_oos_count = 0
+        debounced_oos_count = 0
         seen_asins: set[str] = set()
+
+        # SERP absence/non-qualifying rows are noisy (page-1 churn, transient missing
+        # price). Require this many consecutive OOS observations before flipping the
+        # mirror to out-of-stock, so a one-cycle blip can't produce a fake
+        # 0->1 "back_in_stock" on the next cycle.
+        try:
+            oos_confirm_cycles = max(1, int((config or {}).get("aes_oos_confirm_cycles", 3)))
+        except (TypeError, ValueError):
+            oos_confirm_cycles = 3
 
         def _tel(event: str, *, asin: str | None = None, **fields: Any) -> None:
             if telemetry and cycle_id:
@@ -591,47 +666,53 @@ class StateEngine:
 
                 old_price = _as_float(row["price"])
                 old_stock = int(row["in_stock"] or 0)
+                old_streak = int(row["oos_miss_streak"] or 0)
                 if new_stock == 0:
+                    explicit_oos = bool(item.get("explicit_oos"))
+                    miss_streak = old_streak + 1
+                    # Explicit "unavailable"/OOS text on the card is trustworthy: flip
+                    # immediately and remember it was confirmed, so a fast genuine
+                    # restock can re-alert on the short confirmed cooldown. Weak
+                    # signals (missing price etc.) keep the consecutive-cycle debounce.
+                    flip_oos = explicit_oos or old_stock == 0 or miss_streak >= oos_confirm_cycles
+                    if not flip_oos:
+                        debounced_oos_count += 1
+                        _tel(
+                            "aes_oos_debounced",
+                            asin=asin,
+                            miss_streak=miss_streak,
+                            confirm_cycles=oos_confirm_cycles,
+                        )
+                    oos_confirmed = 1 if explicit_oos else (int(row["last_oos_confirmed"] or 0) if old_stock == 0 else 0)
                     self.conn.execute(
                         """
                         UPDATE aes_products
                         SET title = COALESCE(?, title),
-                            in_stock = 0,
+                            in_stock = ?,
+                            oos_miss_streak = ?,
+                            last_oos_confirmed = ?,
                             last_seen = ?,
                             image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (title, now, image_url, asin),
+                        (title, 0 if flip_oos else 1, miss_streak, oos_confirmed, now, image_url, asin),
                     )
                     self._maybe_cache_image(asin, image_url, config)
                     continue
 
-                if old_stock == 0:
-                    self.conn.execute(
-                        """
-                        UPDATE aes_products
-                        SET title = COALESCE(?, title),
-                            price = COALESCE(?, price),
-                            in_stock = 1,
-                            last_seen = ?,
-                            image_url = COALESCE(?, image_url)
-                        WHERE asin = ?
-                        """,
-                        (title, new_price, now, image_url, asin),
-                    )
-                else:
-                    self.conn.execute(
-                        """
-                        UPDATE aes_products
-                        SET title = COALESCE(?, title),
-                            price = COALESCE(?, price),
-                            in_stock = 1,
-                            last_seen = ?,
-                            image_url = COALESCE(?, image_url)
-                        WHERE asin = ?
-                        """,
-                        (title, new_price, now, image_url, asin),
-                    )
+                self.conn.execute(
+                    """
+                    UPDATE aes_products
+                    SET title = COALESCE(?, title),
+                        price = COALESCE(?, price),
+                        in_stock = 1,
+                        oos_miss_streak = 0,
+                        last_seen = ?,
+                        image_url = COALESCE(?, image_url)
+                    WHERE asin = ?
+                    """,
+                    (title, new_price, now, image_url, asin),
+                )
                 self._maybe_cache_image(asin, image_url, config)
 
                 stock_decision = decide_back_in_stock(old_stock, 1)
@@ -649,6 +730,7 @@ class StateEngine:
                         telemetry=telemetry,
                         cycle_id=cycle_id,
                         _tel=_tel,
+                        confirmed_transition=bool(row["last_oos_confirmed"]),
                     )
                     if alert is not None:
                         alerts.append(alert)
@@ -701,14 +783,30 @@ class StateEngine:
                         price_drop_count += 1
 
             if reconcile_absence:
+                # Absence from filtered page-1 is a weak OOS signal (page churn, filter
+                # blips), so count consecutive misses and only flip after the streak
+                # reaches aes_oos_confirm_cycles.
                 if seen_asins:
                     placeholders = ",".join("?" for _ in seen_asins)
+                    seen_params = tuple(sorted(seen_asins))
+                    self.conn.execute(
+                        f"UPDATE aes_products SET oos_miss_streak = oos_miss_streak + 1 "
+                        f"WHERE in_stock != 0 AND asin NOT IN ({placeholders})",
+                        seen_params,
+                    )
                     cursor = self.conn.execute(
-                        f"UPDATE aes_products SET in_stock = 0 WHERE in_stock != 0 AND asin NOT IN ({placeholders})",
-                        tuple(sorted(seen_asins)),
+                        f"UPDATE aes_products SET in_stock = 0, last_oos_confirmed = 0 "
+                        f"WHERE in_stock != 0 AND oos_miss_streak >= ? AND asin NOT IN ({placeholders})",
+                        (oos_confirm_cycles, *seen_params),
                     )
                 else:
-                    cursor = self.conn.execute("UPDATE aes_products SET in_stock = 0 WHERE in_stock != 0")
+                    self.conn.execute(
+                        "UPDATE aes_products SET oos_miss_streak = oos_miss_streak + 1 WHERE in_stock != 0"
+                    )
+                    cursor = self.conn.execute(
+                        "UPDATE aes_products SET in_stock = 0, last_oos_confirmed = 0 WHERE in_stock != 0 AND oos_miss_streak >= ?",
+                        (oos_confirm_cycles,),
+                    )
                 reconciled_oos_count = int(cursor.rowcount or 0)
 
             summary = {
@@ -718,6 +816,7 @@ class StateEngine:
                 "back_in_stock_count": back_in_stock_count,
                 "price_drop_count": price_drop_count,
                 "reconciled_oos_count": reconciled_oos_count,
+                "debounced_oos_count": debounced_oos_count,
                 "reconcile_absence": reconcile_absence,
             }
             self.conn.commit()

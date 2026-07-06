@@ -400,6 +400,9 @@ def _rows_for_state_engine(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "title": item.get("title") or "",
                 "price": item.get("price"),
                 "in_stock": _serp_row_in_stock(item),
+                # Card explicitly says unavailable/OOS -- a strong signal the state
+                # engine may trust immediately (vs weak absence/missing-price OOS).
+                "explicit_oos": _serp_row_explicit_oos(item),
                 "seller": "search",
                 "seller_name": "search",
                 "image_url": item.get("image_url"),
