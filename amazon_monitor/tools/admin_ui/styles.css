@@ -338,6 +338,15 @@ a {
   min-height: 1.1em;
 }
 
+.data-table tr.fresh-stale td {
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+
+.data-table tr.fresh-stale td code {
+  color: var(--danger-text);
+}
+
 /* ===== Forms ===== */
 
 label {

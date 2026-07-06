@@ -3,7 +3,6 @@ playwright-stealth
 pyyaml
 python-dotenv
 requests
-apscheduler
 sqlite-web
 tzdata
 

@@ -3,10 +3,18 @@ const ACTIVE_TAB_KEY = "admin_ui_tab";
 
 const state = {
   sqlitePollId: null,
+  healthPollId: null,
   bulkRole: null,
   toastTimer: null,
   savedSettings: null, // snapshot of last loaded/saved form values (JSON string)
-  loadedPollMinutes: null, // pdp_poll_minutes value the monitor is currently running with
+  watchItems: [],
+};
+
+const ENGINE_STATUS_HE = {
+  starting: "מתחיל",
+  running: "פועל",
+  idle_no_watch: "אין מוצרים במעקב",
+  captcha_pause: "מושהה — CAPTCHA",
 };
 
 function byId(id) {
@@ -156,6 +164,10 @@ function updateAsinCounts(role, count) {
 }
 
 function renderAsinTable(role, items) {
+  if (role === "watch") {
+    state.watchItems = items;
+    renderFreshnessTable(state.lastHealth);
+  }
   const tbody = byId(role === "watch" ? "watch-body" : "blacklist-body");
   const emptyNote = byId(role === "watch" ? "watch-empty" : "blacklist-empty");
   tbody.innerHTML = "";
@@ -300,8 +312,10 @@ function parsePercent(raw, fallback) {
 }
 
 function fillSettings(settings) {
-  byId("pdp-poll-minutes").value = settings.pdp_poll_minutes ?? "";
-  byId("max-cycle-seconds").value = settings.max_cycle_seconds ?? "";
+  byId("asin-check-interval-seconds").value = settings.asin_check_interval_seconds ?? "";
+  byId("stream-concurrent-tabs").value = settings.stream_concurrent_tabs ?? "";
+  byId("aes-check-minutes").value = settings.aes_check_minutes ?? "";
+  byId("browser-recycle-minutes").value = settings.browser_recycle_minutes ?? "";
   byId("max-concurrent-tabs").value = settings.pdp_watch_max_concurrent_tabs ?? "";
   byId("pdp-settle-seconds").value = settings.pdp_settle_seconds ?? "";
   byId("pdp-continue-shopping-max-clicks").value =
@@ -324,17 +338,19 @@ function fillSettings(settings) {
   byId("tpl-new-product").value = templates.new_product || "";
   byId("tpl-price-drop").value = templates.price_drop || "";
   byId("tpl-back-in-stock").value = templates.back_in_stock || "";
-
-  state.loadedPollMinutes = settings.pdp_poll_minutes ?? null;
-  byId("ov-poll-summary").textContent =
-    settings.pdp_poll_minutes != null ? `בדיקה כל ${settings.pdp_poll_minutes} דקות` : "";
 }
 
 function collectSettingsPayload() {
   const tabs = parsePositiveInt(byId("max-concurrent-tabs").value, 2);
+  const streamTabs = parsePositiveInt(byId("stream-concurrent-tabs").value, 2);
   return {
-    pdp_poll_minutes: parsePositiveInt(byId("pdp-poll-minutes").value, 4),
-    max_cycle_seconds: parsePositiveInt(byId("max-cycle-seconds").value, 170),
+    asin_check_interval_seconds: (() => {
+      const n = parseInt(String(byId("asin-check-interval-seconds").value || "").trim(), 10);
+      return Number.isFinite(n) ? Math.max(15, n) : 60;
+    })(),
+    stream_concurrent_tabs: Math.min(4, Math.max(1, streamTabs)),
+    aes_check_minutes: parsePositiveInt(byId("aes-check-minutes").value, 5),
+    browser_recycle_minutes: parsePositiveInt(byId("browser-recycle-minutes").value, 60),
     pdp_watch_max_concurrent_tabs: Math.min(10, tabs),
     pdp_settle_seconds: (() => {
       const n = parseFloat(String(byId("pdp-settle-seconds").value || "").trim());
@@ -351,7 +367,7 @@ function collectSettingsPayload() {
     wa_group_id: String(byId("wa-group-id").value || "").trim(),
     wa_client_to: String(byId("wa-client-to").value || "").trim(),
     price_drop_percent: parsePercent(byId("price-drop-percent").value, 10),
-    max_requests_per_minute: parsePositiveInt(byId("max-requests-per-minute").value, 10),
+    max_requests_per_minute: parsePositiveInt(byId("max-requests-per-minute").value, 25),
     affiliate_tag: String(byId("affiliate-tag").value || "").trim(),
     search_urls: {
       aes_llc: String(byId("aes-url").value || "").trim(),
@@ -387,7 +403,8 @@ function updateSaveBar() {
 
 function bindDirtyTracking() {
   const ids = [
-    "pdp-poll-minutes", "max-cycle-seconds", "max-concurrent-tabs",
+    "asin-check-interval-seconds", "stream-concurrent-tabs", "aes-check-minutes",
+    "browser-recycle-minutes", "max-concurrent-tabs",
     "pdp-settle-seconds", "pdp-continue-shopping-max-clicks", "playwright-headless",
     "wa-group-id", "wa-client-to", "price-drop-percent", "max-requests-per-minute",
     "affiliate-tag", "aes-url", "required-keywords", "title-blacklist-phrases",
@@ -412,20 +429,12 @@ async function saveSettings() {
   button.textContent = "שומר...";
   try {
     const settings = collectSettingsPayload();
-    const pollChanged =
-      state.loadedPollMinutes != null && settings.pdp_poll_minutes !== state.loadedPollMinutes;
     await apiJson("/api/settings", {
       method: "PUT",
       body: JSON.stringify({ settings }),
     });
-    state.loadedPollMinutes = settings.pdp_poll_minutes;
-    byId("ov-poll-summary").textContent = `בדיקה כל ${settings.pdp_poll_minutes} דקות`;
     snapshotForm();
-    if (pollChanged) {
-      showToast("ההגדרות נשמרו. שינוי תדירות הבדיקה ייכנס לתוקף אחרי הפעלה מחדש של המערכת");
-    } else {
-      showToast("ההגדרות נשמרו בהצלחה");
-    }
+    showToast("ההגדרות נשמרו בהצלחה");
   } catch (err) {
     if (!isAuthError(err)) {
       showToast(`השמירה נכשלה: ${err.message}`, true);
@@ -444,6 +453,157 @@ async function discardChanges() {
     if (!isAuthError(err)) {
       showToast("לא ניתן לטעון מחדש את ההגדרות", true);
     }
+  }
+}
+
+/* ===== Health / engine overview ===== */
+
+function formatAgo(isoString) {
+  if (!isoString) {
+    return "מעולם לא נבדק";
+  }
+  const then = new Date(isoString);
+  if (Number.isNaN(then.getTime())) {
+    return "—";
+  }
+  const sec = Math.floor((Date.now() - then.getTime()) / 1000);
+  if (sec < 5) {
+    return "עכשיו";
+  }
+  if (sec < 60) {
+    return `לפני ${sec} שניות`;
+  }
+  const min = Math.floor(sec / 60);
+  if (min < 60) {
+    return `לפני ${min} דקות`;
+  }
+  const hours = Math.floor(min / 60);
+  return `לפני ${hours} שעות`;
+}
+
+function secondsSince(isoString) {
+  if (!isoString) {
+    return null;
+  }
+  const then = new Date(isoString);
+  if (Number.isNaN(then.getTime())) {
+    return null;
+  }
+  return Math.floor((Date.now() - then.getTime()) / 1000);
+}
+
+function formatResultHe(result) {
+  if (!result) {
+    return "—";
+  }
+  if (result === "ok") {
+    return "תקין";
+  }
+  if (result === "captcha") {
+    return "CAPTCHA";
+  }
+  if (result === "no_row") {
+    return "ללא נתונים";
+  }
+  if (String(result).startsWith("skip:")) {
+    return `דילוג: ${String(result).slice(5)}`;
+  }
+  return String(result);
+}
+
+function engineStatusHe(status) {
+  return ENGINE_STATUS_HE[status] || status || "—";
+}
+
+function fillEngineSummary(health) {
+  const engine = (health && health.engine) || {};
+  const status = engineStatusHe(engine.status);
+  const sweep = engine.sweep_seconds;
+  let summary = status;
+  if (sweep != null && Number.isFinite(Number(sweep))) {
+    summary += ` · סריקה מלאה: ${Math.round(Number(sweep))} שניות`;
+  }
+  byId("ov-engine-summary").textContent = summary;
+
+  const target = engine.target_interval_seconds;
+  byId("ov-target-interval").textContent =
+    target != null && Number.isFinite(Number(target)) ? String(Math.round(Number(target))) : "—";
+}
+
+function renderFreshnessTable(health) {
+  const tbody = byId("ov-freshness-body");
+  tbody.innerHTML = "";
+  const items = state.watchItems || [];
+  const asins = (health && health.asins) || {};
+  const target = Number((health && health.engine && health.engine.target_interval_seconds) || 60);
+  const staleThreshold = target * 3;
+
+  if (!items.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.className = "empty-cell";
+    td.textContent = "אין מוצרים במעקב";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+
+  for (const item of items) {
+    const asin = item.asin;
+    const info = asins[asin] || {};
+    const agoSec = secondsSince(info.last_checked);
+    const stale = agoSec == null || agoSec > staleThreshold;
+
+    const tr = document.createElement("tr");
+    if (stale) {
+      tr.classList.add("fresh-stale");
+    }
+
+    const asinTd = document.createElement("td");
+    const code = document.createElement("code");
+    code.textContent = asin;
+    asinTd.appendChild(code);
+    tr.appendChild(asinTd);
+
+    const agoTd = document.createElement("td");
+    agoTd.textContent = formatAgo(info.last_checked);
+    tr.appendChild(agoTd);
+
+    const resultTd = document.createElement("td");
+    resultTd.textContent = formatResultHe(info.result);
+    tr.appendChild(resultTd);
+
+    tbody.appendChild(tr);
+  }
+}
+
+function fillHealthOverview(health) {
+  state.lastHealth = health;
+  fillEngineSummary(health);
+  renderFreshnessTable(health);
+}
+
+async function loadHealth() {
+  try {
+    const data = await apiJson("/api/health");
+    fillHealthOverview(data.health || null);
+  } catch (err) {
+    if (!isAuthError(err)) {
+      byId("ov-engine-summary").textContent = "לא ניתן לטעון מצב מנוע";
+    }
+  }
+}
+
+function startHealthPolling() {
+  stopHealthPolling();
+  state.healthPollId = window.setInterval(loadHealth, 15000);
+}
+
+function stopHealthPolling() {
+  if (state.healthPollId) {
+    window.clearInterval(state.healthPollId);
+    state.healthPollId = null;
   }
 }
 
@@ -620,6 +780,7 @@ function bindEvents() {
       await loadAppData();
       showApp();
       startSqlitePolling();
+      startHealthPolling();
     } catch (err) {
       clearAuth();
       if (err.message === "unauthorized") {
@@ -632,6 +793,7 @@ function bindEvents() {
   byId("logout-btn").addEventListener("click", () => {
     clearAuth();
     stopSqlitePolling();
+    stopHealthPolling();
     showLogin();
   });
 
@@ -695,6 +857,7 @@ async function loadAppData() {
   await loadSettings();
   await Promise.all([
     loadBandwidthSummary(),
+    loadHealth(),
     loadAsins("watch"),
     loadAsins("blacklist"),
     refreshSqliteStatus(),
@@ -709,6 +872,7 @@ async function init() {
       await loadAppData();
       showApp();
       startSqlitePolling();
+      startHealthPolling();
       return;
     } catch (err) {
       clearAuth();
@@ -720,5 +884,8 @@ async function init() {
   showLogin();
 }
 
-window.addEventListener("beforeunload", stopSqlitePolling);
+window.addEventListener("beforeunload", () => {
+  stopSqlitePolling();
+  stopHealthPolling();
+});
 window.addEventListener("DOMContentLoaded", init);

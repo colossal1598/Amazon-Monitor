@@ -51,7 +51,7 @@ def _notify(failed_items: list[str]) -> None:
         print(f"(healthcheck notify failed: {exc})")
 
 
-# Check the monitor’s health file and exit with a non-zero code when jobs are stale or have recent errors.
+# Check the monitor's health file and exit with a non-zero code when jobs are stale or have recent errors.
 def main() -> int:
     if not HEALTH_FILE.exists():
         print("FAIL: health file not found at data/health.json")
@@ -60,10 +60,15 @@ def main() -> int:
 
     data = json.loads(HEALTH_FILE.read_text(encoding="utf-8"))
     jobs: dict = data.get("jobs", {})
+    engine: dict = data.get("engine", {})
+    asins: dict = data.get("asins", {})
     now = datetime.now(timezone.utc)
 
+    # "stream" marks success once per sweep over the watch list; even a slow sweep
+    # (35 ASINs) finishes well inside 10 minutes. Captcha pause shows as an error
+    # message, which is reported below without double-counting staleness.
     limits = {
-        "pdp": timedelta(minutes=10),
+        "stream": timedelta(minutes=10),
         "heartbeat": timedelta(minutes=40),
     }
 
@@ -80,6 +85,24 @@ def main() -> int:
             failed.append(f"{job}: stale success ({success.isoformat()})")
         if error and (error_at is None or error_at > success):
             failed.append(f"{job}: last error present ({error})")
+
+    # Per-ASIN freshness: every watched ASIN should be re-checked within a few
+    # target intervals. Skip this while the engine is paused for captcha recovery.
+    try:
+        target = float(engine.get("target_interval_seconds") or 60)
+    except (TypeError, ValueError):
+        target = 60.0
+    max_asin_age = timedelta(seconds=max(300.0, target * 5))
+    if engine.get("status") == "running":
+        stale_asins = []
+        for asin, info in asins.items():
+            checked = parse_dt(info.get("last_checked")) if isinstance(info, dict) else None
+            if checked is None or now - checked > max_asin_age:
+                stale_asins.append(asin)
+        if stale_asins:
+            failed.append(
+                f"asins stale (> {int(max_asin_age.total_seconds())}s): {', '.join(sorted(stale_asins)[:10])}"
+            )
 
     if failed:
         print("FAIL")

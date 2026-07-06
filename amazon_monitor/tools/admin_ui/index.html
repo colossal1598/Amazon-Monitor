@@ -90,7 +90,7 @@
           <div class="stat-card">
             <span class="stat-label">סיבובים היום</span>
             <span class="stat-big" id="ov-cycles-today">—</span>
-            <span class="stat-sub" id="ov-poll-summary"></span>
+            <span class="stat-sub" id="ov-engine-summary"></span>
           </div>
           <div class="stat-card">
             <span class="stat-label">תעבורה היום</span>
@@ -102,6 +102,19 @@
             <span class="stat-big" id="bw-last-cycle-mb">—</span>
             <span class="stat-sub" id="bw-last-cycle-time"></span>
           </div>
+        </div>
+
+        <div class="card">
+          <h2>רעננות בדיקות</h2>
+          <p class="muted">מתי נבדק כל מוצר במעקב לאחרונה (יעד: כל <span id="ov-target-interval">—</span> שניות)</p>
+          <table class="data-table asin-table" id="ov-freshness-table">
+            <thead>
+              <tr><th>קוד מוצר</th><th>נבדק לאחרונה</th><th>תוצאה</th></tr>
+            </thead>
+            <tbody id="ov-freshness-body">
+              <tr><td colspan="3" class="empty-cell">טוען...</td></tr>
+            </tbody>
+          </table>
         </div>
 
         <div class="card card-ops">
@@ -295,27 +308,39 @@
           <h2>קצב וזמנים</h2>
           <div class="row">
             <div class="field">
-              <label for="pdp-poll-minutes">כל כמה דקות לבדוק מוצרים <span class="badge-restart">דורש הפעלה מחדש</span></label>
-              <input id="pdp-poll-minutes" type="number" min="1" step="1">
-              <p class="hint">שינוי נכנס לתוקף רק אחרי «הפעלה מחדש של המערכת»</p>
+              <label for="asin-check-interval-seconds">תדירות בדיקה לכל מוצר (שניות)</label>
+              <input id="asin-check-interval-seconds" type="number" min="15" step="1">
+              <p class="hint">יעד רעננות לכל מוצר במעקב — נטען מחדש אוטומטית (~30 שניות)</p>
             </div>
             <div class="field">
-              <label for="max-cycle-seconds">מקסימום זמן לסיבוב (שניות)</label>
-              <input id="max-cycle-seconds" type="number" min="30" step="5">
-              <p class="hint">סיבוב שלא נגמר בזמן — נעצר</p>
+              <label for="stream-concurrent-tabs">טאבים במקביל</label>
+              <input id="stream-concurrent-tabs" type="number" min="1" max="4" step="1">
+              <p class="hint">כמה טאבים פתוחים במקביל בסטרימינג (1–4)</p>
+            </div>
+            <div class="field">
+              <label for="aes-check-minutes">בדיקת AES כל (דקות)</label>
+              <input id="aes-check-minutes" type="number" min="1" step="1">
+              <p class="hint">תדירות סריקת חיפוש הספק בין בדיקות מוצרים</p>
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="browser-recycle-minutes">מיחזור דפדפן כל (דקות)</label>
+              <input id="browser-recycle-minutes" type="number" min="5" step="1">
+              <p class="hint">סגירה והפעלה מחדש של הדפדפן למניעת דליפות זיכרון</p>
             </div>
             <div class="field">
               <label for="max-requests-per-minute">מקסימום פניות לדקה</label>
               <input id="max-requests-per-minute" type="number" min="1" max="60" step="1">
               <p class="hint">נמוך יותר = פחות סיכון לחסימה מאמזון</p>
             </div>
+            <div class="field">
+              <label for="max-concurrent-tabs">מוצרים בו־זמנית (לכל בדיקה)</label>
+              <input id="max-concurrent-tabs" type="number" min="1" max="10" step="1">
+              <p class="hint">כמה דפי מוצר נפתחים במקביל בבדיקה בודדת (1–10)</p>
+            </div>
           </div>
           <div class="row">
-            <div class="field">
-              <label for="max-concurrent-tabs">מוצרים בו־זמנית</label>
-              <input id="max-concurrent-tabs" type="number" min="1" max="10" step="1">
-              <p class="hint">כמה דפי מוצר נפתחים במקביל (1–10)</p>
-            </div>
             <div class="field">
               <label for="pdp-settle-seconds">המתנה לפני קריאת מחיר (שניות)</label>
               <input id="pdp-settle-seconds" type="number" min="1" max="30" step="0.5">

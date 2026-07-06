@@ -60,34 +60,14 @@ module.exports = {
       watch: false,
       // Daily off-peak restart: cheap insurance against any slow in-process drift
       // (rate limiter state, memory growth, long-lived event loop) after days of
-      // continuous scraping. Browsers are already relaunched fresh every cycle, so
-      // this only resets the Python process itself, not scrape state (SQLite-backed).
+      // continuous scraping. The streaming engine already recycles its browser every
+      // browser_recycle_minutes, so this only resets the Python process itself, not
+      // scrape state (SQLite-backed).
       cron_restart: "0 5 * * *",
       env: {
         PYTHONUNBUFFERED: "1",
         ...dotEnv,
       },
-    },
-    {
-      // Fast-lane HTTP restock checker: polls Amazon's AOD ajax endpoint per watch
-      // ASIN every ~40s (configurable via fast_watch_* settings). Shares the SQLite
-      // state/alert pipeline with amazon-monitor; disable via fast_watch_enabled.
-      name: "fast-watch",
-      cwd: monitorRoot,
-      script: "fast_watch.py",
-      interpreter: monitorPython,
-      autorestart: true,
-      max_restarts: 20,
-      exp_backoff_restart_delay: 3000,
-      watch: false,
-      cron_restart: "30 5 * * *",
-      env: {
-        PYTHONUNBUFFERED: "1",
-        ...dotEnv,
-      },
-      error_file: path.join(monitorRoot, "logs", "fast-watch.err.log"),
-      out_file: path.join(monitorRoot, "logs", "fast-watch.out.log"),
-      merge_logs: true,
     },
     {
       name: "admin-ui",

@@ -1,81 +1,115 @@
 # Amazon PDP + AES Discovery Monitor
 
-Python monitor for Amazon product pages and Amazon Export Sales LLC SERP discovery.
+Python monitor for Amazon product detail pages (PDP watch list) and Amazon Export Sales LLC SERP discovery. Alerts go to WhatsApp via a local `wa-server`.
 
 ## What it does
 
-- **PDP watch** — visits ASINs in the `watch` list (SQLite `asins` table). Seller must match `pdp_allowed_seller_substrings` (Amazon.com / Amazon Export). State is stored in **`products`**. On each successful scrape, while the offer is in stock, the monitor compares the stored price to the new PDP price and can alert on **`price_drop`** (threshold: `price_drop_percent` in settings). Also alerts on **`new_product`** and **`back_in_stock`**.
-- **AES LLC SERP** — after each PDP cycle, scrapes page 1 of the configured Amazon Export seller URL. The same Pokémon TCG filter pipeline applies. State is stored only in **`aes_products`** (never in `products`). Alerts on **`new_product`**, **`back_in_stock`**, and **`price_drop`** using the same `price_drop_percent` rule as PDP.
-- **Blacklist** — ASINs in `blacklist` role are ignored during AES processing.
-- **Per-tick dedupe** — PDP and AES alerts for one scheduler cycle are merged, then deduped to one WhatsApp per ASIN (`back_in_stock` > `new_product` > `price_drop`).
-- Settings and ASIN lists live in **SQLite** (`settings` + `asins` tables). Bootstrap [`config.yaml`](config.yaml) only has `db_path`, `log_dir`, `auth_dir`.
+- **PDP watch** — continuously scrapes ASINs on the `watch` list (SQLite `asins` table). Seller must match `pdp_allowed_seller_substrings` (default: `amazon.com`, `amazon export`). State lives in `products`. Alerts: `new_product`, `back_in_stock`, `price_drop` (threshold: `price_drop_percent`).
+- **AES LLC SERP** — scrapes page 1 of `search_urls.aes_llc` on a timer, runs the same filter pipeline, mirrors state in `aes_products` only. Same alert types; AES never writes `products`.
+- **Blacklist** — ASINs with role `blacklist` are skipped during AES processing.
+- **Immediate alerts** — each PDP or AES scrape diffs state and sends WhatsApp as soon as that scrape finishes. There is no end-of-cycle batch wait.
+- **Settings hot-reload** — runtime config and watch list reload from SQLite every ~30 seconds. No restart needed for most setting changes.
 
-## SQLite tables (who writes what)
+Bootstrap [`config.yaml`](config.yaml) holds local paths only (`db_path`, `telemetry_db_path`, `log_dir`, `auth_dir`). Everything else is in SQLite (`settings` + `asins` tables) via the admin UI.
+
+## Architecture
+
+```
+main.py  →  MonitorEngine (monitor_engine.py)
+              ├── one persistent Playwright browser
+              ├── RingScheduler: pick most-overdue watch ASIN → scrape → diff → alert
+              ├── stream_concurrent_tabs parallel workers (1–4)
+              ├── AES SERP interleaved every aes_check_minutes
+              ├── browser recycled every browser_recycle_minutes (or after captcha pause)
+              └── telemetry "cycle" = one full sweep over the watch list (admin UI stats)
+```
+
+`main.py` is a thin entrypoint: logging, bootstrap config, SQLite migration, heartbeat side-task (every 30 min), then `engine.run_forever()`.
+
+## SQLite tables
 
 | Table | Written by | Purpose |
 |-------|------------|---------|
-| `products` | PDP watch only | Price/stock for ASINs on the watch list |
-| `aes_products` | AES SERP mirror only | Price/stock mirror of filtered page-1 SERP rows |
-| `alerts` | Both paths | History of alerts generated (not product state) |
-| `settings` / `asins` | Admin UI / migrations | Config and watch/blacklist lists |
+| `products` | PDP watch | Price/stock for watch-list ASINs |
+| `aes_products` | AES SERP mirror | Page-1 SERP mirror after filters |
+| `alerts` | Both paths | Alert history |
+| `settings` / `asins` | Admin UI / migration | Config and watch/blacklist lists |
 
-AES never inserts or updates `products`. PDP never inserts or updates `aes_products`. An ASIN can exist in both tables independently (e.g. on watch list and on the SERP).
+## Module map
 
-## AES mirror semantics
+| Module | Role |
+|--------|------|
+| `main.py` | Entrypoint, logging, heartbeat |
+| `monitor_engine.py` | Streaming engine, scheduler, health file, browser session |
+| `pdp_scraper.py` | PDP extraction |
+| `search_scraper.py` / `filter_pipeline.py` | AES SERP scrape + filters |
+| `state_engine.py` | `products`, `aes_products`, alert logic, cooldowns |
+| `alert_decisions.py` / `alert_dedupe.py` | Shared rules and per-tick dedupe |
+| `settings_store.py` | SQLite config, `DEFAULT_RUNTIME_CONFIG`, hot-reload source |
+| `browser_factory.py` | Stealth browser, global rate limiter |
+| `webhook_sender.py` | WhatsApp API |
+| `client_alerts.py` | Operational DMs (captcha, stall, healthcheck) |
+| `telemetry_store.py` | Per-sweep stats in `data/telemetry.db` |
+| `tools/admin_ui_server.py` | Local admin UI (port 80) |
+| `tools/healthcheck.py` | PM2 cron health probe |
 
-- **Mirrored** means “on current page-1 SERP after filters,” not global Amazon inventory.
-- Each cycle, every filtered SERP row updates its `aes_products` row (price written every time while in stock).
-- **In stock on SERP** uses the same idea as PDP: valid price on the card + shippable to your location, not Amazon “in stock” wording (SERP cards often omit that text).
-- **Reconcile absence** — only when this cycle has at least one filtered candidate (`aes_candidates` non-empty). Any `aes_products` row whose ASIN is *not* on the page is marked out of stock (`in_stock = 0`). If the scrape or pipeline yields zero candidates, reconcile is skipped so a bad or empty run does not mass-mark everything OOS.
-- Item leaves page 1 → OOS in mirror; item reappears in stock on the card → **`back_in_stock`**.
+## Key settings
 
-## Key files
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `asin_check_interval_seconds` | 60 | Target freshness per watch ASIN |
+| `stream_concurrent_tabs` | 2 | Parallel PDP workers (1–4) |
+| `max_requests_per_minute` | 25 | Global token bucket (PDP + AES) |
+| `aes_check_minutes` | 5 | AES SERP interval |
+| `browser_recycle_minutes` | 60 | Planned browser relaunch |
+| `captcha_recovery_pause_seconds` | 120 | Pause after captcha/network block |
+| `price_drop_percent` | 10 | Price-drop alert threshold |
+| `stock_alert_cooldown_minutes` | 60 | Cooldown for unconfirmed OOS→in-stock |
+| `stock_alert_confirmed_cooldown_minutes` | 10 | Cooldown after confirmed OOS |
+| `aes_oos_confirm_cycles` | 3 | AES mirror OOS debounce (consecutive cycles) |
+| `cross_source_alert_dedupe_minutes` | 15 | Suppress duplicate alerts across PDP/AES |
 
-- `main.py` — scheduler: PDP scrape → AES scrape → dedupe → WhatsApp
-- `pdp_scraper.py` — PDP extraction
-- `search_scraper.py` / `filter_pipeline.py` — AES SERP scrape + filters
-- `state_engine.py` — `products`, `aes_products`, alert logic
-- `alert_decisions.py` / `alert_dedupe.py` — shared rules and per-tick dedupe
-- `settings_store.py` — load/save runtime config and ASIN roles
-- `tools/admin_ui_server.py` + `tools/admin_ui/` — Hebrew admin UI
-- `webhook_sender.py` — WhatsApp API
+WhatsApp credentials: `WA_API_URL` / `WA_API_KEY` in `.env`. Group and templates: `wa_group_id`, `wa_message_templates` in SQLite.
 
-## Run locally
+## Scaling
 
-```powershell
-cd amazon_monitor
-pip install -r requirements.txt
-playwright install chrome
-python main.py
+Detection latency for a full watch-list pass is bounded by:
+
+```
+max(watch_count × per_scrape_seconds ÷ stream_concurrent_tabs,
+    watch_count ÷ max_requests_per_minute × 60)
 ```
 
-## Admin UI
+Typical per-scrape time is 6–12 seconds.
 
-```powershell
-# Set in .env: ADMIN_UI_USER, ADMIN_UI_PASSWORD
-.\scripts\open_admin_ui.ps1
-# http://127.0.0.1:8765
-```
+**Example:** 25–35 ASINs at ~60 s target freshness — set `stream_concurrent_tabs=3` and `max_requests_per_minute=35`, then confirm `sweep_sec` in `logs/monitor.log` or `data/health.json` stays near or below `asin_check_interval_seconds × watch_count`.
 
-Or via PM2 stack: `admin-ui` app in `ecosystem.config.cjs`.
+If sweeps run long, raise `max_requests_per_minute` and/or `stream_concurrent_tabs` before lowering `asin_check_interval_seconds`.
 
-Remote access: see [RUNBOOK.md](RUNBOOK.md) (Tailscale Funnel + basic auth).
+## PM2 stack
 
-## Migrate legacy YAML
+Four processes in [`ecosystem.config.cjs`](ecosystem.config.cjs):
 
-If you have a full old `config.yaml` backup, restore it once and run:
+| Process | Role |
+|---------|------|
+| `amazon-monitor` | `main.py` streaming engine |
+| `admin-ui` | Settings / ASIN management |
+| `wa-server` | Local WhatsApp sender (sibling repo) |
+| `monitor-healthcheck` | Cron every 10 min; WhatsApp ping on staleness |
 
-```powershell
-python tools/migrate_yaml_to_db.py
-```
+Start: `.\start-pm2-stack.bat` or `pm2 start ecosystem.config.cjs`.
 
-(Only imports when the `settings` table is empty.)
+## Health and logs
 
-## Health
+- `logs/monitor.log` — lifecycle lines (sweeps, alerts, captcha pauses)
+- `logs/debug.log` — verbose scrape detail
+- `data/health.json` — live engine and per-ASIN status
+- `data/telemetry.db` — per-sweep timing and bandwidth
 
-- `logs/monitor.log` — lifecycle milestones and warnings
-- `data/telemetry.db` — per-cycle stats and selective debug events
-- `data/health.json` — job timestamps
-- `python tools/healthcheck.py`
+Product alerts → `wa_group_id`. Operational alerts (captcha, stall, healthcheck failure) → `wa_client_to` when set.
 
-Client operational alerts (captcha, failures, stalls) go to `wa_client_to` when configured; product alerts stay on `wa_group_id`.
+## Docs
+
+- [QUICKSTART.md](QUICKSTART.md) — fresh install to first alert
+- [RUNBOOK.md](RUNBOOK.md) — day-2 operations
+- [DEPLOYMENT.md](DEPLOYMENT.md) — remote deploy and updates

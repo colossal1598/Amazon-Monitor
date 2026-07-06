@@ -299,6 +299,19 @@ def _resolve_telemetry_db_path(monitor_db_path: str) -> Path:
     return db_path.resolve()
 
 
+def _health_summary() -> dict[str, Any]:
+    health_path = ROOT / "data" / "health.json"
+    if not health_path.is_file():
+        return {"ok": True, "health": None}
+    try:
+        data = json.loads(health_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"ok": True, "health": None}
+    if not isinstance(data, dict):
+        return {"ok": True, "health": None}
+    return {"ok": True, "health": data}
+
+
 def _bandwidth_summary(monitor_db_path: str) -> dict[str, Any]:
     telemetry_path = _resolve_telemetry_db_path(monitor_db_path)
     empty: dict[str, Any] = {
@@ -496,6 +509,9 @@ class AdminUIHandler(BaseHTTPRequestHandler):
         if path == "/api/bandwidth/summary":
             summary = _bandwidth_summary(self.db_path)
             self._json(200, {"ok": True, **summary})
+            return
+        if path == "/api/health":
+            self._json(200, _health_summary())
             return
 
         self._json(404, {"ok": False, "error": "not_found"})
