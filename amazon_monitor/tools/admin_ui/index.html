@@ -88,7 +88,7 @@
             <span class="stat-sub">רשימה שחורה: <span id="ov-blacklist-count">—</span></span>
           </div>
           <div class="stat-card">
-            <span class="stat-label">סיבובים היום</span>
+            <span class="stat-label">סריקות מלאות היום</span>
             <span class="stat-big" id="ov-cycles-today">—</span>
             <span class="stat-sub" id="ov-engine-summary"></span>
           </div>
@@ -98,7 +98,7 @@
             <span class="stat-sub">7 ימים: <span id="bw-week-gb">—</span></span>
           </div>
           <div class="stat-card">
-            <span class="stat-label">סיבוב אחרון</span>
+            <span class="stat-label">סריקה אחרונה</span>
             <span class="stat-big" id="bw-last-cycle-mb">—</span>
             <span class="stat-sub" id="bw-last-cycle-time"></span>
           </div>
@@ -106,10 +106,10 @@
 
         <div class="card">
           <h2>רעננות בדיקות</h2>
-          <p class="muted">מתי נבדק כל מוצר במעקב לאחרונה (יעד: כל <span id="ov-target-interval">—</span> שניות)</p>
+          <p class="muted">מתי נבדק כל מוצר במעקב לאחרונה (יעד: כל <span id="ov-target-interval">—</span> שניות). שורות באדום — לא נבדקו בזמן.</p>
           <table class="data-table asin-table" id="ov-freshness-table">
             <thead>
-              <tr><th>קוד מוצר</th><th>נבדק לאחרונה</th><th>תוצאה</th></tr>
+              <tr><th>קוד מוצר</th><th>נבדק לאחרונה</th><th>מצב</th></tr>
             </thead>
             <tbody id="ov-freshness-body">
               <tr><td colspan="3" class="empty-cell">טוען...</td></tr>
@@ -128,8 +128,8 @@
         </div>
 
         <div class="card">
-          <h2>סיבובים אחרונים</h2>
-          <p class="muted">תעבורת דפדפן בכל סיבוב (10 אחרונים)</p>
+          <h2>סריקות אחרונות</h2>
+          <p class="muted">תעבורת דפדפן בכל סריקה מלאה של רשימת המעקב (10 אחרונות)</p>
           <table class="data-table" id="bw-recent-table">
             <thead>
               <tr><th>זמן</th><th>תעבורה</th></tr>
@@ -152,7 +152,7 @@
           <div class="card-head">
             <div>
               <h2>רשימת מעקב</h2>
-              <p class="muted">המוצרים שהמערכת בודקת בכל סיבוב</p>
+              <p class="muted">המוצרים שהמערכת בודקת ברציפות, אחד־אחד</p>
             </div>
             <button id="watch-bulk-btn" class="btn btn-secondary" type="button">הדבקת רשימה</button>
           </div>
@@ -301,45 +301,45 @@
       <section class="tab-panel" id="tab-advanced">
         <header class="page-head">
           <h1>הגדרות מתקדמות</h1>
-          <p class="muted">קצב סריקה, עומס ותחזוקה — לשינוי זהיר בלבד</p>
+          <p class="muted">קצב סטרימינג, דפדפן ותחזוקה — לשינוי זהיר בלבד</p>
         </header>
 
         <div class="card">
-          <h2>קצב וזמנים</h2>
+          <h2>מנוע סטרימינג</h2>
+          <p class="hint">הגדרות אלה נטענות מחדש אוטומטית בערך כל 30 שניות — אין צורך בהפעלה מחדש.</p>
           <div class="row">
             <div class="field">
               <label for="asin-check-interval-seconds">תדירות בדיקה לכל מוצר (שניות)</label>
               <input id="asin-check-interval-seconds" type="number" min="15" step="1">
-              <p class="hint">יעד רעננות לכל מוצר במעקב — נטען מחדש אוטומטית (~30 שניות)</p>
+              <p class="hint">יעד רעננות — כל כמה שניות כל מוצר אמור להיבדק מחדש</p>
             </div>
             <div class="field">
               <label for="stream-concurrent-tabs">טאבים במקביל</label>
               <input id="stream-concurrent-tabs" type="number" min="1" max="4" step="1">
-              <p class="hint">כמה טאבים פתוחים במקביל בסטרימינג (1–4)</p>
+              <p class="hint">כמה מוצרים נבדקים במקביל (1–4). ל־25+ מוצרים — נסו 3</p>
             </div>
             <div class="field">
-              <label for="aes-check-minutes">בדיקת AES כל (דקות)</label>
-              <input id="aes-check-minutes" type="number" min="1" step="1">
-              <p class="hint">תדירות סריקת חיפוש הספק בין בדיקות מוצרים</p>
+              <label for="max-requests-per-minute">מקסימום פניות לדקה</label>
+              <input id="max-requests-per-minute" type="number" min="1" max="60" step="1">
+              <p class="hint">מגבלת קצב גלובלית. ל־25+ מוצרים — נסו 35</p>
             </div>
           </div>
           <div class="row">
+            <div class="field">
+              <label for="aes-check-minutes">בדיקת חיפוש AES כל (דקות)</label>
+              <input id="aes-check-minutes" type="number" min="1" step="1">
+              <p class="hint">סריקת עמוד הספק בין בדיקות המוצרים</p>
+            </div>
             <div class="field">
               <label for="browser-recycle-minutes">מיחזור דפדפן כל (דקות)</label>
               <input id="browser-recycle-minutes" type="number" min="5" step="1">
               <p class="hint">סגירה והפעלה מחדש של הדפדפן למניעת דליפות זיכרון</p>
             </div>
-            <div class="field">
-              <label for="max-requests-per-minute">מקסימום פניות לדקה</label>
-              <input id="max-requests-per-minute" type="number" min="1" max="60" step="1">
-              <p class="hint">נמוך יותר = פחות סיכון לחסימה מאמזון</p>
-            </div>
-            <div class="field">
-              <label for="max-concurrent-tabs">מוצרים בו־זמנית (לכל בדיקה)</label>
-              <input id="max-concurrent-tabs" type="number" min="1" max="10" step="1">
-              <p class="hint">כמה דפי מוצר נפתחים במקביל בבדיקה בודדת (1–10)</p>
-            </div>
           </div>
+        </div>
+
+        <div class="card">
+          <h2>קריאת דף מוצר</h2>
           <div class="row">
             <div class="field">
               <label for="pdp-settle-seconds">המתנה לפני קריאת מחיר (שניות)</label>

@@ -316,7 +316,6 @@ function fillSettings(settings) {
   byId("stream-concurrent-tabs").value = settings.stream_concurrent_tabs ?? "";
   byId("aes-check-minutes").value = settings.aes_check_minutes ?? "";
   byId("browser-recycle-minutes").value = settings.browser_recycle_minutes ?? "";
-  byId("max-concurrent-tabs").value = settings.pdp_watch_max_concurrent_tabs ?? "";
   byId("pdp-settle-seconds").value = settings.pdp_settle_seconds ?? "";
   byId("pdp-continue-shopping-max-clicks").value =
     settings.pdp_continue_shopping_max_clicks ?? "";
@@ -341,7 +340,6 @@ function fillSettings(settings) {
 }
 
 function collectSettingsPayload() {
-  const tabs = parsePositiveInt(byId("max-concurrent-tabs").value, 2);
   const streamTabs = parsePositiveInt(byId("stream-concurrent-tabs").value, 2);
   return {
     asin_check_interval_seconds: (() => {
@@ -351,7 +349,6 @@ function collectSettingsPayload() {
     stream_concurrent_tabs: Math.min(4, Math.max(1, streamTabs)),
     aes_check_minutes: parsePositiveInt(byId("aes-check-minutes").value, 5),
     browser_recycle_minutes: parsePositiveInt(byId("browser-recycle-minutes").value, 60),
-    pdp_watch_max_concurrent_tabs: Math.min(10, tabs),
     pdp_settle_seconds: (() => {
       const n = parseFloat(String(byId("pdp-settle-seconds").value || "").trim());
       return Number.isFinite(n) ? Math.min(30, Math.max(1, n)) : 8.0;
@@ -404,7 +401,7 @@ function updateSaveBar() {
 function bindDirtyTracking() {
   const ids = [
     "asin-check-interval-seconds", "stream-concurrent-tabs", "aes-check-minutes",
-    "browser-recycle-minutes", "max-concurrent-tabs",
+    "browser-recycle-minutes",
     "pdp-settle-seconds", "pdp-continue-shopping-max-clicks", "playwright-headless",
     "wa-group-id", "wa-client-to", "price-drop-percent", "max-requests-per-minute",
     "affiliate-tag", "aes-url", "required-keywords", "title-blacklist-phrases",
@@ -492,12 +489,23 @@ function secondsSince(isoString) {
   return Math.floor((Date.now() - then.getTime()) / 1000);
 }
 
-function formatResultHe(result) {
+function formatResultHe(info) {
+  const result = info && info.result;
+  if (result === "ok") {
+    if (info.in_stock === true) {
+      const price = info.price;
+      if (price != null && Number.isFinite(Number(price))) {
+        return `במלאי · $${Number(price).toFixed(2)}`;
+      }
+      return "במלאי";
+    }
+    if (info.in_stock === false) {
+      return "אזל מהמלאי";
+    }
+    return "תקין";
+  }
   if (!result) {
     return "—";
-  }
-  if (result === "ok") {
-    return "תקין";
   }
   if (result === "captcha") {
     return "CAPTCHA";
@@ -517,17 +525,33 @@ function engineStatusHe(status) {
 
 function fillEngineSummary(health) {
   const engine = (health && health.engine) || {};
+  const jobs = (health && health.jobs) || {};
+  const streamJob = jobs.stream || {};
   const status = engineStatusHe(engine.status);
   const sweep = engine.sweep_seconds;
   let summary = status;
   if (sweep != null && Number.isFinite(Number(sweep))) {
     summary += ` · סריקה מלאה: ${Math.round(Number(sweep))} שניות`;
   }
+  const watchCount = Number(engine.watch_count) || 0;
+  const target = Number(engine.target_interval_seconds) || 0;
+  if (watchCount > 0 && target > 0) {
+    const goal = Math.round(watchCount * target);
+    summary += ` · יעד: ~${goal} שניות`;
+  }
+  const streamErr = streamJob.last_error_message;
+  const streamErrAt = streamJob.last_error_at;
+  const streamOkAt = streamJob.last_success_at;
+  if (
+    streamErr &&
+    (!streamOkAt || !streamErrAt || new Date(streamErrAt) >= new Date(streamOkAt))
+  ) {
+    summary += ` · ⚠ ${String(streamErr).slice(0, 80)}`;
+  }
   byId("ov-engine-summary").textContent = summary;
 
-  const target = engine.target_interval_seconds;
   byId("ov-target-interval").textContent =
-    target != null && Number.isFinite(Number(target)) ? String(Math.round(Number(target))) : "—";
+    target > 0 ? String(Math.round(target)) : "—";
 }
 
 function renderFreshnessTable(health) {
@@ -571,7 +595,7 @@ function renderFreshnessTable(health) {
     tr.appendChild(agoTd);
 
     const resultTd = document.createElement("td");
-    resultTd.textContent = formatResultHe(info.result);
+    resultTd.textContent = formatResultHe(info);
     tr.appendChild(resultTd);
 
     tbody.appendChild(tr);
