@@ -8,8 +8,8 @@ docs/*
 
 config.yaml
 
-data/telemetry.db
+# Runtime state lives outside version control: committing the live SQLite DB
+# means "git pull" on the production machine overwrites real monitor state.
+data/
 
 _archive_amazon_com_search/
-
-tests/*

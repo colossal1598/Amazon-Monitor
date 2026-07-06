@@ -251,6 +251,7 @@ class FastWatcher:
         self.check_count = 0
         self.alert_count = 0
         self.last_summary = time.monotonic()
+        self.last_cookie_wait_log = 0.0
 
     # -- config / session ---------------------------------------------------
 
@@ -397,6 +398,18 @@ class FastWatcher:
 
         if not bool(self.config.get("fast_watch_enabled", True)):
             time.sleep(30)
+            return
+        if self.cookie_mtime <= 0 and bool(self.config.get("fast_watch_require_cookies", True)):
+            # Cookieless XHRs get 503'd almost immediately; wait for the browser
+            # lane to export its session instead of burning backoff cycles.
+            if time.monotonic() - self.last_cookie_wait_log > 120:
+                LOGGER.info(
+                    "Waiting for session cookies from the browser lane (%s not loaded yet).",
+                    self.config.get("fast_watch_cookie_path") or "data/session_cookies.json",
+                )
+                self.last_cookie_wait_log = time.monotonic()
+            self._refresh_cookies_if_changed()
+            time.sleep(10)
             return
         now = time.monotonic()
         if now < self.backoff_until:

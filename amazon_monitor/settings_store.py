@@ -47,6 +47,9 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "fast_watch_max_requests_per_minute": 20,
     "fast_watch_backoff_seconds": 90,
     "fast_watch_cookie_path": "data/session_cookies.json",
+    # Don't hit Amazon until the browser lane has exported session cookies;
+    # cookieless XHRs are throttled (503) almost immediately.
+    "fast_watch_require_cookies": True,
     "fast_watch_config_reload_seconds": 60,
     # Minimum gap between two identical stock alerts (same ASIN + type) from ANY
     # source. Stops flapping state (page-1 churn, transient scrape misses) from
