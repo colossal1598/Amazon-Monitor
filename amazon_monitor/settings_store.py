@@ -39,6 +39,15 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "pdp_unknown_retry_seconds": 2.5,
     "pdp_continue_shopping_max_clicks": 3,
     "cross_source_alert_dedupe_minutes": 15,
+    # Fast-lane HTTP checker (fast_watch.py, separate PM2 process): polls the AOD
+    # ajax endpoint per watch ASIN. Interval is per-ASIN; requests-per-minute is a
+    # global pacing cap; backoff kicks in on captcha/403/429/503.
+    "fast_watch_enabled": True,
+    "fast_watch_interval_seconds": 40,
+    "fast_watch_max_requests_per_minute": 20,
+    "fast_watch_backoff_seconds": 90,
+    "fast_watch_cookie_path": "data/session_cookies.json",
+    "fast_watch_config_reload_seconds": 60,
     # Minimum gap between two identical stock alerts (same ASIN + type) from ANY
     # source. Stops flapping state (page-1 churn, transient scrape misses) from
     # spamming repeated back_in_stock/new_product messages. 0 disables.

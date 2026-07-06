@@ -393,6 +393,17 @@ async def _run_monitor_cycle_async(
                 }
                 aes_items = []
             usage_metrics.flush_meter(meter)
+            # Export session cookies for the fast-lane HTTP checker (fast_watch.py)
+            # so its AOD requests carry the same session + delivery address.
+            try:
+                cookie_path = Path(
+                    str(config.get("fast_watch_cookie_path") or "data/session_cookies.json")
+                )
+                cookies = await context.cookies("https://www.amazon.com")
+                cookie_path.parent.mkdir(parents=True, exist_ok=True)
+                cookie_path.write_text(json.dumps(cookies), encoding="utf-8")
+            except Exception:  # noqa: BLE001 - cookie export is best-effort
+                LOGGER.debug("session cookie export failed", exc_info=True)
         finally:
             await close_async_browser(browser, context)
 
