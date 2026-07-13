@@ -97,6 +97,21 @@ module.exports = {
       },
     },
     {
+      // Public tunnel for the admin UI. Carrier DNS on Android blocks *.ts.net
+      // (Tailscale funnel), so the panel is published on a stable ngrok static
+      // domain instead. Authtoken lives in the user-level ngrok config
+      // (%LOCALAPPDATA%\ngrok\ngrok.yml), not in this repo.
+      name: "admin-tunnel",
+      cwd: monitorRoot,
+      script: path.join(monitorRoot, "..", "tools", "ngrok", "ngrok.exe"),
+      args: "http --url=https://finch-pastime-defacing.ngrok-free.dev 8443 --log stdout",
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 20,
+      exp_backoff_restart_delay: 3000,
+      watch: false,
+    },
+    {
       name: "monitor-healthcheck",
       cwd: monitorRoot,
       script: "tools/healthcheck.py",
