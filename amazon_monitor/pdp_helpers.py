@@ -121,6 +121,28 @@ def _paid_delivery_price_tail(line: str) -> str:
     return re.sub(r"(?i)^ils:?", "", token).strip(":")
 
 
+def is_amazon_export_seller(seller_text: str | None, source: str | None = None) -> bool:
+    """True when the offer is sold by Amazon Export Sales LLC.
+
+    Business rule (confirmed by operator): Amazon Export orders always ship free.
+    When the page shows a delivery charge or date for an Export-sold item, that's
+    an Amazon display bug and must not leak into WhatsApp alerts. The AES SERP
+    source is the Export storefront by definition.
+    """
+    if source and "aes" in str(source).lower():
+        return True
+    return "amazon export" in normalize_ascii(seller_text or "")
+
+
+def shipping_display_for(
+    shipping_text: str | None, *, seller_text: str | None = None, source: str | None = None
+) -> str:
+    """Alert shipping line with the Amazon-Export-is-always-free override applied."""
+    if is_amazon_export_seller(seller_text, source):
+        return "משלוח חינם"
+    return shipping_display_hebrew(shipping_text)
+
+
 def shipping_display_hebrew(shipping_text: str | None) -> str:
     """WhatsApp delivery line: free shipping or the paid delivery line/price."""
     lines = _delivery_candidate_lines(shipping_text)

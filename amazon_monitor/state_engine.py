@@ -10,7 +10,7 @@ from typing import Any
 import image_cache
 
 from alert_decisions import decide_back_in_stock, decide_new_product, decide_price_drop
-from pdp_helpers import normalize_title_line, shipping_display_hebrew
+from pdp_helpers import normalize_title_line, shipping_display_for
 
 LOGGER = logging.getLogger(__name__)
 
@@ -399,7 +399,9 @@ class StateEngine:
                 seller = item.get("seller") or row_source
                 image_url = item.get("image_url")
                 new_price = _as_float(item.get("price"))
-                ship_line = shipping_display_hebrew(item.get("shipping_text"))
+                ship_line = shipping_display_for(
+                    item.get("shipping_text"), seller_text=item.get("seller_text"), source=row_source
+                )
                 new_stock = 1 if bool(item.get("in_stock")) else 0
                 confidence = str(item.get("stock_confidence") or "").strip().lower()
                 reason = str(item.get("stock_reason") or "").strip() or None
@@ -678,7 +680,10 @@ class StateEngine:
                 title = normalize_title_line(item.get("title"))
                 image_url = item.get("image_url")
                 new_price = _as_float(item.get("price"))
-                ship_line = shipping_display_hebrew(item.get("shipping_text"))
+                # source here is the AES storefront (Amazon Export) — always free shipping.
+                ship_line = shipping_display_for(
+                    item.get("shipping_text"), seller_text=item.get("seller_text"), source=source
+                )
                 new_stock = 1 if bool(item.get("in_stock")) else 0
                 now = utc_iso()
 

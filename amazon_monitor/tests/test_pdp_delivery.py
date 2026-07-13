@@ -1,6 +1,6 @@
 import unittest
 
-from pdp_helpers import _paid_delivery_price_tail, shipping_display_hebrew
+from pdp_helpers import _paid_delivery_price_tail, shipping_display_for, shipping_display_hebrew
 from pdp_scraper import _pdp_row
 
 
@@ -43,6 +43,31 @@ class TestPdpDelivery(unittest.TestCase):
     def test_priced_line_preferred_over_date_only_line(self) -> None:
         text = "Delivery Thu, Jul 30\n$4.99 shipping"
         self.assertEqual(shipping_display_hebrew(text), "משלוח: $4.99")
+
+    def test_amazon_export_seller_always_free_shipping(self) -> None:
+        """Business rule: Amazon Export Sales LLC always ships free — a delivery
+        charge shown on the page for an Export-sold item is an Amazon display bug."""
+        self.assertEqual(
+            shipping_display_for(
+                "$12.44 delivery Wednesday",
+                seller_text="Ships from Amazon.com Sold by Amazon Export Sales LLC",
+            ),
+            "משלוח חינם",
+        )
+        self.assertEqual(
+            shipping_display_for("Delivery Thu, Jul 30", seller_text=None, source="aes_llc"),
+            "משלוח חינם",
+        )
+
+    def test_non_export_seller_keeps_real_shipping(self) -> None:
+        self.assertEqual(
+            shipping_display_for(
+                "$12.44 delivery Wednesday",
+                seller_text="Ships from Amazon.com Sold by Amazon.com",
+                source="pdp_watch",
+            ),
+            "משלוח: $12.44",
+        )
 
     def test_paid_delivery_does_not_disqualify_allowed_seller(self) -> None:
         row = _pdp_row(
