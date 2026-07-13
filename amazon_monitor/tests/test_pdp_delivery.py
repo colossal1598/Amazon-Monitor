@@ -1,6 +1,6 @@
 import unittest
 
-from pdp_helpers import shipping_display_hebrew
+from pdp_helpers import _paid_delivery_price_tail, shipping_display_hebrew
 from pdp_scraper import _pdp_row
 
 
@@ -14,6 +14,25 @@ class TestPdpDelivery(unittest.TestCase):
 
     def test_free_delivery_line_still_displays_free(self) -> None:
         self.assertEqual(shipping_display_hebrew("FREE delivery Tuesday"), "משלוח חינם")
+
+    def test_multi_amount_delivery_line_anchors_on_delivery_keyword(self) -> None:
+        """Real PDP blob: item price + a duplicated echo + an import-charges amount all precede
+        the actual delivery charge, which sits right next to the word "delivery"."""
+        line = (
+            "$109.98 $109 . 98 $47.95 Shipping & Import Charges to Israel Details "
+            "$17.96 delivery Wednesday, June 4 to Israel"
+        )
+        self.assertEqual(_paid_delivery_price_tail(line), "$17.96")
+        self.assertEqual(shipping_display_hebrew(line), "משלוח: $17.96")
+
+    def test_first_match_in_line_is_not_blindly_used(self) -> None:
+        """The first currency token in the line ($109.98, an item price) is not the delivery price."""
+        line = "$109.98 $17.96 delivery Wednesday, June 4 to Israel"
+        self.assertEqual(_paid_delivery_price_tail(line), "$17.96")
+
+    def test_no_keyword_falls_back_to_first_amount(self) -> None:
+        """Without any delivery/shipping keyword nearby, keep the previous first-match behavior."""
+        self.assertEqual(_paid_delivery_price_tail("$12.44 $9.99"), "$12.44")
 
     def test_paid_delivery_does_not_disqualify_allowed_seller(self) -> None:
         row = _pdp_row(

@@ -11,6 +11,14 @@ _CURRENCY_RE = re.compile(
     r"(\$\s*[0-9][0-9,]*(?:\.[0-9]{2})?|[0-9]+(?:[.,][0-9]{1,2})?\s*₪|₪\s*[0-9]+(?:[.,][0-9]{1,2})?|ILS\s*[:\s]*[0-9]+(?:[.,][0-9]{1,2})?)",
     re.IGNORECASE,
 )
+# Keyword(s) that mark the amount actually shown as the delivery charge.
+# Checked in priority order: "delivery" is Amazon's "$X delivery <date>" pattern for the
+# real charge, while "shipping"/"import charges" often label a details/tooltip link whose
+# adjacent amount is a different (e.g. import-fee) figure.
+_DELIVERY_PRICE_KEYWORDS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"delivery", re.IGNORECASE),
+    re.compile(r"shipping|import charges", re.IGNORECASE),
+)
 
 
 def valid_asin(value: str) -> bool:
@@ -70,13 +78,42 @@ def _delivery_candidate_lines(shipping_text: str | None) -> list[str]:
     return lines
 
 
+def _span_gap(a: tuple[int, int], b: tuple[int, int]) -> int:
+    """Character distance between two (start, end) spans; 0 if they touch/overlap."""
+    if a[1] <= b[0]:
+        return b[0] - a[1]
+    if b[1] <= a[0]:
+        return a[0] - b[1]
+    return 0
+
+
+def _pick_delivery_price_match(line: str, matches: list[re.Match[str]]) -> re.Match[str]:
+    """Pick the currency match closest to a delivery/shipping keyword, not just the first in the line.
+
+    Delivery lines can carry several money-like tokens, e.g. an item subtotal, a
+    duplicated/OCR-broken echo of it, and the actual delivery charge (real example:
+    "$109.98 $109 . 98 $47.95 Shipping & Import Charges to Israel Details $17.96 delivery
+    We[dnesday]..." - here the delivery charge is the $17.96 right next to "delivery").
+    """
+    for keyword_re in _DELIVERY_PRICE_KEYWORDS:
+        keyword_spans = [m.span() for m in keyword_re.finditer(line)]
+        if not keyword_spans:
+            continue
+        return min(
+            matches,
+            key=lambda m: min(_span_gap(m.span(), kw_span) for kw_span in keyword_spans),
+        )
+    return matches[0]
+
+
 def _paid_delivery_price_tail(line: str) -> str:
     """Return a compact paid-delivery price when the delivery line exposes one."""
-    match = _CURRENCY_RE.search(line)
-    if match:
-        token = re.sub(r"\s+", "", match.group(1))
-        return re.sub(r"(?i)^ils:?", "", token).strip(":")
-    return line.strip()
+    matches = list(_CURRENCY_RE.finditer(line))
+    if not matches:
+        return line.strip()
+    match = _pick_delivery_price_match(line, matches)
+    token = re.sub(r"\s+", "", match.group(1))
+    return re.sub(r"(?i)^ils:?", "", token).strip(":")
 
 
 def shipping_display_hebrew(shipping_text: str | None) -> str:

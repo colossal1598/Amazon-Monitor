@@ -56,12 +56,27 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     # filtered page or non-qualifying row) before the mirror flips to OOS. 1 = old
     # immediate behavior.
     "aes_oos_confirm_cycles": 3,
+    # Consecutive PDP scrapes with *weak* OOS evidence (buybox churn, missing
+    # price, inferred signals) before a watched product flips to out-of-stock.
+    # Strong page text ("currently unavailable" etc.) still flips immediately.
+    # 1 = old immediate behavior.
+    "pdp_oos_confirm_cycles": 2,
     "pdp_title_wait_ms": 6_000,
     "pdp_price_wait_ms": 2_000,
     # AES/SERP result-card wait per attempt. Kept short: this is a lightweight 1-page
     # check and normally resolves in a few seconds; a long timeout here just delays
     # detection of dead/error pages and risks overlapping the next scheduled cycle.
     "aes_selector_timeout_ms": 12_000,
+    # Navigation retries *within* one AES attempt when Amazon serves its own
+    # "Sorry! Something went wrong" soft-error interstitial or the result cards
+    # don't show up in time. Confirmed from production logs: this page recurs on
+    # many consecutive scheduled AES cycles in a row, so more headroom here (with
+    # increasing backoff) meaningfully reduces "skipped this whole cycle" outcomes.
+    "aes_serp_inner_retries": 2,
+    # Extra whole-attempt retries around the AES scrape call (new browser tab,
+    # fresh navigation) when every inner retry above was exhausted. 1 = try twice
+    # total before giving up on this aes_check_minutes interval.
+    "aes_outer_retries": 1,
     "fx_enabled": True,
     "fx_refresh_every_runs": 10,
     "fx_cache_path": "data/fx_usd_ils.json",

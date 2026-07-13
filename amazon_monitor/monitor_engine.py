@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,7 +38,7 @@ from browser_factory import (
     init_global_rate_limiter,
     set_bandwidth_config,
 )
-from exceptions import CaptchaBlocked, NetworkAccessDenied
+from exceptions import BrowserDisconnected, CaptchaBlocked, NetworkAccessDenied
 from filter_pipeline import run_search_filter_pipeline
 from pdp_helpers import valid_asin
 from pdp_scraper import _scrape_pdp_on_context, pdp_skip_log_label
@@ -98,6 +100,23 @@ def resolve_aes_llc_url(config: dict[str, Any]) -> str:
         if url:
             return url
     raise ValueError("Set search_urls.aes_llc in DB settings (admin UI or settings table)")
+
+
+def aes_fallback_url(primary_url: str) -> str | None:
+    """Alternate URL form for the same seller, used on the last retry attempt.
+
+    Production telemetry showed the keyword-filtered SERP (``s?k=...&me=<seller>``)
+    gets soft-error throttled for minutes at a time while other endpoints from the
+    same IP keep working. The storefront listing (``s?i=merchant-items&me=<seller>``)
+    hits a different backend query path that may not share the throttle bucket, and
+    renders the same standard SERP result cards the parser already handles.
+    Returns None when no seller id can be extracted or the primary is already the
+    merchant-items form.
+    """
+    match = re.search(r"[?&]me=([A-Z0-9]+)", primary_url)
+    if not match or "i=merchant-items" in primary_url:
+        return None
+    return f"https://www.amazon.com/s?i=merchant-items&me={match.group(1)}"
 
 
 def _coerce_range(raw: Any, default: tuple[float, float]) -> tuple[float, float]:
@@ -220,8 +239,14 @@ class MonitorEngine:
         self._sweep_aes_counts = (0, 0, 0)  # raw, candidates, alerts
         self._sweep_aes_outcome: dict[str, Any] = {}
         self._last_aes_at = 0.0
+        self._aes_fail_streak = 0
         self._meter: Any = None
         self._meter_baseline: dict[str, int] = {}
+        # Watchdog liveness marker (see watchdog_loop in main.py). Updated on any
+        # forward progress: a finished sweep, a completed per-ASIN check, a
+        # deliberate recovery pause, or a fresh session start. Plain monotonic
+        # attribute assignment so it stays cheap to update from hot paths.
+        self.last_progress = time.monotonic()
 
     # ------------------------------------------------------------- health --
 
@@ -280,9 +305,19 @@ class MonitorEngine:
 
     def _aes_interval_seconds(self) -> float:
         try:
-            return max(60.0, float(self.config.get("aes_check_minutes", 5)) * 60.0)
+            base = max(60.0, float(self.config.get("aes_check_minutes", 5)) * 60.0)
         except (TypeError, ValueError):
-            return 300.0
+            base = 300.0
+        # Adaptive backoff on consecutive fully-failed AES cycles. Telemetry showed
+        # the soft-error throttle is a rolling window that stays hot for minutes;
+        # returning at the fixed cadence (with all its retries) kept refreshing it,
+        # producing streaks of up to 21 consecutive lost cycles (~40 min blind).
+        # Backing off up to 3x lets the window cool, then the cadence resets on the
+        # first success.
+        if self._aes_fail_streak > 0:
+            multiplier = min(1.0 + 0.5 * self._aes_fail_streak, 3.0)
+            return base * multiplier * random.uniform(0.9, 1.1)
+        return base
 
     def _recycle_seconds(self) -> float:
         try:
@@ -310,14 +345,15 @@ class MonitorEngine:
         self._sweep_aes_outcome = {}
 
     def _finish_sweep(self) -> None:
+        self.last_progress = time.monotonic()
         sweep_sec = time.monotonic() - self._sweep_started
         self.last_sweep_seconds = round(sweep_sec, 1)
         usage_metrics.record_pdp_phase(sweep_sec, 0, ok=self._sweep_ok, skip=self._sweep_skip)
         if self._meter is not None:
             try:
                 usage_metrics.flush_meter(_SweepMeterView(self._meter, self._meter_baseline))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001 - bandwidth flush is best-effort
+                LOGGER.warning("Failed to flush bandwidth meter: %s", exc, extra={"channel": "debug"})
         # Stall detection treats the per-ASIN freshness target as "poll interval".
         target_minutes = max(1, round(self.scheduler.interval * max(1, len(self.watch)) / 60))
         scrape_errors, reason_counts = client_alerts.count_pdp_scrape_errors(self._sweep_rows)
@@ -344,15 +380,35 @@ class MonitorEngine:
         if self._cycle_id:
             self.telemetry.finish_cycle(self._cycle_id, summary, self.config)
             client_alerts.on_cycle_timing(summary, self.config, self.telemetry, cycle_id=self._cycle_id)
+            # Evaluates this sweep's PDP/AES scrape failure rate against a
+            # degradation threshold and alerts the operator if too many scrapes
+            # failed. Without this, a sweep where a large fraction of PDP pages
+            # failed to scrape (or AES navigation kept failing) looked identical
+            # in the logs to "checked everything, nothing is in stock" — exactly
+            # the silent false-negative pattern reported.
+            client_alerts.check_scrape_degraded(
+                self._sweep_rows,
+                self._sweep_aes_outcome,
+                len(self.watch),
+                self.config,
+                self.telemetry,
+                cycle_id=self._cycle_id,
+            )
         LOGGER.info(
-            "%s Sweep done. checked=%s ok=%s skip=%s alerts=%s sweep_sec=%s watch=%s",
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Sweep done. checked=%s ok=%s skip=%s alerts=%s sweep_sec=%s watch=%s",
             self._sweep_checks,
             self._sweep_ok,
             self._sweep_skip,
             self._sweep_alerts + aes_alerts,
             round(sweep_sec, 1),
             len(self.watch),
+            extra={"channel": "lifecycle"},
+        )
+        LOGGER.info(
+            "Sweep net: pdp_kb=%s aes_kb=%s total_kb=%s",
+            summary.get("pdp_net_kb_est"),
+            summary.get("aes_net_kb_est"),
+            summary.get("net_kb_est"),
             extra={"channel": "lifecycle"},
         )
         fx_rate.bump_monitor_tick(self.config)
@@ -414,8 +470,7 @@ class MonitorEngine:
         )
         for alert in alerts:
             LOGGER.info(
-                "%s ALERT %s %s price=%s (dispatched immediately)",
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ALERT %s %s price=%s (dispatched immediately)",
                 alert.get("type"),
                 asin,
                 alert.get("price"),
@@ -434,31 +489,98 @@ class MonitorEngine:
         except ValueError as exc:
             self.mark_job("aes", "error", str(exc))
             return
+        # The AES LLC search page has been observed in production logs failing
+        # Amazon's own "Sorry! Something went wrong" soft-error interstitial on
+        # many consecutive scheduled attempts in a row. Each attempt already
+        # retries internally (serp_inner_retries) but previously a single
+        # exhausted attempt burned the *entire* aes_check_minutes interval before
+        # trying again. One extra outer attempt (with its own short backoff) lets
+        # a transient burst clear within the same cycle instead of silently
+        # skipping discovery for minutes at a time.
+        outer_attempts = max(1, int(config.get("aes_outer_retries", 1)) + 1)
+        inner_retries = max(0, int(config.get("aes_serp_inner_retries", 2)))
         started = time.monotonic()
+        aes_items: list[dict[str, Any]] = []
+        scrape_data: dict[str, Any] = {}
+        last_exc: Exception | None = None
+        fallback_url = aes_fallback_url(aes_llc_url)
         try:
-            aes_items, scrape_data = await scrape_search_on_context_async(
-                context,
-                aes_llc_url,
-                source="aes_llc",
-                scrape_mode="newest_front",
-                pagination_mode="fixed",
-                fixed_pages=1,
-                max_search_pages=1,
-                collect_debug=False,
-                max_cycle_seconds=_AES_BUDGET_SECONDS,
-                serp_scroll_profile="minimal",
-                serp_inner_retries=1,
-                selector_timeout_ms=int(config.get("aes_selector_timeout_ms", 12_000)),
-            )
-        except (CaptchaBlocked, NetworkAccessDenied):
-            raise
-        except Exception as exc:  # noqa: BLE001 - AES is best-effort discovery
-            LOGGER.warning("AES/SERP scrape failed (stream continues): %s", exc, extra={"channel": "debug"})
-            self.mark_job("aes", "error", str(exc))
-            self._sweep_aes_outcome = {"navigation_ok": False, "cards_found": 0, "error": str(exc)}
-            return
+            for outer_attempt in range(1, outer_attempts + 1):
+                # Each attempt gets the REMAINING share of the overall AES budget
+                # (not a fresh _AES_BUDGET_SECONDS each time). Previously a 2-attempt
+                # retry could burn up to 2x the budget in the worst case, starving
+                # PDP workers that share the same global rate limiter for minutes.
+                elapsed = time.monotonic() - started
+                remaining = _AES_BUDGET_SECONDS - elapsed
+                if outer_attempt > 1 and remaining < 10.0:
+                    LOGGER.info(
+                        "AES/SERP attempt %s/%s skipped, budget exhausted (remaining=%.1fs)",
+                        outer_attempt,
+                        outer_attempts,
+                        remaining,
+                        extra={"channel": "debug"},
+                    )
+                    break
+                attempt_budget = max(10.0, remaining)
+                # On the final attempt switch to the merchant-items storefront URL
+                # (different backend path, likely a separate throttle bucket) —
+                # telemetry showed retries against the identical keyword-SERP URL
+                # almost never recover once the soft-error window has started.
+                attempt_url = aes_llc_url
+                if outer_attempt == outer_attempts and outer_attempt > 1 and fallback_url:
+                    attempt_url = fallback_url
+                    LOGGER.info(
+                        "AES/SERP attempt %s/%s using fallback storefront URL: %s",
+                        outer_attempt,
+                        outer_attempts,
+                        fallback_url,
+                        extra={"channel": "debug"},
+                    )
+                try:
+                    aes_items, scrape_data = await scrape_search_on_context_async(
+                        context,
+                        attempt_url,
+                        source="aes_llc",
+                        scrape_mode="newest_front",
+                        pagination_mode="fixed",
+                        fixed_pages=1,
+                        max_search_pages=1,
+                        collect_debug=False,
+                        max_cycle_seconds=attempt_budget,
+                        serp_scroll_profile="minimal",
+                        serp_inner_retries=inner_retries,
+                        selector_timeout_ms=int(config.get("aes_selector_timeout_ms", 12_000)),
+                    )
+                    last_exc = None
+                    break
+                except (CaptchaBlocked, NetworkAccessDenied, BrowserDisconnected):
+                    raise
+                except Exception as exc:  # noqa: BLE001 - AES is best-effort discovery
+                    last_exc = exc
+                    if outer_attempt >= outer_attempts:
+                        break
+                    LOGGER.info(
+                        "AES/SERP attempt %s/%s failed, retrying: %s",
+                        outer_attempt,
+                        outer_attempts,
+                        exc,
+                        extra={"channel": "debug"},
+                    )
+                    await asyncio.sleep(random.uniform(1.5, 3.0))
         finally:
             usage_metrics.record_aes_phase(time.monotonic() - started, 0)
+        if last_exc is not None:
+            self._aes_fail_streak += 1
+            LOGGER.warning(
+                "AES/SERP scrape failed (stream continues, fail_streak=%s): %s",
+                self._aes_fail_streak,
+                last_exc,
+                extra={"channel": "debug"},
+            )
+            self.mark_job("aes", "error", str(last_exc))
+            self._sweep_aes_outcome = {"navigation_ok": False, "cards_found": 0, "error": str(last_exc)}
+            return
+        self._aes_fail_streak = 0
 
         outcome = scrape_data.get("scrape_outcome") if isinstance(scrape_data, dict) else {}
         self._sweep_aes_outcome = outcome if isinstance(outcome, dict) else {}
@@ -491,12 +613,21 @@ class MonitorEngine:
                 continue
             try:
                 await self._check_one_asin(context, asin)
-            except (CaptchaBlocked, NetworkAccessDenied) as exc:
+            except (CaptchaBlocked, NetworkAccessDenied, BrowserDisconnected) as exc:
+                # BrowserDisconnected means the Chromium process/driver pipe for
+                # this whole session is dead: every other worker will fail the
+                # same way on its next check. Confirmed in production logs as a
+                # ~10 minute outage where each of 16 watch ASINs kept failing
+                # identically every ~60s until the *time-based* browser recycle
+                # eventually fired — during which nothing was checked and no
+                # alert was sent. Treating it as fatal here (like captcha/network
+                # blocks) makes the session stop and recycle within seconds.
                 failure.setdefault("error", exc)
                 stop.set()
             except Exception as exc:  # noqa: BLE001 - one bad check must not kill the loop
                 LOGGER.warning("check failed asin=%s: %s", asin, exc, extra={"channel": "debug"})
             finally:
+                self.last_progress = time.monotonic()
                 self.scheduler.complete(asin, time.monotonic())
                 self.write_health()
 
@@ -508,6 +639,9 @@ class MonitorEngine:
         if not self.watch:
             LOGGER.warning("No pdp_watch_asins configured; engine idle.")
             self.engine_status = "idle_no_watch"
+            # Deliberately idle, not stalled: keep the watchdog from firing while
+            # waiting for a watch list to be configured.
+            self.last_progress = time.monotonic()
             self.write_health(force=True)
             await asyncio.sleep(30)
             return
@@ -522,6 +656,7 @@ class MonitorEngine:
             self._meter = usage_metrics.BandwidthMeter(self.config)
             self._meter.attach_context_async(context)
             self.engine_status = "running"
+            self.last_progress = time.monotonic()
             self.mark_job("stream", "started")
             self._begin_sweep()
             stop = asyncio.Event()
@@ -544,7 +679,7 @@ class MonitorEngine:
                         self._meter.set_phase("aes")
                         try:
                             await self._run_aes_discovery(context)
-                        except (CaptchaBlocked, NetworkAccessDenied) as exc:
+                        except (CaptchaBlocked, NetworkAccessDenied, BrowserDisconnected) as exc:
                             failure.setdefault("error", exc)
                             stop.set()
                         finally:
@@ -570,13 +705,19 @@ class MonitorEngine:
         if error is not None:
             raise error
 
-    async def _pause_for_recovery(self, reason: str) -> None:
-        pause_s = max(0, int(self.config.get("captcha_recovery_pause_seconds", 120)))
+    async def _pause_for_recovery(
+        self, reason: str, *, pause_seconds: float | None = None, status: str = "captcha_pause"
+    ) -> None:
+        pause_s = max(0, int(pause_seconds if pause_seconds is not None else self.config.get("captcha_recovery_pause_seconds", 120)))
         LOGGER.warning("%s: pausing stream %ss, browser will be recycled.", reason, pause_s)
-        self.engine_status = "captcha_pause"
+        self.engine_status = status
+        # A deliberate pause is not a hang: tell the watchdog we're alive so a
+        # long captcha/network backoff can't false-trigger a stall exit.
+        self.last_progress = time.monotonic()
         self.mark_job("stream", "error", reason)
         self.write_health(force=True)
         await asyncio.sleep(float(pause_s))
+        self.last_progress = time.monotonic()
 
     async def run_forever(self) -> None:
         LOGGER.info("Streaming engine starting.", extra={"channel": "lifecycle"})
@@ -588,7 +729,22 @@ class MonitorEngine:
                 await self._pause_for_recovery(f"Captcha: {exc}")
             except NetworkAccessDenied as exc:
                 client_alerts.maybe_alert("network_blocked", self.config, self.telemetry, cycle_id=self._cycle_id, detail=str(exc))
-                await self._pause_for_recovery(f"Network blocked: {exc}")
+                await self._pause_for_recovery(f"Network blocked: {exc}", status="network_pause")
+            except BrowserDisconnected as exc:
+                # Not a block (captcha/rate-limit) — the browser process or driver
+                # pipe itself died. Waiting captcha_recovery_pause_seconds (120s
+                # default) would needlessly extend an outage that a fresh browser
+                # launch fixes immediately; use a short fixed pause instead so
+                # detection resumes in seconds, and alert the operator since this
+                # previously failed completely silently for up to
+                # browser_recycle_minutes (production logs showed ~10 minutes of
+                # zero successful checks with no client-facing signal at all).
+                client_alerts.maybe_alert(
+                    "browser_disconnected", self.config, self.telemetry, cycle_id=self._cycle_id, detail=str(exc)
+                )
+                await self._pause_for_recovery(
+                    f"Browser disconnected: {exc}", pause_seconds=5, status="browser_restart"
+                )
             except Exception as exc:  # noqa: BLE001 - engine must survive anything
                 LOGGER.exception("Engine session crashed: %s", exc)
                 client_alerts.maybe_alert("cycle_failed", self.config, self.telemetry, cycle_id=self._cycle_id, detail=str(exc))

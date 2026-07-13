@@ -90,7 +90,9 @@ class StateEngine:
                     last_price_alert TEXT,
                     last_stock_alert TEXT,
                     image_url TEXT,
-                    last_oos_confirmed INTEGER NOT NULL DEFAULT 0
+                    oos_miss_streak INTEGER NOT NULL DEFAULT 0,
+                    last_oos_confirmed INTEGER NOT NULL DEFAULT 0,
+                    is_preorder INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS aes_products (
@@ -146,13 +148,16 @@ class StateEngine:
         for table in ("products", "aes_products"):
             if not self._table_has_column(table, "image_url"):
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN image_url TEXT")
-        if not self._table_has_column("aes_products", "oos_miss_streak"):
-            self.conn.execute("ALTER TABLE aes_products ADD COLUMN oos_miss_streak INTEGER NOT NULL DEFAULT 0")
+        for table in ("products", "aes_products"):
+            if not self._table_has_column(table, "oos_miss_streak"):
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN oos_miss_streak INTEGER NOT NULL DEFAULT 0")
         for table in ("products", "aes_products"):
             if not self._table_has_column(table, "last_oos_confirmed"):
                 self.conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN last_oos_confirmed INTEGER NOT NULL DEFAULT 0"
                 )
+        if not self._table_has_column("products", "is_preorder"):
+            self.conn.execute("ALTER TABLE products ADD COLUMN is_preorder INTEGER NOT NULL DEFAULT 0")
 
     def _maybe_cache_image(
         self,
@@ -432,6 +437,12 @@ class StateEngine:
                             new_count += 1
                     continue
 
+                # PDP image extraction often comes back empty (explicit-OOS pages skip it,
+                # "continue shopping" interstitials can hide it); fall back to the last
+                # known-good image already stored for this ASIN so alerts still carry one.
+                if not image_url:
+                    image_url = row["image_url"]
+
                 old_price = _as_float(row["price"])
                 old_stock = int(row["in_stock"] or 0)
                 seller_snippet = " ".join(str(item.get("seller_text") or "").split())[:200] or None
@@ -460,48 +471,88 @@ class StateEngine:
                         )
                         skipped_update_count += 1
                         continue
-                    oos_confirmed = 1 if (reason or "") in _STRONG_OOS_REASONS else 0
+                    oos_strong = (reason or "") in _STRONG_OOS_REASONS
+                    old_streak = int(row["oos_miss_streak"] or 0)
+                    miss_streak = old_streak + 1
+                    # Strong page-text evidence flips OOS immediately (genuine
+                    # sell-outs must re-alert fast on restock). Weak evidence
+                    # (buybox churn, missing price, inferred signals) needs
+                    # consecutive confirmations, mirroring aes_oos_confirm_cycles:
+                    # production alert history showed single-scrape weak flips
+                    # producing dozens of fake back_in_stock alerts per day for
+                    # flapping/preorder pages.
+                    try:
+                        confirm_cycles = max(1, int((config or {}).get("pdp_oos_confirm_cycles", 2)))
+                    except (TypeError, ValueError):
+                        confirm_cycles = 2
+                    flip_oos = oos_strong or old_stock == 0 or miss_streak >= confirm_cycles
+                    if not flip_oos:
+                        _tel(
+                            "pdp_oos_debounced",
+                            asin=asin,
+                            reason=reason or "unknown",
+                            miss_streak=miss_streak,
+                            confirm_cycles=confirm_cycles,
+                        )
+                    oos_confirmed = 1 if oos_strong else (int(row["last_oos_confirmed"] or 0) if old_stock == 0 else 0)
                     self.conn.execute(
                         """
                         UPDATE products
-                        SET in_stock = 0,
+                        SET in_stock = ?,
+                            oos_miss_streak = ?,
                             last_oos_confirmed = ?,
                             image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (oos_confirmed, image_url, asin),
+                        (0 if flip_oos else 1, miss_streak, oos_confirmed, image_url, asin),
                     )
                     self._maybe_cache_image(asin, image_url, config)
                     continue
 
+                new_preorder = 1 if bool(item.get("is_preorder")) else 0
+                old_preorder = int(row["is_preorder"] or 0)
                 if old_stock == 0:
                     self.conn.execute(
                         """
                         UPDATE products
                         SET price = COALESCE(?, price),
                             in_stock = 1,
+                            oos_miss_streak = 0,
+                            is_preorder = ?,
                             last_seen = ?,
                             image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (new_price, now, image_url, asin),
+                        (new_price, new_preorder, now, image_url, asin),
                     )
                 else:
                     self.conn.execute(
                         """
                         UPDATE products
                         SET price = COALESCE(?, price),
+                            oos_miss_streak = 0,
+                            is_preorder = ?,
                             last_seen = ?,
                             image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (new_price, now, image_url, asin),
+                        (new_price, new_preorder, now, image_url, asin),
                     )
                 self._maybe_cache_image(asin, image_url, config)
 
                 stock_decision = decide_back_in_stock(old_stock, 1)
                 emitted_back_in_stock = False
-                if stock_decision.emit:
+                if stock_decision.emit and new_preorder and old_preorder:
+                    # Preorder allocation waves open/sell out repeatedly before the
+                    # release date; each wave is a real 0->1 flip but not a genuine
+                    # restock. Alert once when the preorder is first seen open,
+                    # suppress every repeat while the listing remains a preorder.
+                    _tel(
+                        "pdp_preorder_realert_suppressed",
+                        asin=asin,
+                        price=new_price,
+                    )
+                elif stock_decision.emit:
                     alert = self._emit_stock_alert_if_allowed(
                         alert_type="back_in_stock",
                         source=row_source,
@@ -514,7 +565,7 @@ class StateEngine:
                         telemetry=telemetry,
                         cycle_id=cycle_id,
                         _tel=_tel,
-                        confirmed_transition=bool(row["last_oos_confirmed"]),
+                        confirmed_transition=bool(row["last_oos_confirmed"]) and not new_preorder,
                     )
                     if alert is not None:
                         alerts.append(alert)
@@ -663,6 +714,11 @@ class StateEngine:
                             alerts.append(alert)
                             new_count += 1
                     continue
+
+                # Fall back to the last known-good stored image_url when this scrape's
+                # row didn't yield one (mirrors the PDP watch path).
+                if not image_url:
+                    image_url = row["image_url"]
 
                 old_price = _as_float(row["price"])
                 old_stock = int(row["in_stock"] or 0)

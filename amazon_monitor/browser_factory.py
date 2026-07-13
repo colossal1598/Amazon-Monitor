@@ -1,3 +1,4 @@
+import logging
 import os
 import random
 import threading
@@ -352,13 +353,40 @@ async def create_async_stealth_context(
 
 
 async def close_async_browser(browser, context) -> None:
-    await context.close()
-    await browser.close()
+    """Best-effort teardown: always attempt browser.close() even if context.close() fails.
+
+    Confirmed in production logs: when the driver connection is already dead,
+    ``context.close()`` raises ("BrowserContext.close: Connection closed while
+    reading from the driver"). Previously that exception skipped the following
+    ``browser.close()`` call entirely, which either leaves the Chromium process
+    running (a leaked process that consumes memory/handles across many recycle
+    cycles, compounding future crashes) or is a harmless no-op if the process is
+    already gone. Either way, closing must not be all-or-nothing, and a failed
+    close of an already-dead connection is not actionable, so it is logged and
+    swallowed rather than propagated as a session-crashing error.
+    """
+    try:
+        await context.close()
+    except Exception as exc:  # noqa: BLE001 - best-effort; driver may already be dead
+        logging.getLogger("monitor").debug("close_async_browser: context.close() failed: %s", exc)
+    try:
+        await browser.close()
+    except Exception as exc:  # noqa: BLE001 - best-effort; process may already be gone
+        logging.getLogger("monitor").debug("close_async_browser: browser.close() failed: %s", exc)
 
 
 # Close the browser cleanly and also stop the Playwright runner we started with it.
 def close_context(context: BrowserContext) -> None:
     pw_runner = getattr(context, "_pw_runner", None)
-    context.close()
+    try:
+        context.close()
+    except Exception as exc:  # noqa: BLE001 - best-effort; driver may already be dead
+        logging.getLogger("monitor").debug("close_context: context.close() failed: %s", exc)
     if pw_runner is not None:
-        pw_runner.stop()
+        # Must still run even if context.close() failed above, otherwise a dead
+        # driver connection leaks the underlying browser process (see
+        # close_async_browser for the same failure mode on the async path).
+        try:
+            pw_runner.stop()
+        except Exception as exc:  # noqa: BLE001 - best-effort; process may already be gone
+            logging.getLogger("monitor").debug("close_context: pw_runner.stop() failed: %s", exc)

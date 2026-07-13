@@ -1,15 +1,22 @@
-
-.env
-
+amazon_monitor/config.yaml
 __pycache__/
 *.pyc
+.venv/
+amazon_monitor/.venv/
 
-docs/*
+# Secrets
+.env
 
-config.yaml
-
-# Runtime state lives outside version control: committing the live SQLite DB
-# means "git pull" on the production machine overwrites real monitor state.
+# Runtime data (DBs, health, scrape debug dumps)
+data/product_images/
+data/test_scrape/
 data/
 
-_archive_amazon_com_search/
+# Logs
+logs/
+*.log
+*.log.*
+
+# Local DB backups
+*.db.bak
+*.pre-migrate.bak

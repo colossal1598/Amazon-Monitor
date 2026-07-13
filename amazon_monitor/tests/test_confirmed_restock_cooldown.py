@@ -176,6 +176,10 @@ class TestConfirmedRestockCooldown(unittest.TestCase):
             try:
                 asin = "B011111111"
                 _seed_products_row(se, asin, in_stock=1)
+                # Inferred OOS is weak evidence: needs two consecutive scrapes to flip.
+                se.process_pdp_watch_candidates(
+                    [_pdp_oos_row(asin, "inferred_oos_see_all_options")], {asin}, config=_CONFIG
+                )
                 se.process_pdp_watch_candidates(
                     [_pdp_oos_row(asin, "inferred_oos_see_all_options")], {asin}, config=_CONFIG
                 )

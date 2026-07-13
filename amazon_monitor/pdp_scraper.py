@@ -12,7 +12,7 @@ from typing import Any
 
 import browser_factory
 from browser_factory import STEALTH, close_async_browser, create_async_stealth_context
-from exceptions import NetworkAccessDenied
+from exceptions import BrowserDisconnected, NetworkAccessDenied, is_driver_disconnected_error
 from image_urls import pick_amazon_image_url
 from pdp_helpers import is_not_shippable_text, normalize_ascii, valid_asin
 import usage_metrics
@@ -45,10 +45,28 @@ _DELIVERY_RELEVANT_RE = re.compile(
     re.IGNORECASE,
 )
 
-_EXPLICIT_OOS_RE = re.compile(
+# Phrases where the page explicitly states the item cannot be bought right now.
+_EXPLICIT_OOS_STRONG_RE = re.compile(
     r"currently unavailable|temporarily out of stock|out of stock|unavailable|"
     r"we don't know when or if this item will be back in stock|"
-    r"see all buying options|no featured offers|not available to ship",
+    r"not available to ship",
+    re.IGNORECASE,
+)
+# Phrases that only mean the featured buybox is gone (often just buybox rotation to a
+# third-party seller), not that the item sold out. Production alert history showed
+# products flapping on these every few minutes; treating them as "confirmed OOS"
+# armed the short 10-minute re-alert cooldown and produced dozens of spam alerts
+# per day for a single ASIN. Still counts as OOS, but with weak evidence.
+_EXPLICIT_OOS_WEAK_RE = re.compile(
+    r"see all buying options|no featured offers",
+    re.IGNORECASE,
+)
+
+# Preorder pages look buyable (price + enabled "Pre-order Now" button) but are not
+# real restocks: allocation waves open/sell out repeatedly before release, which
+# produced dozens of repeated back_in_stock alerts for a single unreleased product.
+_PREORDER_RE = re.compile(
+    r"pre-?order|will be released|releases on|item has not been released",
     re.IGNORECASE,
 )
 
@@ -422,12 +440,14 @@ async def _extract_pdp_page_state_async(
     merchant_blob = ""
     shipping = ""
     image_url = None
+    is_preorder = False
     if not explicit_oos:
         merchant_blob, shipping, image_url = await asyncio.gather(
             _pdp_merchant_blob_async(page),
             _extract_pdp_shipping_async(page),
             _extract_pdp_image_async(page),
         )
+        is_preorder = await _detect_preorder_async(page, availability_text=availability_text)
 
     return {
         "availability_text": availability_text,
@@ -438,6 +458,7 @@ async def _extract_pdp_page_state_async(
         "merchant_blob": merchant_blob,
         "shipping": shipping,
         "image_url": image_url,
+        "is_preorder": is_preorder,
     }
 
 
@@ -550,11 +571,20 @@ def _extract_pdp_shipping(page) -> str:
     return "\n".join(lines)
 
 
-def _explicit_oos_from_text(text: str | None) -> bool:
+def _oos_text_level(text: str | None) -> str | None:
+    """Classify OOS evidence in a text blob: 'strong', 'weak' (buybox churn), or None."""
     if not text:
-        return False
+        return None
     clean = " ".join(str(text).split())
-    return bool(_EXPLICIT_OOS_RE.search(clean))
+    if _EXPLICIT_OOS_STRONG_RE.search(clean):
+        return "strong"
+    if _EXPLICIT_OOS_WEAK_RE.search(clean):
+        return "weak"
+    return None
+
+
+def _explicit_oos_from_text(text: str | None) -> bool:
+    return _oos_text_level(text) is not None
 
 
 async def _extract_availability_text_async(page: Any) -> str:
@@ -580,6 +610,30 @@ async def _extract_availability_text_async(page: Any) -> str:
         except Exception:
             continue
     return " ".join(parts)
+
+
+async def _detect_preorder_async(page: Any, *, availability_text: str) -> bool:
+    """True when the page is a preorder listing (release-date text or Pre-order button)."""
+    if _PREORDER_RE.search(availability_text or ""):
+        return True
+    for sel in ("#buy-now-button", "#add-to-cart-button"):
+        try:
+            el = await page.query_selector(sel)
+            if not el:
+                continue
+            blob = " ".join(
+                part
+                for part in (
+                    (await el.get_attribute("value")) or "",
+                    (await el.inner_text() or ""),
+                )
+                if part
+            )
+            if _PREORDER_RE.search(blob):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 async def _buybox_purchasable_async(page: Any) -> bool:
@@ -619,8 +673,9 @@ async def _detect_inferred_oos_async(
     Called only after price resolve failed and title exists — avoids marking empty/broken
     pages as OOS (those stay parse_failed).
     """
-    if _explicit_oos_from_text(availability_text):
-        return True, "explicit_oos_text"
+    level = _oos_text_level(availability_text)
+    if level:
+        return True, "explicit_oos_text" if level == "strong" else "buybox_unavailable_text"
     try:
         if await page.query_selector("#outOfStock"):
             return True, "outofstock_container"
@@ -628,8 +683,9 @@ async def _detect_inferred_oos_async(
         pass
 
     fresh_avail = await _extract_availability_text_async(page)
-    if _explicit_oos_from_text(fresh_avail):
-        return True, "explicit_oos_text"
+    level = _oos_text_level(fresh_avail)
+    if level:
+        return True, "explicit_oos_text" if level == "strong" else "buybox_unavailable_text"
 
     for sel in ("#qualifiedBuybox", "#desktop_buybox", "#buybox"):
         try:
@@ -637,8 +693,9 @@ async def _detect_inferred_oos_async(
             if not node:
                 continue
             blob = (await node.inner_text() or "")[:2500]
-            if _explicit_oos_from_text(blob):
-                return True, "explicit_oos_buybox_text"
+            level = _oos_text_level(blob)
+            if level:
+                return True, "explicit_oos_buybox_text" if level == "strong" else "buybox_unavailable_text"
         except Exception:
             continue
 
@@ -656,8 +713,9 @@ async def _detect_explicit_oos_async(page: Any, *, availability_text: str) -> tu
 
     If we can *explicitly* detect OOS, we return (True, reason). Otherwise (False, None).
     """
-    if _explicit_oos_from_text(availability_text):
-        return True, "explicit_oos_text"
+    level = _oos_text_level(availability_text)
+    if level:
+        return True, "explicit_oos_text" if level == "strong" else "buybox_unavailable_text"
     try:
         node = await page.query_selector("#outOfStock")
         if node:
@@ -1102,7 +1160,21 @@ async def _scrape_pdp_on_context(
                 await asyncio.to_thread(browser_factory.global_rate_limiter.acquire)
 
             url = f"https://www.amazon.com/dp/{asin}"
-            page = await context.new_page()
+            try:
+                page = await context.new_page()
+            except Exception as exc:
+                # new_page() is the first driver round-trip for this check. When the
+                # Chromium process/driver pipe has died, this is where it surfaces
+                # first (confirmed in production logs: "BrowserContext.new_page:
+                # Connection closed while reading from the driver"). Every other
+                # ASIN on this context will fail identically, so this must be raised
+                # as fatal (not swallowed into a per-ASIN skip row) so the engine
+                # recycles the session immediately instead of retrying forever.
+                if is_driver_disconnected_error(exc):
+                    raise BrowserDisconnected(
+                        f"Browser/driver connection lost opening page for {asin}: {exc}", exc
+                    ) from exc
+                raise
             merchant_blob = ""
             shipping = ""
             image_url = None
@@ -1135,6 +1207,14 @@ async def _scrape_pdp_on_context(
                     except Exception as e:
                         if _is_network_error(e):
                             raise NetworkAccessDenied(f"PDP network error for {asin}: {e}", e) from e
+                        if is_driver_disconnected_error(e):
+                            # A dead driver during goto() must be fatal like the
+                            # new_page() case — otherwise it degrades into a false
+                            # "navigation_failed" skip row while the session keeps
+                            # limping on a dead browser.
+                            raise BrowserDisconnected(
+                                f"Browser/driver connection lost navigating to {asin}: {e}", e
+                            ) from e
                         nav_error = e
                         if nav_try >= attempt or time.monotonic() - cycle_started > max_cycle_seconds:
                             break
@@ -1293,6 +1373,7 @@ async def _scrape_pdp_on_context(
                 )
                 if explicit_oos and explicit_reason:
                     row["stock_reason"] = explicit_reason
+                row["is_preorder"] = bool(state.get("is_preorder"))
                 elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
                 _attach_scrape_meta(
                     row,
@@ -1301,9 +1382,17 @@ async def _scrape_pdp_on_context(
                 )
                 await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
                 return idx, row
-            except NetworkAccessDenied:
+            except (NetworkAccessDenied, BrowserDisconnected):
                 raise
             except Exception as exc:
+                if is_driver_disconnected_error(exc):
+                    # Same fatal condition as the new_page() check above, just surfaced
+                    # later (e.g. mid-extraction "Page.title: Connection closed while
+                    # reading from the driver"). Must propagate as fatal too, or the
+                    # session keeps limping along issuing doomed per-ASIN retries.
+                    raise BrowserDisconnected(
+                        f"Browser/driver connection lost scraping {asin}: {exc}", exc
+                    ) from exc
                 LOGGER.info(
                     "PDP row parse failed asin=%s: %s (skipping update)",
                     asin,
@@ -1320,13 +1409,32 @@ async def _scrape_pdp_on_context(
                     scrape_elapsed_ms=elapsed_ms,
                 )
             finally:
-                await page.close()
+                # A close-time failure here (e.g. driver already disconnected) must
+                # never mask the try/except block's return value or its raised
+                # exception — Python replaces a pending return/raise with whatever
+                # a `finally` raises, which previously turned a graceful skip-row
+                # return into an unhandled "Page.close: Connection closed..." error
+                # (confirmed in logs, immediately after a "(skipping update)" line
+                # for the same ASIN). Best-effort close only; never re-raise here.
+                try:
+                    await page.close()
+                except Exception as close_exc:
+                    LOGGER.info(
+                        "PDP page close failed asin=%s (ignored): %s",
+                        asin,
+                        close_exc,
+                        extra={"channel": "debug"},
+                    )
 
     tasks = [worker(idx, asin) for idx, asin in enumerate(normalized)]
     gathered = await asyncio.gather(*tasks, return_exceptions=True)
 
     for item in gathered:
         if isinstance(item, NetworkAccessDenied):
+            raise item
+    for item in gathered:
+        if isinstance(item, BrowserDisconnected):
+            LOGGER.warning("pdp_watch browser disconnected (session will be recycled): %s", item)
             raise item
     for item in gathered:
         if isinstance(item, Exception):

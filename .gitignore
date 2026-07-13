@@ -1,3 +1,21 @@
 amazon_monitor/config.yaml
 __pycache__/
 *.pyc
+.venv/
+amazon_monitor/.venv/
+
+# Secrets
+amazon_monitor/.env
+.env
+
+# Runtime data (DBs, images, scrape dumps)
+amazon_monitor/data/
+
+# Logs
+amazon_monitor/logs/
+*.log
+*.log.*
+
+# Local DB backups
+*.db.bak
+*.pre-migrate.bak

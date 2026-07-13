@@ -15,7 +15,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import browser_factory
 from browser_factory import close_context, create_stealth_context
-from exceptions import CaptchaBlocked, NetworkAccessDenied
+from exceptions import BrowserDisconnected, CaptchaBlocked, NetworkAccessDenied, is_driver_disconnected_error
 from image_urls import pick_amazon_image_url
 from filter_pipeline import normalize_title_line
 from pdp_helpers import is_not_shippable_text
@@ -48,6 +48,25 @@ _SOFT_ERROR_TITLE_RE = re.compile(
 
 def _is_amazon_soft_error_title(title: str) -> bool:
     return bool(_SOFT_ERROR_TITLE_RE.search(title or ""))
+
+
+def _cache_busted_url(url: str) -> str:
+    """Append a fresh ``qid`` (epoch, Amazon's own SERP timestamp param) to vary the URL.
+
+    Production telemetry showed that when the soft-error interstitial appears, all
+    retries navigating to the byte-identical URL fail together — the throttle is
+    stateful per-URL/IP. Varying an innocuous param each retry avoids re-hitting
+    the exact cached/throttled entry. Any pre-existing ``qid`` is stripped first so
+    repeated calls (e.g. retry-of-a-retry) never stack multiple ``qid`` params,
+    which Amazon can treat as a malformed URL.
+    """
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    query.pop("qid", None)
+    new_query = urlencode(query, doseq=True)
+    fresh = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+    sep = "&" if "?" in fresh else "?"
+    return f"{fresh}{sep}qid={int(time.time())}"
 
 
 # Recognize the “internet is blocked/broken” kinds of failures so the monitor can pause and recover instead of just retrying a page forever.
@@ -113,9 +132,20 @@ def _extract_by_selectors(card, selectors: tuple[str, ...]) -> tuple[str, str | 
 
 # Get the product’s card price (as a number) by reading Amazon’s visible price elements on the search card.
 def _extract_price(card) -> float | None:
-    """List price from Amazon’s price UI only (`price-recipe` / `a-offscreen`). No whole-card scrape."""
+    """List price from Amazon’s price UI only (`price-recipe` / `a-offscreen`). No whole-card scrape.
+
+    ``span.a-price`` also wraps the struck-through "was" price in
+    ``span.a-price.a-text-price``. Try the current-price-only selector first
+    (excludes ``.a-text-price``) and only widen to the broader selector /
+    whole-card text (via ``card_list_price``) if that comes up empty.
+    """
     price_recipe = card.query_selector('[data-cy="price-recipe"]')
     if price_recipe:
+        for off in price_recipe.query_selector_all("span.a-price:not(.a-text-price) span.a-offscreen"):
+            raw = (off.inner_text() or "").strip()
+            value = card_list_price(raw)
+            if value is not None:
+                return value
         for off in price_recipe.query_selector_all("span.a-price span.a-offscreen"):
             raw = (off.inner_text() or "").strip()
             value = card_list_price(raw)
@@ -126,7 +156,11 @@ def _extract_price(card) -> float | None:
         if value is not None:
             return value
 
-    for selector in ("span.a-price span.a-offscreen", "span[data-a-color='base'] span.a-offscreen"):
+    for selector in (
+        "span.a-price:not(.a-text-price) span.a-offscreen",
+        "span.a-price span.a-offscreen",
+        "span[data-a-color='base'] span.a-offscreen",
+    ):
         node = card.query_selector(selector)
         if not node:
             continue
@@ -537,6 +571,13 @@ def _serp_captcha_or_raise(page, source: str) -> None:
             raise
         except PlaywrightError as exc:
             msg = str(exc)
+            # Check the tolerant, page-level retry FIRST: these specific messages
+            # are benign races (context torn down mid-check, page/tab closed just
+            # before this call) that clear on their own within a couple of local
+            # retries. Only fall through to the driver-disconnect check below for
+            # anything that doesn't match one of these known-benign shapes, so a
+            # real dead-driver condition still escalates but a benign hiccup never
+            # gets misrouted into tearing down the whole browser session.
             if "Execution context was destroyed" in msg or "Target closed" in msg or "Target page" in msg:
                 last_err = exc
                 LOGGER.debug(
@@ -548,6 +589,10 @@ def _serp_captcha_or_raise(page, source: str) -> None:
                 )
                 time.sleep(0.35 * (attempt + 1))
                 continue
+            if is_driver_disconnected_error(exc):
+                raise BrowserDisconnected(
+                    f"Browser/driver connection lost checking captcha for {source}: {exc}", exc
+                ) from exc
             raise
     if last_err is not None:
         raise last_err
@@ -599,17 +644,28 @@ def _wait_serp_result_cards(
                 type(exc).__name__,
                 browser_factory.NAV_WAIT_UNTIL,
             )
-            time.sleep(random.uniform(0.5, 1.5))
+            # Amazon's "Sorry! Something went wrong" interstitial has been observed
+            # in production logs firing on many *consecutive* AES cycles in a row
+            # (a transient condition, not a permanent block); a short randomized
+            # delay before re-navigating (scaled up slightly on later rounds) gives
+            # the per-URL/IP throttle window more time to clear instead of
+            # hammering an identical retry immediately.
+            time.sleep(random.uniform(0.5, 1.5) * (round_idx + 1))
             try:
-                page.goto(current_url, wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=goto_timeout_ms)
+                page.goto(_cache_busted_url(current_url), wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=goto_timeout_ms)
                 LOGGER.info(
                     "SERP navigation committed source=%s round=%s/%s url=%s",
                     source,
                     round_idx + 1,
                     total_rounds,
                     current_url,
+                    extra={"channel": "debug"},
                 )
             except Exception as e:
+                if is_driver_disconnected_error(e):
+                    raise BrowserDisconnected(
+                        f"Browser/driver connection lost during SERP recovery round {round_idx + 1}: {e}", e
+                    ) from e
                 if _is_network_error(e):
                     raise NetworkAccessDenied(
                         f"Network error during SERP recovery round {round_idx + 1}: {e}",
@@ -645,7 +701,12 @@ def _scrape_single_attempt_on_context(
     page_meta_first: dict[str, Any] = {}
     cards_page1 = 0
 
-    page = context.new_page()
+    try:
+        page = context.new_page()
+    except Exception as exc:
+        if is_driver_disconnected_error(exc):
+            raise BrowserDisconnected(f"Browser/driver connection lost opening SERP page: {exc}", exc) from exc
+        raise
     try:
         page_num = 1
         while True:
@@ -669,10 +730,13 @@ def _scrape_single_attempt_on_context(
                 total_pages_cap,
                 current_url,
                 browser_factory.NAV_WAIT_UNTIL,
+                extra={"channel": "debug"},
             )
             try:
                 page.goto(current_url, wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=45000)
             except Exception as e:
+                if is_driver_disconnected_error(e):
+                    raise BrowserDisconnected(f"Browser/driver connection lost navigating SERP page {page_num}: {e}", e) from e
                 if _is_network_error(e):
                     raise NetworkAccessDenied(f"Network error on page {page_num}: {e}", e)
                 LOGGER.warning(
@@ -687,6 +751,7 @@ def _scrape_single_attempt_on_context(
                 "SERP navigation committed source=%s page=%s; stabilizing DOM",
                 source,
                 page_num,
+                extra={"channel": "debug"},
             )
             _serp_stabilize_page(page)
             _serp_captcha_or_raise(page, source)
@@ -732,6 +797,7 @@ def _scrape_single_attempt_on_context(
                     pagination_mode,
                     total_pages_cap,
                     page_meta_first,
+                    extra={"channel": "debug"},
                 )
 
             if html_dump_dir is not None:
@@ -741,7 +807,7 @@ def _scrape_single_attempt_on_context(
                 out_path = dump_dir / f"{safe_source}_page{page_num}_raw.html"
                 try:
                     out_path.write_text(html, encoding="utf-8")
-                    LOGGER.info("Wrote raw search page HTML to %s", out_path)
+                    LOGGER.info("Wrote raw search page HTML to %s", out_path, extra={"channel": "debug"})
                 except OSError as exc:
                     LOGGER.warning("Failed to write raw search HTML %s: %s", out_path, exc)
 
@@ -803,12 +869,15 @@ def _scrape_single_attempt_on_context(
             next_btn = page.query_selector("a.s-pagination-next")
             disabled = (next_btn.get_attribute("aria-disabled") if next_btn else "true") == "true"
             if not next_btn or disabled:
-                LOGGER.info("Stopping pagination: no next page (page=%s)", page_num)
+                LOGGER.info("Stopping pagination: no next page (page=%s)", page_num, extra={"channel": "debug"})
                 break
             page_num += 1
             time.sleep(random.uniform(pagination_delay_range[0], pagination_delay_range[1]))
     finally:
-        page.close()
+        try:
+            page.close()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("SERP page close failed source=%s (ignored): %s", source, exc)
 
     total_result_count = page_meta_first.get("totalResultCount")
     debug_data["scrape_outcome"] = {
@@ -892,7 +961,14 @@ def scrape_search(
     last_error: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
-            LOGGER.info("Scrape attempt %s/%s for %s mode=%s", attempt + 1, max_retries + 1, source, scrape_mode)
+            LOGGER.info(
+                "Scrape attempt %s/%s for %s mode=%s",
+                attempt + 1,
+                max_retries + 1,
+                source,
+                scrape_mode,
+                extra={"channel": "debug"},
+            )
             return _scrape_single_attempt(
                 search_url,
                 source,
@@ -1000,8 +1076,14 @@ async def _extract_title_async(card) -> str:
 
 
 async def _extract_price_async(card) -> float | None:
+    """Async twin of ``_extract_price``: prefer the current-price-only selector (excludes ``.a-text-price``)."""
     price_recipe = await card.query_selector('[data-cy="price-recipe"]')
     if price_recipe:
+        for off in await price_recipe.query_selector_all("span.a-price:not(.a-text-price) span.a-offscreen"):
+            raw = (await off.inner_text() or "").strip()
+            value = card_list_price(raw)
+            if value is not None:
+                return value
         for off in await price_recipe.query_selector_all("span.a-price span.a-offscreen"):
             raw = (await off.inner_text() or "").strip()
             value = card_list_price(raw)
@@ -1012,7 +1094,11 @@ async def _extract_price_async(card) -> float | None:
         if value is not None:
             return value
 
-    for selector in ("span.a-price span.a-offscreen", "span[data-a-color='base'] span.a-offscreen"):
+    for selector in (
+        "span.a-price:not(.a-text-price) span.a-offscreen",
+        "span.a-price span.a-offscreen",
+        "span[data-a-color='base'] span.a-offscreen",
+    ):
         node = await card.query_selector(selector)
         if not node:
             continue
@@ -1298,6 +1384,13 @@ async def _serp_captcha_or_raise_async(page, source: str) -> None:
             raise
         except PlaywrightError as exc:
             msg = str(exc)
+            # Check the tolerant, page-level retry FIRST (see sync twin in
+            # _serp_captcha_or_raise for the full rationale): these specific
+            # messages are benign races that clear on their own within a
+            # couple of local retries, and must get first chance before the
+            # driver-disconnect escalation below, since Playwright can use
+            # overlapping generic wording for both a dead driver and a
+            # benign page-level race.
             if "Execution context was destroyed" in msg or "Target closed" in msg or "Target page" in msg:
                 last_err = exc
                 LOGGER.debug(
@@ -1309,6 +1402,14 @@ async def _serp_captcha_or_raise_async(page, source: str) -> None:
                 )
                 await asyncio.sleep(0.35 * (attempt + 1))
                 continue
+            if is_driver_disconnected_error(exc):
+                # A dead driver connection will never clear by retrying with a
+                # short sleep (confirmed: it fails identically on every call
+                # until the whole session is recycled), so raise fatal
+                # immediately instead of burning the 3-attempt retry budget.
+                raise BrowserDisconnected(
+                    f"Browser/driver connection lost checking captcha for {source}: {exc}", exc
+                ) from exc
             raise
     if last_err is not None:
         raise last_err
@@ -1358,17 +1459,27 @@ async def _wait_serp_result_cards_async(
                 type(exc).__name__,
                 browser_factory.NAV_WAIT_UNTIL,
             )
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            # Amazon's "Sorry! Something went wrong" interstitial has been observed
+            # in production logs firing on many *consecutive* AES cycles in a row
+            # (a transient condition, not a permanent block); backing off longer on
+            # later rounds gives it more time to clear instead of hammering an
+            # identical retry immediately.
+            await asyncio.sleep(random.uniform(0.5, 1.5) * (round_idx + 1))
             try:
-                await page.goto(current_url, wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=goto_timeout_ms)
+                await page.goto(_cache_busted_url(current_url), wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=goto_timeout_ms)
                 LOGGER.info(
                     "SERP navigation committed source=%s round=%s/%s url=%s",
                     source,
                     round_idx + 1,
                     total_rounds,
                     current_url,
+                    extra={"channel": "debug"},
                 )
             except Exception as e:
+                if is_driver_disconnected_error(e):
+                    raise BrowserDisconnected(
+                        f"Browser/driver connection lost during SERP recovery round {round_idx + 1}: {e}", e
+                    ) from e
                 if _is_network_error(e):
                     raise NetworkAccessDenied(
                         f"Network error during SERP recovery round {round_idx + 1}: {e}",
@@ -1404,7 +1515,19 @@ async def _scrape_single_attempt_on_context_async(
     page_meta_first: dict[str, Any] = {}
     cards_page1 = 0
 
-    page = await context.new_page()
+    try:
+        page = await context.new_page()
+    except Exception as exc:
+        # Same fatal driver-disconnect condition documented in pdp_scraper.py's
+        # worker(): once this fires here, PDP checks on the same context are
+        # failing identically (confirmed together in logs, e.g. "AES/SERP scrape
+        # failed... BrowserContext.new_page: Connection closed while reading from
+        # the driver" alongside PDP "check failed... BrowserContext.new_page:
+        # ..." during the same outage window). Must propagate as fatal so the
+        # engine recycles the session instead of silently losing this AES cycle.
+        if is_driver_disconnected_error(exc):
+            raise BrowserDisconnected(f"Browser/driver connection lost opening SERP page: {exc}", exc) from exc
+        raise
     try:
         page_num = 1
         while True:
@@ -1428,10 +1551,13 @@ async def _scrape_single_attempt_on_context_async(
                 total_pages_cap,
                 current_url,
                 browser_factory.NAV_WAIT_UNTIL,
+                extra={"channel": "debug"},
             )
             try:
                 await page.goto(current_url, wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=45000)
             except Exception as e:
+                if is_driver_disconnected_error(e):
+                    raise BrowserDisconnected(f"Browser/driver connection lost navigating SERP page {page_num}: {e}", e) from e
                 if _is_network_error(e):
                     raise NetworkAccessDenied(f"Network error on page {page_num}: {e}", e)
                 LOGGER.warning(
@@ -1446,6 +1572,7 @@ async def _scrape_single_attempt_on_context_async(
                 "SERP navigation committed source=%s page=%s; stabilizing DOM",
                 source,
                 page_num,
+                extra={"channel": "debug"},
             )
             await _serp_stabilize_page_async(page)
             await _serp_captcha_or_raise_async(page, source)
@@ -1492,6 +1619,7 @@ async def _scrape_single_attempt_on_context_async(
                     pagination_mode,
                     total_pages_cap,
                     page_meta_first,
+                    extra={"channel": "debug"},
                 )
 
             if html_dump_dir is not None:
@@ -1501,7 +1629,7 @@ async def _scrape_single_attempt_on_context_async(
                 out_path = dump_dir / f"{safe_source}_page{page_num}_raw.html"
                 try:
                     out_path.write_text(html, encoding="utf-8")
-                    LOGGER.info("Wrote raw search page HTML to %s", out_path)
+                    LOGGER.info("Wrote raw search page HTML to %s", out_path, extra={"channel": "debug"})
                 except OSError as exc:
                     LOGGER.warning("Failed to write raw search HTML %s: %s", out_path, exc)
 
@@ -1563,12 +1691,19 @@ async def _scrape_single_attempt_on_context_async(
             next_btn = await page.query_selector("a.s-pagination-next")
             disabled = ((await next_btn.get_attribute("aria-disabled")) if next_btn else "true") == "true"
             if not next_btn or disabled:
-                LOGGER.info("Stopping pagination: no next page (page=%s)", page_num)
+                LOGGER.info("Stopping pagination: no next page (page=%s)", page_num, extra={"channel": "debug"})
                 break
             page_num += 1
             await asyncio.sleep(random.uniform(pagination_delay_range[0], pagination_delay_range[1]))
     finally:
-        await page.close()
+        # Best-effort close: a close-time failure (driver already gone) must not
+        # discard a scrape that already succeeded, nor mask a real exception
+        # raised above (Python replaces a pending return/raise with whatever a
+        # `finally` block raises).
+        try:
+            await page.close()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("SERP page close failed source=%s (ignored): %s", source, exc)
 
     total_result_count = page_meta_first.get("totalResultCount")
     debug_data["scrape_outcome"] = {

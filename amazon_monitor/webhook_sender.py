@@ -179,14 +179,24 @@ def send_alert(alert_dict: dict[str, Any], config: dict[str, Any]) -> None:
         "message": _format_message(payload, config),
     }
     image_url = alert_dict.get("image_url")
+    has_image = False
     if asin:
         cached = image_cache.ensure_cached_image(str(asin), image_url, config)
         if cached and cached.is_file():
             wa_payload["image_path"] = str(cached.resolve())
+            has_image = True
         elif isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
             wa_payload["image_url"] = image_url
+            has_image = True
     elif isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
         wa_payload["image_url"] = image_url
+        has_image = True
+    if not has_image:
+        LOGGER.warning(
+            "Alert has no image (asin=%s, type=%s): no cached file and no usable image_url.",
+            asin,
+            alert_dict.get("type"),
+        )
     _post_wa(config, wa_payload)
 
 

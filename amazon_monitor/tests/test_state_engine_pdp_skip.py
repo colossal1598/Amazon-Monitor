@@ -161,20 +161,22 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=19.99)
-                alerts, _ = se.process_pdp_watch_candidates(
-                    [
-                        {
-                            "asin": "B011111111",
-                            "title": "Pokemon Card",
-                            "price": None,
-                            "in_stock": False,
-                            "shipping_text": "",
-                            "image_url": None,
-                            "seller": "pdp_watch",
-                        }
-                    ],
-                    {"B011111111"},
-                )
+                oos_row = {
+                    "asin": "B011111111",
+                    "title": "Pokemon Card",
+                    "price": None,
+                    "in_stock": False,
+                    "shipping_text": "",
+                    "image_url": None,
+                    "seller": "pdp_watch",
+                }
+                # Weak-evidence OOS (no strong stock_reason) is debounced: the first
+                # observation keeps in_stock=1, the second consecutive one flips.
+                alerts, _ = se.process_pdp_watch_candidates([dict(oos_row)], {"B011111111"})
+                self.assertEqual(alerts, [])
+                stock_first, _price_first = _stock_and_price(se, "B011111111")
+                self.assertEqual(stock_first, 1)
+                alerts, _ = se.process_pdp_watch_candidates([dict(oos_row)], {"B011111111"})
                 self.assertEqual(alerts, [])
                 stock, price, last_seen = _stock_price_seen(se, "B011111111")
                 self.assertEqual(stock, 0)
@@ -201,22 +203,21 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 _seed_row(se, "B011111111", in_stock=1, price=19.99)
-                alerts, _ = se.process_pdp_watch_candidates(
-                    [
-                        {
-                            "asin": "B011111111",
-                            "title": "Pokemon Card",
-                            "price": None,
-                            "in_stock": False,
-                            "shipping_text": "",
-                            "image_url": None,
-                            "seller": "pdp_watch",
-                            "stock_confidence": "confirmed_out",
-                            "stock_reason": "no_pay_price",
-                        }
-                    ],
-                    {"B011111111"},
-                )
+                oos_row = {
+                    "asin": "B011111111",
+                    "title": "Pokemon Card",
+                    "price": None,
+                    "in_stock": False,
+                    "shipping_text": "",
+                    "image_url": None,
+                    "seller": "pdp_watch",
+                    "stock_confidence": "confirmed_out",
+                    "stock_reason": "no_pay_price",
+                }
+                # no_pay_price is weak evidence: debounced over two consecutive scrapes.
+                alerts, _ = se.process_pdp_watch_candidates([dict(oos_row)], {"B011111111"})
+                self.assertEqual(alerts, [])
+                alerts, _ = se.process_pdp_watch_candidates([dict(oos_row)], {"B011111111"})
                 self.assertEqual(alerts, [])
                 stock, price = _stock_and_price(se, "B011111111")
                 self.assertEqual(stock, 0)
