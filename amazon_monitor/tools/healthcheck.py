@@ -72,6 +72,12 @@ def main() -> int:
         "heartbeat": timedelta(minutes=40),
     }
 
+    # A freshly (re)started monitor legitimately has no heartbeat success yet:
+    # the first heartbeat only fires 30 minutes after boot. Use the stream job's
+    # start time as the process boot marker and don't page about a job that
+    # "never succeeded" until it has had at least its own max_age to succeed.
+    boot_at = parse_dt(jobs.get("stream", {}).get("last_started_at"))
+
     failed = []
     for job, max_age in limits.items():
         info = jobs.get(job, {})
@@ -79,6 +85,8 @@ def main() -> int:
         error_at = parse_dt(info.get("last_error_at"))
         error = info.get("last_error_message")
         if success is None:
+            if boot_at is not None and now - boot_at <= max_age:
+                continue
             failed.append(f"{job}: never succeeded")
             continue
         if now - success > max_age:

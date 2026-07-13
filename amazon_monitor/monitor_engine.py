@@ -332,6 +332,10 @@ class MonitorEngine:
         if self._meter is not None:
             self._meter_baseline = self._meter.totals()
             self._meter.set_phase("pdp")
+            # The body-read budget is meant to be per-cycle; without this reset it
+            # was exhausted during the first sweep of a session and every later
+            # sweep undercounted to near-zero (observed: 316 KB then 0.9 KB).
+            self._meter.reset_cycle_budget()
         self._cycle_id = self.telemetry.begin_cycle(self.config)
         self._sweep_started = time.monotonic()
         self._sweep_checks = 0
@@ -684,6 +688,24 @@ class MonitorEngine:
                             stop.set()
                         finally:
                             self._meter.set_phase("pdp")
+                        # Amazon's SERP soft-error throttle is session-scoped:
+                        # production logs on 2026-07-13 show a 6-cycle fail streak
+                        # (~25 min blind) that cleared on the very next attempt
+                        # after the scheduled 30-min browser recycle. Once the
+                        # streak shows the throttle is stuck, proactively recycle
+                        # the session instead of waiting out the timer. Guarded on
+                        # session age so a persistent block can't thrash-relaunch.
+                        recycle_streak = max(2, int(self.config.get("aes_recycle_fail_streak", 2)))
+                        if (
+                            self._aes_fail_streak >= recycle_streak
+                            and now - session_started >= 300
+                        ):
+                            LOGGER.warning(
+                                "AES fail streak %s >= %s; recycling browser session to clear SERP soft-block.",
+                                self._aes_fail_streak,
+                                recycle_streak,
+                            )
+                            stop.set()
                     # Planned recycle: finish current checks, relaunch fresh browser.
                     if now - session_started >= recycle_after:
                         LOGGER.info("Recycling browser after %.0f min.", (now - session_started) / 60, extra={"channel": "lifecycle"})

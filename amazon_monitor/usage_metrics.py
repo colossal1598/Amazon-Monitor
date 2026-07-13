@@ -216,6 +216,10 @@ class BandwidthMeter:
     def _max_body_reads(self) -> int:
         return int(self._config.get("bandwidth_meter_max_body_reads_per_cycle", 200))
 
+    def reset_cycle_budget(self) -> None:
+        """Reset the per-cycle body-read budget (call at each sweep start)."""
+        self._body_reads = 0
+
     def _bucket_key(self, url: str) -> str:
         amazon = _is_amazon_url(url)
         if self._phase == "aes":
