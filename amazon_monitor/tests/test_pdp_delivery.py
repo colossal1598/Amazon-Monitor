@@ -34,6 +34,16 @@ class TestPdpDelivery(unittest.TestCase):
         """Without any delivery/shipping keyword nearby, keep the previous first-match behavior."""
         self.assertEqual(_paid_delivery_price_tail("$12.44 $9.99"), "$12.44")
 
+    def test_date_only_delivery_line_is_omitted(self) -> None:
+        """Real SERP regression: a date-only estimate carries no cost info and must not
+        be echoed into the WhatsApp message ("משלוח: Delivery Thu, Jul 30")."""
+        self.assertEqual(_paid_delivery_price_tail("Delivery Thu, Jul 30"), "")
+        self.assertEqual(shipping_display_hebrew("Delivery Thu, Jul 30"), "")
+
+    def test_priced_line_preferred_over_date_only_line(self) -> None:
+        text = "Delivery Thu, Jul 30\n$4.99 shipping"
+        self.assertEqual(shipping_display_hebrew(text), "משלוח: $4.99")
+
     def test_paid_delivery_does_not_disqualify_allowed_seller(self) -> None:
         row = _pdp_row(
             "B012345678",

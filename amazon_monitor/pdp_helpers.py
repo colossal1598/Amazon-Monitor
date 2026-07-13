@@ -107,10 +107,15 @@ def _pick_delivery_price_match(line: str, matches: list[re.Match[str]]) -> re.Ma
 
 
 def _paid_delivery_price_tail(line: str) -> str:
-    """Return a compact paid-delivery price when the delivery line exposes one."""
+    """Return a compact paid-delivery price when the delivery line exposes one.
+
+    Returns "" when the line carries no currency amount at all (e.g. SERP cards
+    that only show a date estimate like "Delivery Thu, Jul 30") — echoing the
+    raw line produced nonsense WhatsApp output like "משלוח: Delivery Thu, Jul 30".
+    """
     matches = list(_CURRENCY_RE.finditer(line))
     if not matches:
-        return line.strip()
+        return ""
     match = _pick_delivery_price_match(line, matches)
     token = re.sub(r"\s+", "", match.group(1))
     return re.sub(r"(?i)^ils:?", "", token).strip(":")
@@ -132,6 +137,9 @@ def shipping_display_hebrew(shipping_text: str | None) -> str:
         for line in lines
         if re.search(r"delivery|shipping|ship|arrives|import charges|₪|\$|ils", line, re.IGNORECASE)
     ]
-    picked = delivery_lines[0] if delivery_lines else lines[0]
+    # Prefer a delivery line that actually carries an amount; a date-only line
+    # ("Delivery Thu, Jul 30") says nothing about the shipping cost.
+    priced_lines = [line for line in delivery_lines if _CURRENCY_RE.search(line)]
+    picked = priced_lines[0] if priced_lines else (delivery_lines[0] if delivery_lines else lines[0])
     tail = _paid_delivery_price_tail(picked)
     return f"משלוח: {tail}" if tail else ""
