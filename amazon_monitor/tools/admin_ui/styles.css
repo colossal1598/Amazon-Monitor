@@ -657,8 +657,15 @@ button:focus-visible {
 .save-bar {
   position: fixed;
   bottom: 18px;
-  inset-inline-start: 50%;
-  transform: translateX(-50%);
+  /* Physical left/right + auto margins center correctly in both LTR and RTL.
+     The previous inset-inline-start:50% + translateX(-50%) combo resolved to
+     right:50% in RTL, shoving the bar off the left edge on narrow screens. */
+  left: 12px;
+  right: 12px;
+  margin-left: auto;
+  margin-right: auto;
+  width: fit-content;
+  max-width: calc(100% - 24px);
   display: flex;
   align-items: center;
   gap: 16px;
@@ -869,6 +876,12 @@ button:focus-visible {
   .save-bar {
     width: calc(100% - 24px);
     justify-content: space-between;
+    flex-wrap: wrap;
+    border-radius: 18px;
+  }
+
+  .save-bar-actions {
+    margin-inline-start: auto;
   }
 
   .add-row input[maxlength="10"] {

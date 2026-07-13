@@ -47,8 +47,11 @@ ROOT = _ROOT
 CONFIG_PATH = ROOT / "config.yaml"
 STATIC_DIR = ROOT / "tools" / "admin_ui"
 
+# Bind host/port. Overridable via .env (ADMIN_UI_HOST / ADMIN_UI_PORT) so the
+# UI can sit on a Tailscale-funnel-compatible port (443/8443/10000) without
+# code changes. Funnel proxies to localhost, so 127.0.0.1 stays the right bind.
 HOST = "127.0.0.1"
-PORT = 80
+PORT = 8443
 
 SQLITE_WEB_HOST = "127.0.0.1"
 SQLITE_WEB_PORT = 8768
@@ -657,8 +660,16 @@ def main() -> int:
     db_path = _resolve_db_path(_load_bootstrap_config())
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    server = create_server(db_path=db_path, admin_user=admin_user, admin_password=admin_password)
-    admin_url = f"http://{HOST}" if PORT == 80 else f"http://{HOST}:{PORT}"
+    host = os.environ.get("ADMIN_UI_HOST", "").strip() or HOST
+    try:
+        port = int(os.environ.get("ADMIN_UI_PORT", "").strip() or PORT)
+    except ValueError:
+        port = PORT
+
+    server = create_server(
+        host=host, port=port, db_path=db_path, admin_user=admin_user, admin_password=admin_password
+    )
+    admin_url = f"http://{host}" if port == 80 else f"http://{host}:{port}"
     LOG.info("Admin UI running at %s", admin_url)
     LOG.info(
         "sqlite-web is exposed only locally at http://%s:%s and auto-stops after %ss",
