@@ -173,6 +173,12 @@ class RingScheduler:
         self.interval = max(10.0, float(interval_seconds))
         self.next_due: dict[str, float] = {}
         self.checked_out: set[str] = set()
+        # ASINs on a short fast-retry override. Under saturation (real cycle time
+        # >= interval) every ASIN is overdue, so a plain most-overdue pop_due can
+        # NEVER hand back a freshly fast-retried ASIN before a full ring pass: the
+        # short override makes it the LEAST overdue, so it always loses the
+        # most-overdue contest. Preempting for hot ASINs restores the 15s cadence.
+        self.hot: set[str] = set()
 
     def update_watch_list(self, watch: list[str], now: float) -> None:
         current = set(watch)
@@ -180,26 +186,44 @@ class RingScheduler:
             if asin not in current:
                 del self.next_due[asin]
                 self.checked_out.discard(asin)
+                self.hot.discard(asin)
         new_asins = [a for a in watch if a not in self.next_due]
         for idx, asin in enumerate(new_asins):
             # Stagger new arrivals across one interval.
             self.next_due[asin] = now + (idx * self.interval / max(1, len(new_asins)))
 
     def pop_due(self, now: float) -> str | None:
-        """Most-overdue due ASIN not currently being checked, or None."""
+        """Most-overdue due ASIN not currently being checked, or None.
+
+        Hot (fast-retried) ASINs are preempted first: a short interval_override is
+        worthless under a saturated ring unless it wins the pop, so hot ASINs get
+        their own most-overdue contest before the normal scan.
+        """
+        best = self._most_overdue(now, self.hot)
+        if best is None:
+            best = self._most_overdue(now, None)
+        if best is not None:
+            self.checked_out.add(best)
+        return best
+
+    def _most_overdue(self, now: float, only: set[str] | None) -> str | None:
         best: str | None = None
         best_due = float("inf")
         for asin, due in self.next_due.items():
             if asin in self.checked_out or due > now:
                 continue
+            if only is not None and asin not in only:
+                continue
             if due < best_due:
                 best, best_due = asin, due
-        if best is not None:
-            self.checked_out.add(best)
         return best
 
     def complete(self, asin: str, now: float, interval_override: float | None = None) -> None:
         self.checked_out.discard(asin)
+        if interval_override is not None:
+            self.hot.add(asin)
+        else:
+            self.hot.discard(asin)
         if asin in self.next_due:
             # interval_override lets the engine schedule a short fast re-check (e.g.
             # after a no_pay_price/priceless_purchasable miss) instead of waiting the

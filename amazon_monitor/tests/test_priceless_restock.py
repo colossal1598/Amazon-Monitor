@@ -74,6 +74,17 @@ def _seed(
     se.conn.commit()
 
 
+def _insert_prior_alert(se: StateEngine, asin: str, *, minutes_ago: int) -> None:
+    se.conn.execute(
+        """
+        INSERT INTO alerts (asin, alert_type, source, old_price, new_price, sent_at)
+        VALUES (?, 'back_in_stock', 'pdp_watch', NULL, 19.99, ?)
+        """,
+        (asin, (utc_now() - timedelta(minutes=minutes_ago)).isoformat()),
+    )
+    se.conn.commit()
+
+
 def _row(se: StateEngine, asin: str):
     return se.conn.execute(
         "SELECT in_stock, price, priceless_streak, last_stock_alert FROM products WHERE asin = ?",
@@ -229,6 +240,74 @@ class TestPricelessRestock(unittest.TestCase):
                 self.assertEqual(alerts, [])
                 # Suppressed, not consumed: row stays OOS so it can fire once cooldown clears.
                 self.assertEqual(int(_row(se, asin)["in_stock"]), 0)
+            finally:
+                se.conn.close()
+
+    def test_priceless_cooldown_suppresses_over_short_confirmed_cooldown(self) -> None:
+        # Production case: an oscillating preorder page flips OOS via seller_mismatch
+        # streaks which set last_oos_confirmed=1, so priceless restocks ride the SHORT
+        # confirmed cooldown (10 min) and re-spam ~12 min apart. A prior back_in_stock
+        # 15 min ago clears the confirmed cooldown but is still inside the 30-min
+        # priceless cooldown, so ONLY the dedicated gate suppresses it here.
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            tel = _FakeTelemetry()
+            try:
+                asin = "B011111111"
+                _seed(se, asin, in_stock=0, last_oos_confirmed=1)
+                _insert_prior_alert(se, asin, minutes_ago=15)
+                se.process_pdp_watch_candidates(
+                    [_priceless_row(asin)], {asin}, config=_CONFIG, telemetry=tel, cycle_id=1
+                )
+                alerts, _ = se.process_pdp_watch_candidates(
+                    [_priceless_row(asin)], {asin}, config=_CONFIG, telemetry=tel, cycle_id=1
+                )
+                self.assertEqual(alerts, [])
+                # Not flipped, and streak left intact so it keeps confirming.
+                row = _row(se, asin)
+                self.assertEqual(int(row["in_stock"]), 0)
+                self.assertGreaterEqual(int(row["priceless_streak"]), 2)
+                self.assertIn(
+                    "priceless_alert_cooldown_suppressed", [e[0] for e in tel.events]
+                )
+            finally:
+                se.conn.close()
+
+    def test_priceless_cooldown_zero_bypasses_gate(self) -> None:
+        # cooldown=0 disables the dedicated gate: with the confirmed cooldown cleared
+        # (prior alert 15 min ago, last_oos_confirmed=1 -> 10-min cooldown), the alert
+        # fires exactly as before this change.
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            config = dict(_CONFIG, pdp_priceless_alert_cooldown_minutes=0)
+            try:
+                asin = "B011111111"
+                _seed(se, asin, in_stock=0, last_oos_confirmed=1)
+                _insert_prior_alert(se, asin, minutes_ago=15)
+                se.process_pdp_watch_candidates([_priceless_row(asin)], {asin}, config=config)
+                alerts, _ = se.process_pdp_watch_candidates(
+                    [_priceless_row(asin)], {asin}, config=config
+                )
+                self.assertEqual([a["type"] for a in alerts], ["back_in_stock"])
+                self.assertEqual(int(_row(se, asin)["in_stock"]), 1)
+            finally:
+                se.conn.close()
+
+    def test_priceless_alerts_when_prior_alert_older_than_cooldown(self) -> None:
+        # Prior back_in_stock 45 min ago is beyond both the 30-min priceless cooldown
+        # and the 10-min confirmed cooldown, so the priceless alert fires normally.
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                asin = "B011111111"
+                _seed(se, asin, in_stock=0, last_oos_confirmed=1)
+                _insert_prior_alert(se, asin, minutes_ago=45)
+                se.process_pdp_watch_candidates([_priceless_row(asin)], {asin}, config=_CONFIG)
+                alerts, _ = se.process_pdp_watch_candidates(
+                    [_priceless_row(asin)], {asin}, config=_CONFIG
+                )
+                self.assertEqual([a["type"] for a in alerts], ["back_in_stock"])
+                self.assertEqual(int(_row(se, asin)["in_stock"]), 1)
             finally:
                 se.conn.close()
 

@@ -444,6 +444,12 @@ class StateEngine:
             priceless_confirm_checks = max(1, int((config or {}).get("pdp_priceless_confirm_checks", 2)))
         except (TypeError, ValueError):
             priceless_confirm_checks = 2
+        try:
+            priceless_alert_cooldown_minutes = max(
+                0, int((config or {}).get("pdp_priceless_alert_cooldown_minutes", 30))
+            )
+        except (TypeError, ValueError):
+            priceless_alert_cooldown_minutes = 30
         # Default OFF: the preorder->preorder re-alert suppression gate is removed. It
         # predates the pdp_oos_confirm_cycles debounce and now silently consumes real
         # allocation-wave restocks (see the gate comment below). Flip this on only to
@@ -577,7 +583,37 @@ class StateEngine:
                             and old_preorder
                             and not bool(row["last_oos_confirmed"])
                         )
-                        if old_stock == 0 and new_streak >= priceless_confirm_checks and not preorder_suppressed:
+                        # Dedicated cooldown for the price-less path only. A price-less
+                        # alert is a low-information nudge; if the client already got ANY
+                        # back_in_stock for this ASIN in the last N minutes, a second
+                        # price-less one adds nothing. This matters because seller_mismatch
+                        # OOS streaks set last_oos_confirmed=1 (C9), so an oscillating
+                        # preorder page would otherwise ride the SHORT confirmed cooldown
+                        # and re-spam every ~12 min. A PRICED alert must NOT be blocked by
+                        # this gate — it applies only here, so once the price resolves the
+                        # normal priced path alerts under its own cooldowns.
+                        priceless_prior = None
+                        if (
+                            old_stock == 0
+                            and new_streak >= priceless_confirm_checks
+                            and not preorder_suppressed
+                            and priceless_alert_cooldown_minutes > 0
+                        ):
+                            priceless_prior = self._recent_stock_alert(
+                                asin, "back_in_stock", priceless_alert_cooldown_minutes
+                            )
+                        if priceless_prior is not None:
+                            # Recent back_in_stock exists: skip the price-less alert and do
+                            # NOT flip in_stock. Leave the streak as-is so it keeps
+                            # confirming; when the price finally resolves the priced path
+                            # takes over.
+                            _tel(
+                                "priceless_alert_cooldown_suppressed",
+                                asin=asin,
+                                streak=new_streak,
+                                prior_sent_at=priceless_prior["sent_at"],
+                            )
+                        elif old_stock == 0 and new_streak >= priceless_confirm_checks and not preorder_suppressed:
                             alert = self._emit_stock_alert_if_allowed(
                                 alert_type="back_in_stock",
                                 source=row_source,

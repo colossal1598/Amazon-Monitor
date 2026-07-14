@@ -112,6 +112,57 @@ class TestRingSchedulerCompleteOverride(unittest.TestCase):
         self.assertEqual(sched.next_due["B011111111"], 1000.0)
 
 
+class TestRingSchedulerHotPreemption(unittest.TestCase):
+    def test_hot_asin_preempts_more_overdue_normals_under_saturation(self) -> None:
+        # Saturated ring: every ASIN is overdue at pop time. A fast-retried ASIN
+        # gets a short 15s override, making it the LEAST overdue -> a plain
+        # most-overdue pop would make it wait a full ring pass. Preemption must
+        # hand it back first once its 15s has elapsed.
+        sched = RingScheduler(55.0)
+        sched.next_due = {"A": 100.0, "B": 90.0, "C": 80.0}
+        # A completes with a fast-retry override; B and C stay far more overdue.
+        sched.pop_due(1000.0)  # pops C (most overdue)
+        sched.complete("C", 1000.0, interval_override=15.0)
+        self.assertIn("C", sched.hot)
+        # 15s later the whole ring is still overdue, but C (hot) must win.
+        self.assertEqual(sched.pop_due(1015.0), "C")
+
+    def test_hot_asin_not_yet_due_falls_back_to_normal(self) -> None:
+        sched = RingScheduler(55.0)
+        sched.next_due = {"A": 100.0, "B": 90.0}
+        sched.pop_due(1000.0)  # pops B
+        sched.complete("B", 1000.0, interval_override=15.0)
+        # Before B's 15s elapses, the normal most-overdue (A) is served.
+        self.assertEqual(sched.pop_due(1010.0), "A")
+
+    def test_complete_without_override_clears_hot(self) -> None:
+        sched = RingScheduler(55.0)
+        sched.next_due = {"A": 100.0}
+        sched.pop_due(1000.0)
+        sched.complete("A", 1000.0, interval_override=15.0)
+        self.assertIn("A", sched.hot)
+        sched.pop_due(1015.0)
+        sched.complete("A", 1015.0, interval_override=None)
+        self.assertNotIn("A", sched.hot)
+
+    def test_watch_list_removal_clears_hot(self) -> None:
+        sched = RingScheduler(55.0)
+        sched.update_watch_list(["A", "B"], 1000.0)
+        sched.pop_due(2000.0)  # pops A (earliest staggered due)
+        sched.complete("A", 2000.0, interval_override=15.0)
+        self.assertIn("A", sched.hot)
+        sched.update_watch_list(["B"], 3000.0)
+        self.assertNotIn("A", sched.hot)
+        self.assertNotIn("A", sched.next_due)
+
+    def test_hot_preemption_picks_most_overdue_among_hot(self) -> None:
+        sched = RingScheduler(55.0)
+        sched.next_due = {"A": 100.0, "B": 200.0}
+        sched.hot = {"A", "B"}
+        # Both hot and due: the more-overdue hot ASIN wins.
+        self.assertEqual(sched.pop_due(1000.0), "A")
+
+
 class TestComputeFastRetry(unittest.TestCase):
     def test_no_pay_price_unknown_triggers_override(self) -> None:
         override, count = _compute_fast_retry(
