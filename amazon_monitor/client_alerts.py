@@ -11,7 +11,11 @@ from webhook_sender import send_client_message
 
 LOGGER = logging.getLogger(__name__)
 
-PDP_SCRAPE_ERROR_REASONS = frozenset({"navigation_failed", "parse_failed", "goto_failed"})
+# degraded_page = soft-block skeleton skip: a genuine scrape failure, so it counts toward
+# the per-sweep scrape-error totals / reasons (pdp_scrape_error_reasons_json) like the rest.
+PDP_SCRAPE_ERROR_REASONS = frozenset(
+    {"navigation_failed", "parse_failed", "goto_failed", "degraded_page"}
+)
 
 CLIENT_MESSAGES: dict[str, str] = {
     "captcha": "המערכת נתקלה באימות אבטחה. הסריקה מושהית זמנית ותחודש אוטומטית.",

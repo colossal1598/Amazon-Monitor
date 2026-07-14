@@ -1,6 +1,13 @@
 import unittest
+from collections import deque
 
-from monitor_engine import RingScheduler, _SweepMeterView, _compute_fast_retry
+from monitor_engine import (
+    MonitorEngine,
+    RingScheduler,
+    _SweepMeterView,
+    _compute_fast_retry,
+    _degraded_burst_reached,
+)
 
 
 class TestRingSchedulerUpdateWatchList(unittest.TestCase):
@@ -193,6 +200,78 @@ class TestComputeFastRetry(unittest.TestCase):
             confidence="unknown", reason="seller_mismatch", prior_count=1, max_retries=3, retry_seconds=15.0
         )
         self.assertEqual((override, count), (None, 0))
+
+    def test_degraded_page_triggers_override_without_confidence(self) -> None:
+        # A degraded_page skip has no stock confidence/reason, but must still fast-retry.
+        override, count = _compute_fast_retry(
+            confidence="", reason="", prior_count=0, max_retries=3, retry_seconds=15.0, degraded=True
+        )
+        self.assertEqual((override, count), (15.0, 1))
+
+    def test_degraded_page_respects_max_retries(self) -> None:
+        override, count = _compute_fast_retry(
+            confidence="", reason="", prior_count=3, max_retries=3, retry_seconds=15.0, degraded=True
+        )
+        self.assertEqual((override, count), (None, 0))
+
+
+class TestDegradedBurstReached(unittest.TestCase):
+    def test_four_within_window_reaches_threshold(self) -> None:
+        events: deque[float] = deque()
+        results = [
+            _degraded_burst_reached(events, t, window_seconds=180.0, threshold=4)
+            for t in (1000.0, 1030.0, 1060.0, 1090.0)
+        ]
+        self.assertEqual(results, [False, False, False, True])
+
+    def test_three_within_window_does_not_reach(self) -> None:
+        events: deque[float] = deque()
+        results = [
+            _degraded_burst_reached(events, t, window_seconds=180.0, threshold=4)
+            for t in (1000.0, 1030.0, 1060.0)
+        ]
+        self.assertEqual(results, [False, False, False])
+
+    def test_old_timestamps_expire_out_of_window(self) -> None:
+        events: deque[float] = deque()
+        # Three events, then a long gap: the first three age out and only the recent
+        # burst counts, so the threshold is never reached.
+        for t in (1000.0, 1030.0, 1060.0):
+            _degraded_burst_reached(events, t, window_seconds=180.0, threshold=4)
+        # 400s later: the earlier three are outside the 180s window.
+        reached = _degraded_burst_reached(events, 1460.0, window_seconds=180.0, threshold=4)
+        self.assertFalse(reached)
+        self.assertEqual(list(events), [1460.0])
+
+
+class TestRegisterDegradedPage(unittest.TestCase):
+    """MonitorEngine._register_degraded_page: fast-retry override + burst-driven recycle flag."""
+
+    @staticmethod
+    def _engine(config: dict | None = None) -> MonitorEngine:
+        eng = MonitorEngine.__new__(MonitorEngine)
+        eng.config = config or {}
+        eng._fast_retry_counts = {}
+        eng._pending_overrides = {}
+        eng._degraded_events = deque()
+        eng._recycle_requested = False
+        return eng
+
+    def test_degraded_skip_sets_fast_retry_override(self) -> None:
+        eng = self._engine({"pdp_unknown_fast_retry_seconds": 15})
+        eng._register_degraded_page("B0AAAA0001")
+        self.assertEqual(eng._pending_overrides["B0AAAA0001"], 15.0)
+        self.assertEqual(eng._fast_retry_counts["B0AAAA0001"], 1)
+
+    def test_burst_of_four_requests_recycle(self) -> None:
+        eng = self._engine(
+            {"degraded_recycle_threshold": 4, "degraded_recycle_window_seconds": 180}
+        )
+        for _ in range(3):
+            eng._register_degraded_page("B0AAAA0001")
+        self.assertFalse(eng._recycle_requested)
+        eng._register_degraded_page("B0AAAA0001")
+        self.assertTrue(eng._recycle_requested)
 
 
 class TestRingSchedulerSecondsToNext(unittest.TestCase):

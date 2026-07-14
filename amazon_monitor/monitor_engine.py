@@ -24,6 +24,7 @@ import logging
 import random
 import re
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -144,21 +145,40 @@ def _compute_fast_retry(
     prior_count: int,
     max_retries: int,
     retry_seconds: float,
+    degraded: bool = False,
 ) -> tuple[float | None, int]:
     """Decide the next-check interval override for an unknown price-miss result.
 
     Returns ``(interval_override, new_count)``. ``interval_override`` is ``retry_seconds``
-    while the ASIN keeps returning an unknown no_pay_price/priceless_purchasable row and
-    the consecutive fast-retry count is under ``max_retries``; otherwise ``None`` (normal
-    interval). The count resets to 0 on any other result, per C2.
+    while the ASIN keeps returning an unknown no_pay_price/priceless_purchasable row (or a
+    ``degraded`` skeleton skip row) and the consecutive fast-retry count is under
+    ``max_retries``; otherwise ``None`` (normal interval). The count resets to 0 on any
+    other result, per C2. ``degraded`` reuses the same mechanics for degraded_page skips
+    (a soft-block skeleton) so the ASIN re-checks in seconds instead of the full interval.
     """
-    if (
-        confidence == "unknown"
-        and reason in _PDP_RETRY_UNKNOWN_REASONS
-        and prior_count < max_retries
-    ):
+    eligible = degraded or (confidence == "unknown" and reason in _PDP_RETRY_UNKNOWN_REASONS)
+    if eligible and prior_count < max_retries:
         return retry_seconds, prior_count + 1
     return None, 0
+
+
+def _degraded_burst_reached(
+    events: "deque[float]",
+    now: float,
+    *,
+    window_seconds: float,
+    threshold: int,
+) -> bool:
+    """Record a degraded_page event and report whether a recycle-worthy burst is active.
+
+    Appends ``now``, drops timestamps older than ``window_seconds``, and returns True when
+    at least ``threshold`` degraded skips fall inside the rolling window. Pure logic over a
+    caller-owned deque so the burst detection is testable with controlled timestamps.
+    """
+    events.append(now)
+    while events and now - events[0] > window_seconds:
+        events.popleft()
+    return len(events) >= threshold
 
 
 class RingScheduler:
@@ -273,6 +293,12 @@ class MonitorEngine:
         # interval override the worker's finally hands to scheduler.complete().
         self._fast_retry_counts: dict[str, int] = {}
         self._pending_overrides: dict[str, float | None] = {}
+        # Degraded-page (soft-block skeleton) burst tracking: recent degraded_page skip
+        # timestamps; once a burst crosses the threshold within the window, request a
+        # session recycle (honored by _run_session once the session is old enough).
+        # Both are cleared at the start of every session.
+        self._degraded_events: deque[float] = deque()
+        self._recycle_requested = False
         self.jobs: dict[str, dict[str, str | None]] = {
             "stream": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
             "aes": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
@@ -370,6 +396,46 @@ class MonitorEngine:
             return max(0, int(self.config.get("pdp_unknown_fast_retry_max", 3)))
         except (TypeError, ValueError):
             return 3
+
+    def _degraded_recycle_threshold(self) -> int:
+        try:
+            return max(2, int(self.config.get("degraded_recycle_threshold", 4)))
+        except (TypeError, ValueError):
+            return 4
+
+    def _degraded_recycle_window_seconds(self) -> float:
+        try:
+            return max(30.0, float(self.config.get("degraded_recycle_window_seconds", 180)))
+        except (TypeError, ValueError):
+            return 180.0
+
+    def _register_degraded_page(self, asin: str) -> None:
+        """Handle a degraded_page skip: fast-retry the ASIN and track the burst for recycle.
+
+        Reuses the C2 fast-retry mechanics (same counts/overrides as unknown price-miss
+        rows) so the ASIN re-checks in ~15s, and records the degraded event; a burst of
+        >= threshold within the window flags a session recycle request.
+        """
+        override, new_count = _compute_fast_retry(
+            confidence="",
+            reason="",
+            prior_count=self._fast_retry_counts.get(asin, 0),
+            max_retries=self._fast_retry_max(),
+            retry_seconds=self._fast_retry_seconds(),
+            degraded=True,
+        )
+        if new_count:
+            self._fast_retry_counts[asin] = new_count
+        else:
+            self._fast_retry_counts.pop(asin, None)
+        self._pending_overrides[asin] = override
+        if _degraded_burst_reached(
+            self._degraded_events,
+            time.monotonic(),
+            window_seconds=self._degraded_recycle_window_seconds(),
+            threshold=self._degraded_recycle_threshold(),
+        ):
+            self._recycle_requested = True
 
     def _aes_interval_seconds(self) -> float:
         try:
@@ -523,6 +589,11 @@ class MonitorEngine:
             if reason in ("captcha", "captcha_run_aborted"):
                 self.asin_status[asin] = {**status, "result": "captcha"}
                 raise CaptchaBlocked(f"captcha on PDP {asin}")
+            if reason == "degraded_page":
+                # Soft-block skeleton: fast-retry this ASIN (~15s) instead of waiting the
+                # full freshness interval, and track the burst so a degraded window can
+                # trigger a proactive session recycle.
+                self._register_degraded_page(asin)
             self._sweep_skip += 1
             self.asin_status[asin] = {**status, "result": f"skip:{reason}"}
             LOGGER.info("%s skipped %s", asin, pdp_skip_log_label(row), extra={"channel": "lifecycle"})
@@ -755,6 +826,9 @@ class MonitorEngine:
         tabs = _clamp_tabs(self.config.get("stream_concurrent_tabs", 2))
         session_started = time.monotonic()
         recycle_after = self._recycle_seconds()
+        # Fresh session: clear any degraded-page burst state carried from the prior one.
+        self._degraded_events.clear()
+        self._recycle_requested = False
 
         async with async_playwright() as pw:
             browser, context = await create_async_stealth_context(pw, headless=headless, config=self.config)
@@ -807,6 +881,14 @@ class MonitorEngine:
                                 recycle_streak,
                             )
                             stop.set()
+                    # PDP degraded-page burst recycle: a skeleton burst is Amazon soft-
+                    # blocking the whole session; a fresh browser clears it immediately
+                    # (production logs: prices snapped back seconds after the recycle).
+                    # Guarded on session age (like the AES block above) so a persistent
+                    # block can't thrash-relaunch the browser.
+                    if self._recycle_requested and now - session_started >= 120:
+                        LOGGER.warning("PDP degraded-page burst; recycling browser session")
+                        stop.set()
                     # Planned recycle: finish current checks, relaunch fresh browser.
                     if now - session_started >= recycle_after:
                         LOGGER.info("Recycling browser after %.0f min.", (now - session_started) / 60, extra={"channel": "lifecycle"})

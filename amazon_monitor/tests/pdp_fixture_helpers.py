@@ -157,6 +157,36 @@ def extract_pay_price_from_html(html: str) -> float | None:
     return None
 
 
+# --- Skeleton (degraded-page) detection: static-HTML mirror of pdp_scraper's async detector. ---
+
+_SKELETON_ROW_FALSE_RE = re.compile(r'data-csa-c-is-in-initial-active-row="false"')
+_SKELETON_ROW_TRUE_RE = re.compile(r'data-csa-c-is-in-initial-active-row="true"')
+# `.a-price ... .a-offscreen`: an offscreen amount inside an a-price wrapper.
+_A_PRICE_OFFSCREEN_RE = re.compile(
+    r'class="a-price[^"]*"[\s\S]{0,800}?class="a-offscreen"', re.IGNORECASE
+)
+
+
+def is_offers_skeleton_from_html(html: str) -> bool:
+    """Static mirror of pdp_scraper._page_offers_skeleton_async (regex, no Playwright).
+
+    Marker (a): an initial-active-row="false" element exists and no ="true" element does.
+    Marker (b): #corePrice_feature_div exists with empty inner text AND no `.a-price
+    .a-offscreen` node anywhere on the page.
+    """
+    if _SKELETON_ROW_FALSE_RE.search(html) and not _SKELETON_ROW_TRUE_RE.search(html):
+        return True
+    if 'id="corePrice_feature_div"' in html and not _A_PRICE_OFFSCREEN_RE.search(html):
+        chunk = _chunk_after_id(html, "corePrice_feature_div", limit=4_000)
+        inner = chunk[chunk.find(">") + 1 :] if ">" in chunk else chunk
+        inner_text = " ".join(re.sub(r"<[^>]+>", " ", inner).split())
+        # Marker (b) requires the core price block to be empty of any price text; a
+        # skeleton renders zero dollar strings anywhere on the page.
+        if not re.search(r"[$\d]", inner_text):
+            return True
+    return False
+
+
 def extract_list_price_from_html(html: str) -> float | None:
     chunk = _chunk_after_id(html, "corePriceDisplay_desktop_feature_div")
     raw = _offscreen_in_chunk(chunk, "apex-basisprice-value")

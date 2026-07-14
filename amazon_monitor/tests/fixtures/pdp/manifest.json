@@ -53,5 +53,8 @@
     "expected_in_stock": false,
     "expected_confidence": "confirmed_out",
     "expected_reason": "seller_mismatch"
+  },
+  "skeleton-offers.html": {
+    "skeleton": true
   }
 }

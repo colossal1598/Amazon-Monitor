@@ -784,6 +784,57 @@ async def _detect_preorder_async(page: Any, *, availability_text: str) -> bool:
     return False
 
 
+# Skeleton (degraded-page) detection. During Amazon soft-block windows (~3.5 min,
+# hitting all watched ASINs at once) the PDP is served as a server-rendered SKELETON:
+# every offer widget carries data-csa-c-is-in-initial-active-row="false" with NONE
+# ="true", #corePrice_feature_div renders empty, and there is no `.a-price .a-offscreen`
+# node anywhere on the ~840KB page — yet a purchase button still renders. Left alone
+# this classifies as no_pay_price/priceless_purchasable (false price-less alerts) or
+# lets stale OOS/mismatch evidence flip state. A skeleton is a scrape failure, not
+# evidence: the caller turns it into a degraded_page skip row and a session recycle
+# clears it. Both markers below were verified against production HTML dumps (2026-07-14).
+_SKELETON_ACTIVE_ROW_FALSE_SELECTOR = '[data-csa-c-is-in-initial-active-row="false"]'
+_SKELETON_ACTIVE_ROW_TRUE_SELECTOR = '[data-csa-c-is-in-initial-active-row="true"]'
+
+
+async def _page_offers_skeleton_async(page: Any, *, asin: str = "") -> bool:
+    """True when the PDP is a server-rendered skeleton (soft-block degraded page).
+
+    Checked ONLY on would-be no_pay_price/priceless_purchasable rows (not explicit_oos,
+    price None, title present) — real OOS pages carry explicit text and never reach here.
+    Detected via EITHER empirically verified marker:
+      (a) an initial-active-row="false" element exists and no ="true" element exists; OR
+      (b) #corePrice_feature_div exists with empty/whitespace inner text AND no
+          `.a-price .a-offscreen` element exists anywhere on the page.
+    Emits one debug line naming the matched marker when positive.
+    """
+    marker = ""
+    try:
+        if await page.query_selector(_SKELETON_ACTIVE_ROW_FALSE_SELECTOR) is not None:
+            if await page.query_selector(_SKELETON_ACTIVE_ROW_TRUE_SELECTOR) is None:
+                marker = "initial_active_row_all_false"
+    except Exception:
+        marker = ""
+    if not marker:
+        try:
+            core = await page.query_selector("#corePrice_feature_div")
+            if core is not None:
+                core_text = (await core.inner_text() or "").strip()
+                if not core_text and await page.query_selector(".a-price .a-offscreen") is None:
+                    marker = "empty_core_price_no_offscreen"
+        except Exception:
+            marker = ""
+    if marker:
+        LOGGER.info(
+            "PDP degraded skeleton detected asin=%s marker=%s",
+            asin or "?",
+            marker,
+            extra={"channel": "debug"},
+        )
+        return True
+    return False
+
+
 async def _buybox_purchasable_async(page: Any) -> bool:
     """True when an enabled add-to-cart or buy-now control exists."""
     for sel in _PDP_PURCHASE_BUTTON_SELECTORS:
@@ -1102,7 +1153,7 @@ def pdp_skip_log_label(row: dict[str, Any]) -> str:
         return "timeout"
     if reason == "captcha_run_aborted":
         return "captcha_aborted"
-    if detail in ("skeleton", "not_ready"):
+    if reason == "degraded_page" or detail in ("skeleton", "not_ready"):
         return "skeleton"
     if detail == "empty_parse":
         return "empty"
@@ -1862,6 +1913,29 @@ async def _scrape_pdp_on_context(
                         scrape_attempts=attempt,
                         scrape_elapsed_ms=elapsed_ms,
                         dom_ok=False,
+                    )
+
+                # Degraded (skeleton) page: title rendered but no price and no explicit
+                # OOS text — the exact would-be no_pay_price/priceless_purchasable state.
+                # The unknown-retry above already ran (a slow-hydrating real page recovers
+                # there); if it is STILL price-less and the skeleton markers are present,
+                # this is a soft-block scrape failure, not evidence. Emit a degraded_page
+                # skip row so the state engine ignores it. The no-price HTML dump already
+                # fired inside _extract_pdp_page_state_async (that is how this was found).
+                if (
+                    not explicit_oos
+                    and price is None
+                    and title
+                    and await _page_offers_skeleton_async(page, asin=asin)
+                ):
+                    await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                    elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
+                    return idx, _pdp_skip_row(
+                        asin,
+                        "degraded_page",
+                        skip_detail="skeleton_offers",
+                        scrape_attempts=attempt,
+                        scrape_elapsed_ms=elapsed_ms,
                     )
 
                 row = _pdp_row(
