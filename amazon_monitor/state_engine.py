@@ -205,7 +205,11 @@ class StateEngine:
                 alert.get("type"),
                 alert.get("source"),
                 alert.get("old_price"),
-                alert.get("new_price"),
+                # Stock alerts (new_product/back_in_stock) carry their price only in
+                # "price" (old/new are for price_drop); without this fallback the
+                # alerts history — and the admin-UI feedback list built on it —
+                # shows every stock alert as price-less.
+                alert.get("new_price") if alert.get("new_price") is not None else alert.get("price"),
                 alert.get("timestamp"),
             ),
         )

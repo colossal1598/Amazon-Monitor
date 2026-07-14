@@ -395,6 +395,199 @@ def _bandwidth_summary(monitor_db_path: str) -> dict[str, Any]:
     }
 
 
+_PRODUCT_ALERT_TYPES = ("back_in_stock", "new_product", "price_drop", "price_below_target")
+_FEEDBACK_TAGS = ("late", "wrong_price", "duplicate", "irrelevant")
+_FEEDBACK_VERDICTS = ("like", "dislike")
+_SEEN_AT_FMT = "%Y-%m-%dT%H:%M"
+
+
+def _open_monitor_conn(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _ensure_feedback_table(conn: sqlite3.Connection) -> None:
+    """Create the alert_feedback table lazily (admin server owns it; the
+    monitor engine never touches it)."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alert_feedback (
+            alert_id INTEGER PRIMARY KEY,
+            verdict TEXT,
+            tags TEXT,
+            note TEXT,
+            seen_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+
+def _parse_feedback_tags(raw: Any) -> list[str]:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(tag) for tag in value]
+
+
+def _recent_alerts(db_path: str, days: int) -> list[dict[str, Any]]:
+    days = max(1, min(30, int(days)))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    placeholders = ",".join("?" for _ in _PRODUCT_ALERT_TYPES)
+    conn = _open_monitor_conn(db_path)
+    try:
+        _ensure_feedback_table(conn)
+        conn.commit()
+        rows = conn.execute(
+            f"""
+            SELECT a.id AS alert_id, a.sent_at AS sent_at, a.alert_type AS alert_type,
+                   a.asin AS asin, a.old_price AS old_price, a.new_price AS new_price,
+                   a.source AS source, p.title AS title,
+                   f.alert_id AS f_alert_id, f.verdict AS f_verdict, f.tags AS f_tags,
+                   f.note AS f_note, f.seen_at AS f_seen_at
+            FROM alerts a
+            LEFT JOIN products p ON p.asin = a.asin
+            LEFT JOIN alert_feedback f ON f.alert_id = a.id
+            WHERE a.alert_type IN ({placeholders}) AND a.sent_at >= ?
+            ORDER BY a.sent_at DESC
+            LIMIT 200
+            """,
+            (*_PRODUCT_ALERT_TYPES, cutoff),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    alerts: list[dict[str, Any]] = []
+    for row in rows:
+        new_price = row["new_price"]
+        old_price = row["old_price"]
+        price = new_price if new_price is not None else old_price
+        feedback = None
+        if row["f_alert_id"] is not None:
+            feedback = {
+                "verdict": row["f_verdict"],
+                "tags": _parse_feedback_tags(row["f_tags"]),
+                "note": row["f_note"] or "",
+                "seen_at": row["f_seen_at"],
+            }
+        alerts.append(
+            {
+                "alert_id": row["alert_id"],
+                "sent_at": row["sent_at"],
+                "alert_type": row["alert_type"],
+                "asin": row["asin"],
+                "title": row["title"],
+                "price": price,
+                "source": row["source"],
+                "feedback": feedback,
+            }
+        )
+    return alerts
+
+
+def _upsert_feedback(
+    db_path: str,
+    *,
+    alert_id: int,
+    verdict: str | None,
+    tags: list[str],
+    note: str,
+    seen_at: str | None,
+) -> dict[str, Any] | None:
+    """Insert-or-update feedback keyed by alert_id. Returns the stored feedback
+    dict, or None when the alert_id does not exist in the alerts table."""
+    updated_at = datetime.now(timezone.utc).isoformat()
+    tags_json = json.dumps(tags, ensure_ascii=False)
+    conn = _open_monitor_conn(db_path)
+    try:
+        _ensure_feedback_table(conn)
+        exists = conn.execute("SELECT 1 FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+        if exists is None:
+            return None
+        conn.execute(
+            """
+            INSERT INTO alert_feedback (alert_id, verdict, tags, note, seen_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(alert_id) DO UPDATE SET
+                verdict = excluded.verdict,
+                tags = excluded.tags,
+                note = excluded.note,
+                seen_at = excluded.seen_at,
+                updated_at = excluded.updated_at
+            """,
+            (alert_id, verdict, tags_json, note, seen_at, updated_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "verdict": verdict,
+        "tags": tags,
+        "note": note,
+        "seen_at": seen_at,
+        "updated_at": updated_at,
+    }
+
+
+def _validate_feedback_payload(
+    payload: dict[str, Any],
+) -> tuple[str | None, dict[str, Any]]:
+    """Validate a feedback POST body. Returns (error_code, parsed). error_code
+    is None on success; parsed holds alert_id/verdict/tags/note/seen_at."""
+    alert_id = payload.get("alert_id")
+    if isinstance(alert_id, bool) or not isinstance(alert_id, int):
+        return "invalid_alert_id", {}
+
+    verdict = payload.get("verdict")
+    if verdict is not None and verdict not in _FEEDBACK_VERDICTS:
+        return "invalid_verdict", {}
+
+    tags_raw = payload.get("tags")
+    if tags_raw is None:
+        tags_raw = []
+    if not isinstance(tags_raw, list):
+        return "invalid_tags", {}
+    tags: list[str] = []
+    for tag in tags_raw:
+        if tag not in _FEEDBACK_TAGS:
+            return "invalid_tag", {}
+        if tag not in tags:
+            tags.append(tag)
+
+    note = payload.get("note")
+    if note is None:
+        note = ""
+    if not isinstance(note, str):
+        return "invalid_note", {}
+    note = note.strip()[:500]
+
+    seen_at = payload.get("seen_at")
+    if seen_at in (None, ""):
+        seen_at = None
+    elif not isinstance(seen_at, str):
+        return "invalid_seen_at", {}
+    else:
+        seen_at = seen_at.strip()
+        try:
+            datetime.strptime(seen_at, _SEEN_AT_FMT)
+        except ValueError:
+            return "invalid_seen_at", {}
+
+    return None, {
+        "alert_id": alert_id,
+        "verdict": verdict,
+        "tags": tags,
+        "note": note,
+        "seen_at": seen_at,
+    }
+
+
 def _parse_target_price(raw: Any) -> tuple[bool, float | None]:
     """Validate an optional target_price value. Returns (ok, value).
 
@@ -566,6 +759,18 @@ class AdminUIHandler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._json(200, _health_summary())
             return
+        if path == "/api/alerts/recent":
+            raw_days = (parse_qs(parsed.query).get("days", [""])[0] or "").strip()
+            try:
+                days = int(raw_days) if raw_days else 7
+            except ValueError:
+                days = 7
+            days = max(1, min(30, days))
+            self._json(
+                200,
+                {"ok": True, "days": days, "alerts": _recent_alerts(self.db_path, days)},
+            )
+            return
 
         self._json(404, {"ok": False, "error": "not_found"})
 
@@ -681,6 +886,30 @@ class AdminUIHandler(BaseHTTPRequestHandler):
         if path == "/api/pm2/restart":
             result = restart_pm2_stack()
             self._json(200 if result.get("ok") else 400, result)
+            return
+
+        if path == "/api/alerts/feedback":
+            try:
+                payload = _parse_json_body(self)
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+                return
+            error, parsed = _validate_feedback_payload(payload)
+            if error is not None:
+                self._json(400, {"ok": False, "error": error})
+                return
+            feedback = _upsert_feedback(
+                self.db_path,
+                alert_id=parsed["alert_id"],
+                verdict=parsed["verdict"],
+                tags=parsed["tags"],
+                note=parsed["note"],
+                seen_at=parsed["seen_at"],
+            )
+            if feedback is None:
+                self._json(404, {"ok": False, "error": "alert_not_found"})
+                return
+            self._json(200, {"ok": True, "feedback": feedback})
             return
 
         self._json(404, {"ok": False, "error": "not_found"})
