@@ -97,6 +97,32 @@ _PDP_PURCHASE_BUTTON_SELECTORS = (
     "#submit.add-to-cart",
 )
 
+# Accordion buybox: some ASINs render several offers as accordion rows
+# (div[id^="newAccordionRow_"]) inside #buyBoxAccordion. The page-level extractors
+# span the WHOLE accordion, so they can pair the featured row's price/shipping with a
+# different row's "Sold by: Amazon.com" merchant line and alert on the wrong offer
+# (B0GYTRYV7P, 2026-07-14: featured Kings Games $79.95 alerted while seller validation
+# passed on a separate Amazon.com $65.94 row). Extraction is therefore scoped to the
+# single allowed-seller row whenever an accordion is present.
+_ACCORDION_ROW_SELECTOR = '[id^="newAccordionRow_"]'
+_ACCORDION_ROW_FALLBACK_SELECTOR = '[data-a-accordion-row-name="newAccordionRow"]'
+_ACCORDION_ACTIVE_ROW_SELECTORS = (
+    '[id^="newAccordionRow_"].a-accordion-active',
+    '.a-accordion-active[data-a-accordion-row-name="newAccordionRow"]',
+)
+# Row-scoped pay-price selectors. The apex "price to pay" node carries both `a-price`
+# and `apex-pricetopay-value`; the generic `.a-price` fallback keeps `:not(.a-text-price)`
+# so it never grabs the strike-through list price.
+_PDP_ROW_PRICE_SELECTORS = (
+    ".apex-pricetopay-value .a-offscreen",
+    ".a-price:not(.a-text-price) .a-offscreen",
+)
+
+# Sentinel: an accordion buybox is present but no row is an allowed seller. Distinct
+# from None (no accordion at all) so the caller can build the seller_mismatch
+# diagnostic path instead of falling back to page-level extraction.
+_ACCORDION_NO_ALLOWED_OFFER = object()
+
 
 # Simplify text into an easy-to-compare form so seller and shipping wording matches even when formatting differs.
 def _normalize_for_match(value: str) -> str:
@@ -494,6 +520,25 @@ async def _extract_pdp_page_state_async(
     title = await _extract_pdp_title_async(page) or _product_title_from_page_title(
         await page.title() or ""
     )
+
+    # Accordion buybox: scope extraction to the single allowed-seller offer row so we
+    # never pair the featured row's price/shipping with another row's merchant line
+    # (the wrong-offer alert incident). No accordion (or fewer than 2 rows) → fall
+    # through to the unchanged page-level flow below.
+    if not explicit_oos:
+        accordion_offer, accordion_merchants = await _find_allowed_accordion_offer_async(
+            page, allowed
+        )
+        if accordion_offer is not None:
+            return await _extract_accordion_offer_state_async(
+                page,
+                accordion_offer,
+                accordion_merchants,
+                asin=asin,
+                availability_text=availability_text,
+                title=title,
+            )
+
     price = None if explicit_oos else await _extract_pdp_price_async(page)
     buybox_purchasable = False
 
@@ -1281,6 +1326,280 @@ async def _pdp_merchant_blob_async(page: Any) -> str:
         except Exception:
             continue
     return "\n".join(parts)
+
+
+# --- Accordion (per-offer) scoped extraction ------------------------------------------------------
+
+async def _row_merchant_parts_async(row: Any) -> tuple[str, str]:
+    """Return (merchant_name, match_blob) for one accordion offer row.
+
+    ``merchant_name`` is the seller name only (desktop-merchant-info) — used for the
+    no-allowed-offer diagnostic so it can never carry a fulfiller line like
+    "Ships from Amazon" that would spuriously match an allowed substring.
+    ``match_blob`` is merchant + fulfiller text (row-scoped) for seller matching, and
+    falls back to the full row inner_text when the offer-display features are absent.
+    """
+    merchant = ""
+    fulfiller = ""
+    for feature_name in ("desktop-merchant-info", "desktop-fulfiller-info"):
+        try:
+            el = await row.query_selector(
+                f'.offer-display-feature-text[offer-display-feature-name="{feature_name}"]'
+            )
+            text = (await el.inner_text() or "").strip() if el else ""
+        except Exception:
+            text = ""
+        if feature_name == "desktop-merchant-info":
+            merchant = text
+        else:
+            fulfiller = text
+    parts = [p for p in (merchant, fulfiller) if p]
+    if parts:
+        return merchant, "\n".join(parts)
+    try:
+        blob = (await row.inner_text() or "").strip()
+    except Exception:
+        blob = ""
+    return merchant, blob
+
+
+async def _find_allowed_accordion_offer_async(
+    page: Any, allowed: list[str]
+) -> tuple[Any | None, list[str]]:
+    """Locate the allowed-seller offer row inside an accordion buybox.
+
+    Returns one of:
+      (None, [])                          — no accordion (fewer than 2 rows); use page-level flow.
+      (row_element, merchants)            — first row whose merchant/fulfiller matches an allowed seller.
+      (_ACCORDION_NO_ALLOWED_OFFER, merchants) — accordion present but no row is an allowed seller.
+    ``merchants`` lists every row's seller name (names only) for diagnostics/seller_text.
+    """
+    try:
+        rows = await page.query_selector_all(_ACCORDION_ROW_SELECTOR)
+    except Exception:
+        rows = []
+    if len(rows) < 2:
+        try:
+            rows = await page.query_selector_all(_ACCORDION_ROW_FALLBACK_SELECTOR)
+        except Exception:
+            rows = []
+    if len(rows) < 2:
+        return None, []
+    merchants: list[str] = []
+    matched: Any | None = None
+    for row in rows:
+        merchant_name, match_blob = await _row_merchant_parts_async(row)
+        merchants.append(merchant_name or "unknown")
+        if matched is None and merchant_matches_allowed(match_blob, allowed):
+            matched = row
+    if matched is not None:
+        return matched, merchants
+    return _ACCORDION_NO_ALLOWED_OFFER, merchants
+
+
+async def _find_active_accordion_row_async(page: Any) -> Any | None:
+    """Return the featured/selected accordion row (a-accordion-active), else the first row."""
+    for sel in _ACCORDION_ACTIVE_ROW_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el:
+                return el
+        except Exception:
+            continue
+    for sel in (_ACCORDION_ROW_SELECTOR, _ACCORDION_ROW_FALLBACK_SELECTOR):
+        try:
+            rows = await page.query_selector_all(sel)
+            if rows:
+                return rows[0]
+        except Exception:
+            continue
+    return None
+
+
+async def _extract_row_price_async(row: Any) -> float | None:
+    """Row-scoped pay price: mirrors _extract_pdp_price_async but rooted at one offer row."""
+    for sel in _PDP_ROW_PRICE_SELECTORS:
+        try:
+            el = await row.query_selector(sel)
+            if not el:
+                continue
+            raw = await _read_text_async(el)
+        except Exception:
+            raw = ""
+        p = _parse_price_text(raw)
+        if p is not None:
+            return p
+    try:
+        pay = await row.query_selector(".apex-pricetopay-value")
+        if pay is None:
+            pay = await row.query_selector(".a-price:not(.a-text-price)")
+        if pay is not None:
+            whole = await pay.query_selector(".a-price-whole")
+            frac = await pay.query_selector(".a-price-fraction")
+            if whole:
+                w = (await _read_text_async(whole)).replace(",", "").replace(".", "")
+                f = (await _read_text_async(frac)) if frac else ""
+                if w.isdigit():
+                    cents = f if f.isdigit() else "00"
+                    return float(f"{w}.{cents}")
+    except Exception:
+        pass
+    return None
+
+
+async def _extract_row_shipping_async(row: Any) -> str:
+    """Row-scoped delivery/shipping lines (import charges, delivery estimates)."""
+    lines: list[str] = []
+
+    def add_line(value: str | None) -> None:
+        if not value:
+            return
+        for part in re.split(r"[\r\n]+", value):
+            line = " ".join(part.split())
+            if line and line not in lines:
+                lines.append(line)
+
+    try:
+        for el in await row.query_selector_all("span.a-color-secondary"):
+            text = (await el.inner_text() or "").strip()
+            if text and _DELIVERY_RELEVANT_RE.search(text):
+                add_line(text)
+    except Exception:
+        pass
+    try:
+        for el in await row.query_selector_all("[data-csa-c-delivery-price]"):
+            price = (await el.get_attribute("data-csa-c-delivery-price") or "").strip()
+            text = (await el.inner_text() or "").strip()
+            add_line(" ".join(x for x in (price, text) if x))
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
+async def _row_buybox_purchasable_async(row: Any) -> bool:
+    """True when the row has an enabled add-to-cart or buy-now control."""
+    for sel in _PDP_PURCHASE_BUTTON_SELECTORS:
+        try:
+            el = await row.query_selector(sel)
+            if not el:
+                continue
+            disabled = await el.get_attribute("disabled")
+            aria_disabled = (await el.get_attribute("aria-disabled") or "").strip().lower()
+            if disabled is not None or aria_disabled in ("true", "1"):
+                continue
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _detect_row_preorder_async(row: Any, *, availability_text: str) -> bool:
+    """Row-scoped preorder detection (mirrors _detect_preorder_async on one offer row)."""
+    if _PREORDER_RE.search(availability_text or ""):
+        return True
+    for sel in ("#buy-now-button", "#add-to-cart-button"):
+        try:
+            el = await row.query_selector(sel)
+            if not el:
+                continue
+            blob = " ".join(
+                part
+                for part in (
+                    (await el.get_attribute("value")) or "",
+                    (await el.inner_text() or ""),
+                )
+                if part
+            )
+            if _PREORDER_RE.search(blob):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _extract_accordion_offer_state_async(
+    page: Any,
+    offer: Any,
+    merchants: list[str],
+    *,
+    asin: str,
+    availability_text: str,
+    title: str,
+) -> dict[str, Any]:
+    """Build the page-state dict from a single accordion offer row.
+
+    Image/title/availability stay page-level; price/shipping/merchant/purchasable/preorder
+    are scoped to the chosen row. When no row is an allowed seller, ``merchant_blob`` is a
+    diagnostic built from seller NAMES ONLY (never fulfiller text) so _pdp_row classifies it
+    as a clean seller_mismatch → confirmed_out (C9) and the blob cannot leak an allowed
+    substring unless a row genuinely matched.
+    """
+    image_url = await _extract_pdp_image_async(page)
+
+    if offer is _ACCORDION_NO_ALLOWED_OFFER:
+        merchant_blob = "accordion offers: " + " | ".join(m for m in merchants if m)
+        active = await _find_active_accordion_row_async(page)
+        price = await _extract_row_price_async(active) if active is not None else None
+        shipping = await _extract_row_shipping_async(active) if active is not None else ""
+        is_preorder = (
+            await _detect_row_preorder_async(active, availability_text=availability_text)
+            if active is not None
+            else False
+        )
+        LOGGER.info(
+            "PDP accordion scoping asin=%s rows=%s matched_index=none price=%s",
+            asin,
+            len(merchants),
+            price,
+            extra={"channel": "debug"},
+        )
+        return {
+            "availability_text": availability_text,
+            "explicit_oos": False,
+            "explicit_reason": None,
+            "title": title,
+            "price": price,
+            "buybox_purchasable": False,
+            "merchant_blob": merchant_blob,
+            "shipping": shipping,
+            "image_url": image_url,
+            "is_preorder": is_preorder,
+        }
+
+    _, merchant_blob = await _row_merchant_parts_async(offer)
+    price = await _extract_row_price_async(offer)
+    buybox_purchasable = await _row_buybox_purchasable_async(offer)
+    shipping = await _extract_row_shipping_async(offer)
+    is_preorder = await _detect_row_preorder_async(offer, availability_text=availability_text)
+    try:
+        matched_index = await offer.get_attribute("data-buying-option-index")
+    except Exception:
+        matched_index = None
+    # Row price missing → the normal priceless/no_pay_price paths apply: a purchasable row
+    # stays unknown (priceless_purchasable via _pdp_row) so the restock can still alert,
+    # while a non-purchasable row with no price is confirmed_out.
+    explicit_oos = price is None and not buybox_purchasable
+    explicit_reason = "no_pay_price" if explicit_oos else None
+    LOGGER.info(
+        "PDP accordion scoping asin=%s rows=%s matched_index=%s price=%s",
+        asin,
+        len(merchants),
+        matched_index if matched_index is not None else "?",
+        price,
+        extra={"channel": "debug"},
+    )
+    return {
+        "availability_text": availability_text,
+        "explicit_oos": explicit_oos,
+        "explicit_reason": explicit_reason,
+        "title": title,
+        "price": price,
+        "buybox_purchasable": buybox_purchasable,
+        "merchant_blob": merchant_blob,
+        "shipping": shipping,
+        "image_url": image_url,
+        "is_preorder": is_preorder,
+    }
 
 
 async def _scrape_pdp_on_context(

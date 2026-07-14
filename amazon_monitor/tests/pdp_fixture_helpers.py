@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import re
 
-from pdp_scraper import _DELIVERY_RELEVANT_RE, _PDP_PRICE_PAY_SELECTORS, _parse_hidden_buybox_amount, _parse_price_text
+from pdp_scraper import (
+    _DELIVERY_RELEVANT_RE,
+    _PDP_PRICE_PAY_SELECTORS,
+    _parse_hidden_buybox_amount,
+    _parse_price_text,
+    merchant_matches_allowed,
+)
 
 
 def _first_group(pattern: str, html: str, *, flags: int = 0) -> str | None:
@@ -203,3 +209,158 @@ def extract_delivery_text_from_html(html: str) -> str:
         add_line(" ".join(x for x in (m.group(1), re.sub(r"<[^>]+>", " ", m.group(3))) if x.strip()))
 
     return "\n".join(lines)
+
+
+# --- Accordion (per-offer) scoping: static-HTML mirror of pdp_scraper's row-scoped logic. ---
+
+# Sentinel mirroring pdp_scraper._ACCORDION_NO_ALLOWED_OFFER: accordion present but no
+# row is an allowed seller (distinct from None = no accordion at all).
+ACCORDION_NO_ALLOWED_OFFER = object()
+
+
+def _split_accordion_rows(html: str) -> list[str]:
+    """Split page HTML into one chunk per newAccordionRow_ (opening <div> onward)."""
+    starts: list[int] = []
+    for m in re.finditer(r'id="newAccordionRow_\d+"', html):
+        tag_start = html.rfind("<div", 0, m.start())
+        if tag_start != -1:
+            starts.append(tag_start)
+    starts = sorted(set(starts))
+    if len(starts) < 2:
+        return []
+    bounds = starts + [len(html)]
+    return [html[bounds[i] : bounds[i + 1]] for i in range(len(starts))]
+
+
+def _row_feature_message(row_html: str, feature_name: str) -> str:
+    """Read one offer-display-feature message (merchant/fulfiller seller name) from a row."""
+    m = re.search(
+        rf'offer-display-feature-name="{feature_name}"[\s\S]*?'
+        r'class="[^"]*offer-display-feature-text-message[^"]*"[^>]*>([^<]+)<',
+        row_html,
+        flags=re.IGNORECASE,
+    )
+    return (m.group(1).strip() if m else "")
+
+
+def _row_merchant_name(row_html: str) -> str:
+    return _row_feature_message(row_html, "desktop-merchant-info")
+
+
+def _row_match_blob(row_html: str) -> str:
+    """Merchant + fulfiller text for seller matching; full row text as last resort."""
+    parts = [
+        v
+        for v in (
+            _row_feature_message(row_html, "desktop-merchant-info"),
+            _row_feature_message(row_html, "desktop-fulfiller-info"),
+        )
+        if v
+    ]
+    if parts:
+        return "\n".join(parts)
+    return " ".join(re.sub(r"<[^>]+>", " ", row_html).split())
+
+
+def extract_row_pay_price_from_html(row_html: str) -> float | None:
+    """Row-scoped pay price: mirror _extract_row_price_async selector order on static HTML."""
+    for extractor in (
+        lambda c: _offscreen_in_chunk(c, "apex-pricetopay-value"),
+        _a_price_offscreen_excluding_text,
+    ):
+        price = _parse_price_text(extractor(row_html))
+        if price is not None:
+            return price
+    return _pay_price_from_whole_fraction(row_html)
+
+
+def extract_row_delivery_from_html(row_html: str) -> str:
+    lines: list[str] = []
+
+    def add_line(value: str | None) -> None:
+        if not value:
+            return
+        for part in re.split(r"[\r\n]+", value):
+            line = " ".join(part.split())
+            if line and line not in lines:
+                lines.append(line)
+
+    for m in re.finditer(
+        r'<span class="a-color-secondary">([^<]{3,300})</span>',
+        row_html,
+        flags=re.IGNORECASE,
+    ):
+        text = m.group(1).strip()
+        if _DELIVERY_RELEVANT_RE.search(text):
+            add_line(text)
+    return "\n".join(lines)
+
+
+def _row_purchasable_from_html(row_html: str) -> bool:
+    for m in re.finditer(r'id="(?:buy-now-button|add-to-cart-button)"([^>]*)>', row_html):
+        attrs = m.group(1)
+        if "disabled" in attrs or 'aria-disabled="true"' in attrs:
+            continue
+        return True
+    return False
+
+
+def _active_accordion_row_html(rows: list[str]) -> str | None:
+    for row in rows:
+        head = row[: row.find(">") + 1] if ">" in row else row[:300]
+        if "a-accordion-active" in head:
+            return row
+    return rows[0] if rows else None
+
+
+def find_accordion_offer_from_html(html: str, allowed: list[str]):
+    """Mirror _find_allowed_accordion_offer_async on static HTML.
+
+    Returns (None, []) | (row_html, merchants) | (ACCORDION_NO_ALLOWED_OFFER, merchants).
+    """
+    rows = _split_accordion_rows(html)
+    if len(rows) < 2:
+        return None, []
+    merchants: list[str] = []
+    matched: str | None = None
+    for row in rows:
+        merchants.append(_row_merchant_name(row) or "unknown")
+        if matched is None and merchant_matches_allowed(_row_match_blob(row), allowed):
+            matched = row
+    if matched is not None:
+        return matched, merchants
+    return ACCORDION_NO_ALLOWED_OFFER, merchants
+
+
+def build_accordion_pdp_state_from_html(html: str, allowed: list[str]) -> dict | None:
+    """Mirror the accordion branch of _extract_pdp_page_state_async on static HTML.
+
+    Returns None when there is no accordion (fewer than 2 rows), else a state dict with
+    price/merchant_blob/shipping/buybox_purchasable/explicit_oos ready for _pdp_row.
+    """
+    offer, merchants = find_accordion_offer_from_html(html, allowed)
+    if offer is None:
+        return None
+
+    if offer is ACCORDION_NO_ALLOWED_OFFER:
+        merchant_blob = "accordion offers: " + " | ".join(m for m in merchants if m)
+        active = _active_accordion_row_html(_split_accordion_rows(html))
+        price = extract_row_pay_price_from_html(active) if active else None
+        shipping = extract_row_delivery_from_html(active) if active else ""
+        return {
+            "price": price,
+            "merchant_blob": merchant_blob,
+            "shipping": shipping,
+            "buybox_purchasable": False,
+            "explicit_oos": False,
+        }
+
+    price = extract_row_pay_price_from_html(offer)
+    purchasable = _row_purchasable_from_html(offer)
+    return {
+        "price": price,
+        "merchant_blob": _row_match_blob(offer),
+        "shipping": extract_row_delivery_from_html(offer),
+        "buybox_purchasable": purchasable,
+        "explicit_oos": price is None and not purchasable,
+    }

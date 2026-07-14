@@ -36,5 +36,22 @@
   "generic-buybox.html": {
     "pay_price": 42.50,
     "delivery_contains": ["FREE delivery"]
+  },
+  "accordion-two-offers.html": {
+    "accordion": true,
+    "allowed": ["Amazon.com"],
+    "expected_price": 65.94,
+    "expected_in_stock": true,
+    "expected_confidence": "confirmed_in",
+    "delivery_contains": ["$17.96"],
+    "delivery_excludes": ["$5.00"]
+  },
+  "accordion-no-amazon.html": {
+    "accordion": true,
+    "allowed": ["Amazon.com"],
+    "expected_price": 79.95,
+    "expected_in_stock": false,
+    "expected_confidence": "confirmed_out",
+    "expected_reason": "seller_mismatch"
   }
 }

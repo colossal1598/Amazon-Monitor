@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head><title>Accordion No Amazon Product : Amazon.com</title></head>
+<body>
+<span id="productTitle">Accordion No Amazon Product</span>
+<div id="desktop_accordion">
+<div id="buyBoxAccordion">
+<div id="accordionRows">
+
+  <!-- Row 0: featured/active third-party seller. Fulfiller is "Amazon" (Ships from
+       Amazon) on purpose: the no-allowed-offer diagnostic must strip it so the blob
+       cannot leak an allowed substring. -->
+  <div id="newAccordionRow_0" data-buying-option-index="0" data-a-accordion-row-name="newAccordionRow" class="a-accordion-row a-accordion-active aok-relative">
+    <div class="a-accordion-row-container">
+      <span class="a-price a-text-normal apex-pricetopay-value" data-a-size="xl" data-a-color="base"><span class="a-offscreen">$79.95</span><span aria-hidden="true"><span class="a-price-symbol">$</span><span class="a-price-whole">79<span class="a-price-decimal">.</span></span><span class="a-price-fraction">95</span></span></span>
+      <div class="a-color-secondary a-size-base"><span class="a-color-secondary">$5.00 delivery Monday, July 21</span></div>
+      <div class="offer-display-feature-text" offer-display-feature-name="desktop-merchant-info"><span class="a-color-secondary">Sold by</span> <span class="a-size-small offer-display-feature-text-message">Kings Games</span></div>
+      <div class="offer-display-feature-text" offer-display-feature-name="desktop-fulfiller-info"><span class="a-color-secondary">Ships from</span> <span class="a-size-small offer-display-feature-text-message">Amazon</span></div>
+      <span id="buy-now-button" class="a-button-input" role="button">Buy Now</span>
+    </div>
+  </div>
+
+  <!-- Row 1: another third-party seller at the same $65.94 price the good fixture uses,
+       so a leak would be visible as a 65.94 in_stock. -->
+  <div id="newAccordionRow_1" data-buying-option-index="1" data-a-accordion-row-name="newAccordionRow" class="a-accordion-row aok-relative">
+    <div class="a-accordion-row-container">
+      <span class="a-price a-text-normal apex-pricetopay-value" data-a-size="xl" data-a-color="base"><span class="a-offscreen">$65.94</span><span aria-hidden="true"><span class="a-price-symbol">$</span><span class="a-price-whole">65<span class="a-price-decimal">.</span></span><span class="a-price-fraction">94</span></span></span>
+      <div class="a-color-secondary a-size-base"><span class="a-color-secondary">$17.96 delivery Wednesday, July 23</span></div>
+      <div class="offer-display-feature-text" offer-display-feature-name="desktop-merchant-info"><span class="a-color-secondary">Sold by</span> <span class="a-size-small offer-display-feature-text-message">SomeOtherSeller</span></div>
+      <div class="offer-display-feature-text" offer-display-feature-name="desktop-fulfiller-info"><span class="a-color-secondary">Ships from</span> <span class="a-size-small offer-display-feature-text-message">SomeOtherSeller</span></div>
+      <span id="buy-now-button" class="a-button-input" role="button">Buy Now</span>
+    </div>
+  </div>
+
+</div>
+</div>
+</div>
+</body>
+</html>
