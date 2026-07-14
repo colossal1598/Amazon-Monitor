@@ -6,9 +6,10 @@ stayed unknown, the DB never flipped, and no 0->1 edge fired for repeat waves.""
 
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
-from state_engine import StateEngine
+from state_engine import StateEngine, utc_now
 
 # Confirmed cooldown 0 (never suppresses) vs weak cooldown 60 (would suppress a
 # repeat within the hour): the distinction proves which cooldown the re-alert used.
@@ -122,6 +123,44 @@ class TestWaveRealert(unittest.TestCase):
                 )
                 self.assertEqual([a["type"] for a in alerts_c], ["back_in_stock"])
                 self.assertEqual(int(_row(se, asin)["in_stock"]), 1)
+            finally:
+                se.conn.close()
+
+    def test_preorder_restock_after_confirmed_oos_uses_short_cooldown(self) -> None:
+        # A preorder restock whose preceding OOS was CONFIRMED (last_oos_confirmed=1)
+        # now gets confirmed_transition semantics: it respects the short confirmed
+        # cooldown (0 min) rather than the long weak cooldown (60 min). Previously the
+        # "and not new_preorder" qualifier forced preorders onto the weak cooldown, so a
+        # prior alert within the hour would suppress the wave re-alert.
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                asin = "B011111111"
+                now = "2020-01-01T00:00:00+00:00"
+                se.conn.execute(
+                    """
+                    INSERT INTO products
+                    (asin, title, seller, price, in_stock, first_seen, last_seen,
+                     is_preorder, last_oos_confirmed)
+                    VALUES (?, 'Pokemon Card', 'pdp_watch', NULL, 0, ?, ?, 1, 1)
+                    """,
+                    (asin, now, now),
+                )
+                # A prior back_in_stock alert 5 min ago: inside the 60-min weak window,
+                # outside the 0-min confirmed window.
+                se.conn.execute(
+                    """
+                    INSERT INTO alerts (asin, alert_type, source, old_price, new_price, sent_at)
+                    VALUES (?, 'back_in_stock', 'pdp_watch', NULL, 19.99, ?)
+                    """,
+                    (asin, (utc_now() - timedelta(minutes=5)).isoformat()),
+                )
+                se.conn.commit()
+
+                row = _in_stock_row(asin)
+                row["is_preorder"] = True
+                alerts, _ = se.process_pdp_watch_candidates([row], {asin}, config=_CONFIG)
+                self.assertEqual([a["type"] for a in alerts], ["back_in_stock"])
             finally:
                 se.conn.close()
 

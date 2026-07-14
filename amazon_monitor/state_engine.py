@@ -444,6 +444,11 @@ class StateEngine:
             priceless_confirm_checks = max(1, int((config or {}).get("pdp_priceless_confirm_checks", 2)))
         except (TypeError, ValueError):
             priceless_confirm_checks = 2
+        # Default OFF: the preorder->preorder re-alert suppression gate is removed. It
+        # predates the pdp_oos_confirm_cycles debounce and now silently consumes real
+        # allocation-wave restocks (see the gate comment below). Flip this on only to
+        # roll back fast if preorder buybox flapping spam ever returns.
+        preorder_suppression = bool((config or {}).get("pdp_preorder_realert_suppression", False))
 
         def _tel(event: str, *, asin: str | None = None, **fields: Any) -> None:
             if telemetry and cycle_id:
@@ -560,11 +565,17 @@ class StateEngine:
                         )
                         new_preorder = 1 if bool(item.get("is_preorder")) else 0
                         old_preorder = int(row["is_preorder"] or 0)
-                        # Same preorder-suppression gate as the normal restock path:
-                        # preorder->preorder flaps on weak evidence are noise unless the
-                        # preceding OOS was strong-text confirmed.
+                        # Same preorder-suppression gate as the normal restock path, and
+                        # default-off for the same reason (see that gate's comment): the
+                        # pdp_oos_confirm_cycles debounce already blocks weak preorder
+                        # flapping at the source, while this gate silently consumed real
+                        # allocation waves. Only suppresses when pdp_preorder_realert_suppression
+                        # is explicitly enabled for rollback.
                         preorder_suppressed = bool(
-                            new_preorder and old_preorder and not bool(row["last_oos_confirmed"])
+                            preorder_suppression
+                            and new_preorder
+                            and old_preorder
+                            and not bool(row["last_oos_confirmed"])
                         )
                         if old_stock == 0 and new_streak >= priceless_confirm_checks and not preorder_suppressed:
                             alert = self._emit_stock_alert_if_allowed(
@@ -579,7 +590,7 @@ class StateEngine:
                                 telemetry=telemetry,
                                 cycle_id=cycle_id,
                                 _tel=_tel,
-                                confirmed_transition=bool(row["last_oos_confirmed"]) and not new_preorder,
+                                confirmed_transition=bool(row["last_oos_confirmed"]),
                             )
                             if alert is not None:
                                 alerts.append(alert)
@@ -766,19 +777,24 @@ class StateEngine:
                 emitted_back_in_stock = False
                 if (
                     stock_decision.emit
+                    and preorder_suppression
                     and new_preorder
                     and old_preorder
                     and not bool(row["last_oos_confirmed"])
                 ):
-                    # Preorder buyboxes flap on weak evidence (missing price, buybox
-                    # rotation) constantly; those 0->1 flips are scrape noise, not a
-                    # new allocation wave, so they stay suppressed. But when the
-                    # preceding OOS was CONFIRMED by strong page text (a real
-                    # sell-out), a preorder reopening is a genuine allocation wave
-                    # the client wants immediately — let it through to the normal
-                    # emit path, which still applies the confirmed/normal cooldowns.
-                    # (A live Amazon.com preorder wave was missed on 2026-07-13
-                    # because this suppressed every preorder->preorder re-alert.)
+                    # Legacy preorder->preorder re-alert suppression gate, now DEFAULT
+                    # OFF (pdp_preorder_realert_suppression). It was built when a single
+                    # weak-evidence scrape could flip the DB straight to OOS and back,
+                    # so preorder buybox flapping (missing price, buybox rotation)
+                    # produced fake 0->1 back_in_stock spam. Since then the
+                    # pdp_oos_confirm_cycles debounce blocks that noise at the source
+                    # (weak OOS needs consecutive confirmations before flipping), and
+                    # alert cooldowns bound any residual repeats. Meanwhile the gate was
+                    # net-harmful: in_stock=1 is already committed above, so suppressing
+                    # here silently CONSUMES the 0->1 edge and no alert can ever fire for
+                    # that stock period — B0GYTRYV7P missed a full in-stock day this way.
+                    # Kept behind the flag purely for fast rollback if flapping spam
+                    # returns. When suppressing, still emit telemetry so it's observable.
                     _tel(
                         "pdp_preorder_realert_suppressed",
                         asin=asin,
@@ -797,7 +813,7 @@ class StateEngine:
                         telemetry=telemetry,
                         cycle_id=cycle_id,
                         _tel=_tel,
-                        confirmed_transition=bool(row["last_oos_confirmed"]) and not new_preorder,
+                        confirmed_transition=bool(row["last_oos_confirmed"]),
                     )
                     if alert is not None:
                         alerts.append(alert)

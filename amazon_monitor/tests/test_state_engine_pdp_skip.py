@@ -59,6 +59,16 @@ def _pdp_confirmed_oos_row(asin: str) -> dict:
     }
 
 
+class _FakeTelemetry:
+    """Captures debug() events so tests can assert on emitted telemetry."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def debug(self, cycle_id: int, event: str, *, asin=None, **fields) -> None:
+        self.events.append((event, {"asin": asin, **fields}))
+
+
 def _stock_and_price(se: StateEngine, asin: str) -> tuple[int, float | None]:
     row = se.conn.execute(
         "SELECT in_stock, price FROM products WHERE asin = ?", (asin,)
@@ -342,8 +352,11 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             finally:
                 se.conn.close()
 
-    def test_weak_evidence_preorder_flap_stays_suppressed(self) -> None:
-        """Preorder 0->1 flips whose OOS was weak evidence (buybox churn) are noise."""
+    def test_preorder_reopen_after_unconfirmed_oos_alerts_by_default(self) -> None:
+        """Default config: a preorder 0->1 restock after an UNCONFIRMED OOS alerts like
+        any other restock. The legacy suppression gate is default-off (the
+        pdp_oos_confirm_cycles debounce already blocks the weak flapping it targeted, and
+        the gate silently consumed real allocation waves)."""
         with tempfile.TemporaryDirectory() as tmp:
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
@@ -356,7 +369,59 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
                 row = _pdp_row("B011111111", 57.92)
                 row["is_preorder"] = True
                 alerts, _ = se.process_pdp_watch_candidates([row], {"B011111111"})
+                self.assertEqual([a["type"] for a in alerts], ["back_in_stock"])
+            finally:
+                se.conn.close()
+
+    def test_weak_evidence_preorder_flap_suppressed_when_flag_enabled(self) -> None:
+        """Rollback path: pdp_preorder_realert_suppression=True restores the old gate,
+        suppressing a preorder 0->1 flip whose OOS was weak evidence and emitting the
+        pdp_preorder_realert_suppressed telemetry event."""
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            tel = _FakeTelemetry()
+            try:
+                _seed_row(se, "B011111111", in_stock=0, price=57.92)
+                se.conn.execute(
+                    "UPDATE products SET is_preorder = 1, last_oos_confirmed = 0 WHERE asin = ?",
+                    ("B011111111",),
+                )
+                se.conn.commit()
+                row = _pdp_row("B011111111", 57.92)
+                row["is_preorder"] = True
+                alerts, _ = se.process_pdp_watch_candidates(
+                    [row],
+                    {"B011111111"},
+                    config={"pdp_preorder_realert_suppression": True},
+                    telemetry=tel,
+                    cycle_id=1,
+                )
                 self.assertEqual(alerts, [])
+                self.assertIn(
+                    "pdp_preorder_realert_suppressed", [e[0] for e in tel.events]
+                )
+            finally:
+                se.conn.close()
+
+    def test_preorder_wave_realert_regression(self) -> None:
+        """Incident B0GYTRYV7P: a preorder (in_stock=0, is_preorder=1,
+        last_oos_confirmed=0) restocked in the morning and the bot never alerted because
+        the suppression gate consumed the 0->1 edge after in_stock was already set to 1.
+        With the gate default-off, the confirmed_in preorder row must emit back_in_stock."""
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B0GYTRYV7P", in_stock=0, price=57.92)
+                se.conn.execute(
+                    "UPDATE products SET is_preorder = 1, last_oos_confirmed = 0 WHERE asin = ?",
+                    ("B0GYTRYV7P",),
+                )
+                se.conn.commit()
+                row = _pdp_row("B0GYTRYV7P", 57.92)
+                row["is_preorder"] = True
+                alerts, _ = se.process_pdp_watch_candidates([row], {"B0GYTRYV7P"})
+                self.assertEqual([a["type"] for a in alerts], ["back_in_stock"])
+                self.assertEqual(_stock_and_price(se, "B0GYTRYV7P"), (1, 57.92))
             finally:
                 se.conn.close()
 

@@ -81,6 +81,16 @@ def _row(se: StateEngine, asin: str):
     ).fetchone()
 
 
+class _FakeTelemetry:
+    """Captures debug() events so tests can assert on emitted telemetry."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+
+    def debug(self, cycle_id: int, event: str, *, asin=None, **fields) -> None:
+        self.events.append((event, {"asin": asin, **fields}))
+
+
 class TestPricelessRestock(unittest.TestCase):
     def test_streak_confirms_and_alerts_with_null_price(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,7 +147,10 @@ class TestPricelessRestock(unittest.TestCase):
             finally:
                 se.conn.close()
 
-    def test_preorder_reopen_suppressed_when_prior_oos_unconfirmed(self) -> None:
+    def test_preorder_reopen_alerts_by_default_when_prior_oos_unconfirmed(self) -> None:
+        # Default config (suppression OFF): a preorder->preorder priceless restock after
+        # an UNCONFIRMED OOS now alerts like any other restock. The pdp_oos_confirm_cycles
+        # debounce already blocks the weak flapping this gate was built against.
         with tempfile.TemporaryDirectory() as tmp:
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
@@ -149,7 +162,33 @@ class TestPricelessRestock(unittest.TestCase):
                 alerts, _ = se.process_pdp_watch_candidates(
                     [_priceless_row(asin, is_preorder=True)], {asin}, config=_CONFIG
                 )
+                self.assertEqual([a["type"] for a in alerts], ["back_in_stock"])
+            finally:
+                se.conn.close()
+
+    def test_preorder_reopen_suppressed_when_flag_enabled(self) -> None:
+        # Opt-in rollback: pdp_preorder_realert_suppression=True restores the old gate,
+        # suppressing preorder->preorder restock after an unconfirmed OOS and emitting the
+        # pdp_preorder_realert_suppressed telemetry event instead of an alert.
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            config = dict(_CONFIG, pdp_preorder_realert_suppression=True)
+            tel = _FakeTelemetry()
+            try:
+                asin = "B011111111"
+                _seed(se, asin, in_stock=0, is_preorder=1, last_oos_confirmed=0)
+                se.process_pdp_watch_candidates(
+                    [_priceless_row(asin, is_preorder=True)], {asin}, config=config,
+                    telemetry=tel, cycle_id=1,
+                )
+                alerts, _ = se.process_pdp_watch_candidates(
+                    [_priceless_row(asin, is_preorder=True)], {asin}, config=config,
+                    telemetry=tel, cycle_id=1,
+                )
                 self.assertEqual(alerts, [])
+                self.assertIn(
+                    "pdp_preorder_realert_suppressed", [e[0] for e in tel.events]
+                )
             finally:
                 se.conn.close()
 
