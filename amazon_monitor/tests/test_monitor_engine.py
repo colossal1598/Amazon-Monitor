@@ -1,6 +1,6 @@
 import unittest
 
-from monitor_engine import RingScheduler, _SweepMeterView
+from monitor_engine import RingScheduler, _SweepMeterView, _compute_fast_retry
 
 
 class TestRingSchedulerUpdateWatchList(unittest.TestCase):
@@ -85,6 +85,63 @@ class TestRingSchedulerComplete(unittest.TestCase):
         sched.complete("B011111111", 1000.0)
         self.assertNotIn("B011111111", sched.checked_out)
         self.assertNotIn("B011111111", sched.next_due)
+
+
+class TestRingSchedulerCompleteOverride(unittest.TestCase):
+    def test_override_schedules_short_recheck(self) -> None:
+        sched = RingScheduler(60.0)
+        sched.next_due = {"B011111111": 100.0}
+        sched.pop_due(1000.0)
+        sched.complete("B011111111", 1000.0, interval_override=15.0)
+        self.assertEqual(sched.next_due["B011111111"], 1015.0)
+        # Due again after only 15s instead of the full 60s interval.
+        self.assertIsNone(sched.pop_due(1014.0))
+        self.assertEqual(sched.pop_due(1015.0), "B011111111")
+
+    def test_none_override_uses_normal_interval(self) -> None:
+        sched = RingScheduler(60.0)
+        sched.next_due = {"B011111111": 100.0}
+        sched.pop_due(1000.0)
+        sched.complete("B011111111", 1000.0, interval_override=None)
+        self.assertEqual(sched.next_due["B011111111"], 1060.0)
+
+    def test_override_clamped_at_zero(self) -> None:
+        sched = RingScheduler(60.0)
+        sched.next_due = {"B011111111": 100.0}
+        sched.complete("B011111111", 1000.0, interval_override=-5.0)
+        self.assertEqual(sched.next_due["B011111111"], 1000.0)
+
+
+class TestComputeFastRetry(unittest.TestCase):
+    def test_no_pay_price_unknown_triggers_override(self) -> None:
+        override, count = _compute_fast_retry(
+            confidence="unknown", reason="no_pay_price", prior_count=0, max_retries=3, retry_seconds=15.0
+        )
+        self.assertEqual((override, count), (15.0, 1))
+
+    def test_priceless_purchasable_unknown_triggers_override(self) -> None:
+        override, count = _compute_fast_retry(
+            confidence="unknown", reason="priceless_purchasable", prior_count=1, max_retries=3, retry_seconds=15.0
+        )
+        self.assertEqual((override, count), (15.0, 2))
+
+    def test_exhausted_retries_fall_back_to_normal(self) -> None:
+        override, count = _compute_fast_retry(
+            confidence="unknown", reason="no_pay_price", prior_count=3, max_retries=3, retry_seconds=15.0
+        )
+        self.assertEqual((override, count), (None, 0))
+
+    def test_confirmed_in_resets_and_uses_normal(self) -> None:
+        override, count = _compute_fast_retry(
+            confidence="confirmed_in", reason="", prior_count=2, max_retries=3, retry_seconds=15.0
+        )
+        self.assertEqual((override, count), (None, 0))
+
+    def test_other_unknown_reason_does_not_fast_retry(self) -> None:
+        override, count = _compute_fast_retry(
+            confidence="unknown", reason="seller_mismatch", prior_count=1, max_retries=3, retry_seconds=15.0
+        )
+        self.assertEqual((override, count), (None, 0))
 
 
 class TestRingSchedulerSecondsToNext(unittest.TestCase):

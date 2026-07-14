@@ -8,6 +8,8 @@ import logging
 import random
 import re
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import browser_factory
@@ -25,11 +27,21 @@ _PDP_SETTLE_SECONDS_DEFAULT = 8.0
 _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT = 3
 _PDP_MAX_ATTEMPTS = 1
 # Pay-price extraction only (tight; verified against tests/fixtures/pdp HTML).
+# The precise apex "price to pay" selectors come first (they never grab a
+# strike-through list price). The generic `.a-price` selectors are appended as a
+# fallback for transitioning/simplified buybox layouts that render a plain price
+# node without the apex wrapper; `:not(.a-text-price)` keeps them off list prices.
 _PDP_PRICE_PAY_SELECTORS = (
     "#qualifiedBuybox .apex-pricetopay-value .a-offscreen",
     "#corePrice_feature_div .apex-pricetopay-value .a-offscreen",
     "#corePriceDisplay_desktop_feature_div #apex-pricetopay-accessibility-label",
     "#tp_price_block_total_price_ww .a-offscreen",
+    "#qualifiedBuybox .a-price:not(.a-text-price) .a-offscreen",
+    "#corePrice_feature_div .a-price:not(.a-text-price) .a-offscreen",
+    "#corePriceDisplay_desktop_feature_div .a-price:not(.a-text-price) .a-offscreen",
+    "#buybox .a-price:not(.a-text-price) .a-offscreen",
+    "#price_inside_buybox",
+    "#newBuyBoxPrice",
 )
 _CONTINUE_SHOPPING_CLICK_SELECTORS = (
     'button:has-text("Continue shopping")',
@@ -203,16 +215,28 @@ async def _extract_hidden_buybox_price_async(page: Any) -> float | None:
         root = await page.query_selector("#qualifiedBuybox")
     except Exception:
         root = None
-    if root is None:
-        return None
-    selectors = (
-        'input[name="items[0.base][customerVisiblePrice][amount]"]',
-        'input[id="items[0.base][customerVisiblePrice][amount]"]',
-        'input[name*="customerVisiblePrice"][name*="amount"]',
-    )
-    for sel in selectors:
+    if root is not None:
+        selectors = (
+            'input[name="items[0.base][customerVisiblePrice][amount]"]',
+            'input[id="items[0.base][customerVisiblePrice][amount]"]',
+            'input[name*="customerVisiblePrice"][name*="amount"]',
+        )
+        for sel in selectors:
+            try:
+                el = await root.query_selector(sel)
+                if not el:
+                    continue
+                value = await el.get_attribute("value")
+                price = _parse_hidden_buybox_amount(value)
+                if price is not None:
+                    return price
+            except Exception:
+                continue
+    # Page-level hidden pay-price inputs used by some buybox/attach layouts that do
+    # not render a #qualifiedBuybox form (transitioning offers, add-to-cart attach).
+    for sel in ('input#attach-base-product-price', 'input[name="displayedPrice"]'):
         try:
-            el = await root.query_selector(sel)
+            el = await page.query_selector(sel)
             if not el:
                 continue
             value = await el.get_attribute("value")
@@ -261,6 +285,44 @@ def _extract_pdp_price(page) -> float | None:
     except Exception:
         root = None
     return _extract_hidden_buybox_price_from_root(root)
+
+
+# Saved page snapshots for price-extraction misses (C1 diagnostics). Bounded so the
+# directory never grows without limit on a long-running client machine.
+_NO_PRICE_DUMP_DIR = Path("data/debug_no_price")
+_NO_PRICE_DUMP_KEEP = 20
+
+
+def _prune_no_price_dumps(directory: Path, keep: int = _NO_PRICE_DUMP_KEEP) -> None:
+    try:
+        files = sorted(directory.glob("*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return
+    for stale in files[keep:]:
+        try:
+            stale.unlink()
+        except OSError:
+            continue
+
+
+async def _dump_no_price_html(page: Any, asin: str) -> None:
+    """Persist the raw page for a price-extraction miss so failures can be replayed offline."""
+    try:
+        html = await page.content()
+    except Exception:
+        return
+    try:
+        _NO_PRICE_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        (_NO_PRICE_DUMP_DIR / f"{asin}_{ts}.html").write_text(html, encoding="utf-8")
+        _prune_no_price_dumps(_NO_PRICE_DUMP_DIR)
+    except OSError as exc:
+        LOGGER.info(
+            "PDP no-price html dump failed asin=%s (ignored): %s",
+            asin,
+            exc,
+            extra={"channel": "debug"},
+        )
 
 
 def detect_soft_captcha_from_html(html: str, url: str = "") -> bool:
@@ -348,7 +410,9 @@ async def _dismiss_continue_shopping_async(
     return clicks
 
 
-# Tight gate for buybox presence (inferred OOS diagnostics).
+# Tight gate for buybox presence (inferred OOS diagnostics). OOS markers are
+# included so a page with no buy box at all (genuinely out of stock) satisfies the
+# settle gate in ~1s instead of polling the full pdp_settle_seconds budget.
 _PDP_BUYBOX_WAIT_GATE_SELECTORS = (
     "#qualifiedBuybox",
     "#desktop_buybox",
@@ -357,6 +421,9 @@ _PDP_BUYBOX_WAIT_GATE_SELECTORS = (
     "#corePriceDisplay_desktop_feature_div",
     "#add-to-cart-button",
     "#buy-now-button",
+    "#outOfStock",
+    "#availability",
+    "#unqualifiedBuyBox",
 )
 # Broader markers for missing-price diagnostics only.
 _PDP_BUYBOX_PRESENT_SELECTORS = (
@@ -417,6 +484,7 @@ async def _extract_pdp_page_state_async(
     *,
     asin: str,
     allowed: list[str],
+    dump_no_price_html: bool = False,
 ) -> dict[str, Any]:
     """Extract title, price, merchant, shipping, OOS signals from a loaded PDP page."""
     availability_text = await _extract_availability_text_async(page)
@@ -427,6 +495,7 @@ async def _extract_pdp_page_state_async(
         await page.title() or ""
     )
     price = None if explicit_oos else await _extract_pdp_price_async(page)
+    buybox_purchasable = False
 
     if not explicit_oos and price is None and title:
         inferred, infer_reason = await _detect_inferred_oos_async(
@@ -436,28 +505,32 @@ async def _extract_pdp_page_state_async(
         if inferred:
             explicit_oos = True
             explicit_reason = infer_reason
-        elif await _buybox_purchasable_async(page):
-            # Purchasable buybox with no price yet: the price block often hydrates a
-            # beat after the buy button (seen on preorder pages). Give it a short,
-            # bounded poll before giving up — this path is rare, so the extra wait
-            # does not affect normal sweep timing.
-            price = await _poll_price_hydration_async(page, timeout_s=4.0, interval_s=0.5)
-            if price is not None:
-                LOGGER.info(
-                    "PDP price hydrated late asin=%s price=%s",
-                    asin,
-                    price,
-                    extra={"channel": "debug"},
-                )
-            else:
-                LOGGER.info(
-                    "PDP pay price missing with purchase action asin=%s (leaving unknown)",
-                    asin,
-                    extra={"channel": "debug"},
-                )
         else:
-            explicit_oos = True
-            explicit_reason = "no_pay_price"
+            buybox_purchasable = await _buybox_purchasable_async(page)
+            if buybox_purchasable:
+                # Purchasable buybox with no price yet: the price block often hydrates
+                # a beat after the buy button (seen on preorder/transitioning pages).
+                # Give it a short, bounded poll before giving up — this path is rare,
+                # so the extra wait does not affect normal sweep timing.
+                price = await _poll_price_hydration_async(page, timeout_s=4.0, interval_s=0.5)
+                if price is not None:
+                    LOGGER.info(
+                        "PDP price hydrated late asin=%s price=%s",
+                        asin,
+                        price,
+                        extra={"channel": "debug"},
+                    )
+                else:
+                    LOGGER.info(
+                        "PDP pay price missing with purchase action asin=%s (leaving unknown)",
+                        asin,
+                        extra={"channel": "debug"},
+                    )
+            else:
+                explicit_oos = True
+                explicit_reason = "no_pay_price"
+            if price is None and dump_no_price_html:
+                await _dump_no_price_html(page, asin)
         if explicit_oos and explicit_reason:
             LOGGER.info(
                 "PDP no pay price asin=%s reason=%s",
@@ -484,6 +557,7 @@ async def _extract_pdp_page_state_async(
         "explicit_reason": explicit_reason,
         "title": title,
         "price": price,
+        "buybox_purchasable": buybox_purchasable,
         "merchant_blob": merchant_blob,
         "shipping": shipping,
         "image_url": image_url,
@@ -801,6 +875,7 @@ def _pdp_row(
     allowed: list[str],
     availability_text: str = "",
     explicit_oos: bool = False,
+    buybox_purchasable: bool = False,
 ) -> dict[str, Any]:
     seller_ok = merchant_matches_allowed(merchant_blob, allowed)
     shippable_ok = not is_not_shippable_text(shipping_text)
@@ -821,13 +896,31 @@ def _pdp_row(
         # evidence — a live Amazon.com preorder wave was classified OOS in 2s and
         # missed entirely (B0GYTRYV7P, 2026-07-13). Leave it unknown so the retry
         # runs and the state engine skips the update instead of flipping stock.
+        #
+        # When the buybox is an allowed-seller purchasable offer, tag it
+        # priceless_purchasable so the state engine can confirm-and-alert the restock
+        # (streak-gated) even though no price rendered. Confidence stays unknown so
+        # every existing consumer (and the in-page retry) still treats it as ambiguous.
         stock_confidence = "unknown"
-        stock_reason = "no_pay_price"
+        if seller_ok and buybox_purchasable:
+            stock_reason = "priceless_purchasable"
+        else:
+            stock_reason = "no_pay_price"
     else:
         if price is None:
             stock_reason = "missing_price"
         elif not seller_ok:
             stock_reason = "seller_mismatch"
+            # A parsed price with a non-empty merchant blob that does not match any
+            # allowed seller is a settled observation: a 3P seller holds the buybox,
+            # i.e. the Amazon offer is gone. Promote it from ambiguous "unknown" to
+            # weak "confirmed_out" so the state-engine OOS debounce can count it and
+            # eventually flip the DB (see C9). Two consecutive of these ~= real
+            # "Amazon offer gone", which arms the short confirmed cooldown for the
+            # next allocation wave. An empty blob means extraction was incomplete
+            # (not evidence) — leave that unknown so the in-page retry still runs.
+            if (merchant_blob or "").strip():
+                stock_confidence = "confirmed_out"
         elif not shippable_ok:
             stock_reason = "not_shippable"
         else:
@@ -839,6 +932,7 @@ def _pdp_row(
         "in_stock": bool(qualifies),
         "stock_confidence": stock_confidence,
         "stock_reason": stock_reason,
+        "buybox_purchasable": bool(buybox_purchasable),
         "shipping_text": shipping_text,
         "availability_text": availability_text,
         "image_url": image_url,
@@ -860,6 +954,7 @@ def _pdp_row_would_be_unknown(
     allowed: list[str],
     availability_text: str = "",
     explicit_oos: bool = False,
+    buybox_purchasable: bool = False,
 ) -> bool:
     """True when _pdp_row would classify stock_confidence as unknown (retry candidate)."""
     row = _pdp_row(
@@ -872,8 +967,55 @@ def _pdp_row_would_be_unknown(
         allowed=allowed,
         availability_text=availability_text,
         explicit_oos=explicit_oos,
+        buybox_purchasable=buybox_purchasable,
     )
     return str(row.get("stock_confidence") or "") == "unknown"
+
+
+# Unknown-confidence reasons where a short in-page retry can still resolve the row:
+# the price node may hydrate a beat late (no_pay_price) or the purchasable buybox may
+# render its price (priceless_purchasable). Shared with monitor_engine's fast-recheck.
+_PDP_RETRY_UNKNOWN_REASONS = frozenset({"no_pay_price", "priceless_purchasable"})
+
+
+def _pdp_row_should_retry_unknown(
+    *,
+    asin: str,
+    title: str,
+    price: float | None,
+    shipping_text: str,
+    image_url: str | None,
+    merchant_blob: str,
+    allowed: list[str],
+    availability_text: str = "",
+    explicit_oos: bool = False,
+    buybox_purchasable: bool = False,
+) -> bool:
+    """Reason-aware gate for the in-page unknown retry (C4).
+
+    Only missing-price rows (price still hydrating) or rows whose merchant blob has
+    not loaded yet are worth re-reading. A clean seller_mismatch (price parsed,
+    non-empty 3P blob with no allowed-seller match) is a settled classification —
+    retrying it just burns ~2.5s of tab time per check for no benefit.
+    """
+    row = _pdp_row(
+        asin,
+        title=title,
+        price=price,
+        shipping_text=shipping_text,
+        image_url=image_url,
+        merchant_blob=merchant_blob,
+        allowed=allowed,
+        availability_text=availability_text,
+        explicit_oos=explicit_oos,
+        buybox_purchasable=buybox_purchasable,
+    )
+    if str(row.get("stock_confidence") or "") != "unknown":
+        return False
+    reason = str(row.get("stock_reason") or "")
+    if reason in _PDP_RETRY_UNKNOWN_REASONS:
+        return True
+    return not (merchant_blob or "").strip()
 
 
 # Create a “do not update this ASIN” marker when a single product page fails, so a bad scrape doesn’t flip the database state.
@@ -1155,6 +1297,7 @@ async def _scrape_pdp_on_context(
     pdp_settle_poll_interval_seconds: float = 1.0,
     pdp_unknown_retry_seconds: float = 2.5,
     pdp_continue_shopping_max_clicks: int = _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT,
+    pdp_dump_no_price_html: bool = True,
 ) -> tuple[list[dict[str, Any]], float]:
     """Scrape watch ASINs on an existing async BrowserContext (caller owns bandwidth meter)."""
     cycle_started = time.monotonic()
@@ -1323,17 +1466,20 @@ async def _scrape_pdp_on_context(
                         extra={"channel": "debug"},
                     )
 
-                state = await _extract_pdp_page_state_async(page, asin=asin, allowed=allowed)
+                state = await _extract_pdp_page_state_async(
+                    page, asin=asin, allowed=allowed, dump_no_price_html=pdp_dump_no_price_html
+                )
                 availability_text = state["availability_text"]
                 explicit_oos = bool(state["explicit_oos"])
                 explicit_reason = state.get("explicit_reason")
                 title = str(state.get("title") or "")
                 price = state.get("price")
+                buybox_purchasable = bool(state.get("buybox_purchasable"))
                 merchant_blob = str(state.get("merchant_blob") or "")
                 shipping = str(state.get("shipping") or "")
                 image_url = state.get("image_url")
 
-                if _pdp_row_would_be_unknown(
+                if _pdp_row_should_retry_unknown(
                     asin=asin,
                     title=title,
                     price=price if isinstance(price, (int, float)) else None,
@@ -1343,6 +1489,7 @@ async def _scrape_pdp_on_context(
                     allowed=allowed,
                     availability_text=availability_text,
                     explicit_oos=explicit_oos,
+                    buybox_purchasable=buybox_purchasable,
                 ) and unknown_retry_s > 0:
                     LOGGER.info(
                         "PDP unknown confidence asin=%s reason=initial_pass retry_s=%s",
@@ -1351,16 +1498,19 @@ async def _scrape_pdp_on_context(
                         extra={"channel": "debug"},
                     )
                     await asyncio.sleep(unknown_retry_s)
-                    state = await _extract_pdp_page_state_async(page, asin=asin, allowed=allowed)
+                    state = await _extract_pdp_page_state_async(
+                        page, asin=asin, allowed=allowed, dump_no_price_html=pdp_dump_no_price_html
+                    )
                     availability_text = state["availability_text"]
                     explicit_oos = bool(state["explicit_oos"])
                     explicit_reason = state.get("explicit_reason")
                     title = str(state.get("title") or "")
                     price = state.get("price")
+                    buybox_purchasable = bool(state.get("buybox_purchasable"))
                     merchant_blob = str(state.get("merchant_blob") or "")
                     shipping = str(state.get("shipping") or "")
                     image_url = state.get("image_url")
-                    resolved = not _pdp_row_would_be_unknown(
+                    resolved = not _pdp_row_should_retry_unknown(
                         asin=asin,
                         title=title,
                         price=price if isinstance(price, (int, float)) else None,
@@ -1405,6 +1555,7 @@ async def _scrape_pdp_on_context(
                     allowed=allowed,
                     availability_text=availability_text,
                     explicit_oos=explicit_oos,
+                    buybox_purchasable=buybox_purchasable,
                 )
                 if explicit_oos and explicit_reason:
                     row["stock_reason"] = explicit_reason
@@ -1502,6 +1653,7 @@ async def _run_pdp_watch_async(
     pdp_settle_poll_interval_seconds: float = 1.0,
     pdp_unknown_retry_seconds: float = 2.5,
     pdp_continue_shopping_max_clicks: int = _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT,
+    pdp_dump_no_price_html: bool = True,
     context: Any | None = None,
     config: dict[str, Any] | None = None,
     record_metrics: bool = True,
@@ -1517,6 +1669,7 @@ async def _run_pdp_watch_async(
         "pdp_settle_poll_interval_seconds": pdp_settle_poll_interval_seconds,
         "pdp_unknown_retry_seconds": pdp_unknown_retry_seconds,
         "pdp_continue_shopping_max_clicks": pdp_continue_shopping_max_clicks,
+        "pdp_dump_no_price_html": pdp_dump_no_price_html,
     }
 
     if context is not None:
@@ -1561,6 +1714,7 @@ async def scrape_pdp_watch_async(
     pdp_settle_poll_interval_seconds: float = 1.0,
     pdp_unknown_retry_seconds: float = 2.5,
     pdp_continue_shopping_max_clicks: int = _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT,
+    pdp_dump_no_price_html: bool = True,
     context: Any | None = None,
     config: dict[str, Any] | None = None,
     record_metrics: bool = True,
@@ -1591,6 +1745,7 @@ async def scrape_pdp_watch_async(
     cfg = config if isinstance(config, dict) else {}
     settle_poll = float(cfg.get("pdp_settle_poll_interval_seconds", pdp_settle_poll_interval_seconds))
     unknown_retry = float(cfg.get("pdp_unknown_retry_seconds", pdp_unknown_retry_seconds))
+    dump_no_price = bool(cfg.get("pdp_dump_no_price_html", pdp_dump_no_price_html))
 
     return await _run_pdp_watch_async(
         normalized,
@@ -1605,6 +1760,7 @@ async def scrape_pdp_watch_async(
         pdp_settle_poll_interval_seconds=settle_poll,
         pdp_unknown_retry_seconds=unknown_retry,
         pdp_continue_shopping_max_clicks=pdp_continue_shopping_max_clicks,
+        pdp_dump_no_price_html=dump_no_price,
         context=context,
         config=config,
         record_metrics=record_metrics,

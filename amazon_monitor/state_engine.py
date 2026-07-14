@@ -99,7 +99,8 @@ class StateEngine:
                     last_oos_confirmed INTEGER NOT NULL DEFAULT 0,
                     is_preorder INTEGER NOT NULL DEFAULT 0,
                     target_alert_armed INTEGER NOT NULL DEFAULT 1,
-                    target_alert_last_sent TEXT
+                    target_alert_last_sent TEXT,
+                    priceless_streak INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS aes_products (
@@ -169,6 +170,10 @@ class StateEngine:
             self.conn.execute("ALTER TABLE products ADD COLUMN target_alert_armed INTEGER NOT NULL DEFAULT 1")
         if not self._table_has_column("products", "target_alert_last_sent"):
             self.conn.execute("ALTER TABLE products ADD COLUMN target_alert_last_sent TEXT")
+        if not self._table_has_column("products", "priceless_streak"):
+            self.conn.execute(
+                "ALTER TABLE products ADD COLUMN priceless_streak INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _maybe_cache_image(
         self,
@@ -434,6 +439,11 @@ class StateEngine:
             target_cooldown_hours = float((config or {}).get("target_price_alert_cooldown_hours", 6))
         except (TypeError, ValueError):
             target_cooldown_hours = 6.0
+        priceless_alert_enabled = bool((config or {}).get("pdp_priceless_restock_alert", True))
+        try:
+            priceless_confirm_checks = max(1, int((config or {}).get("pdp_priceless_confirm_checks", 2)))
+        except (TypeError, ValueError):
+            priceless_confirm_checks = 2
 
         def _tel(event: str, *, asin: str | None = None, **fields: Any) -> None:
             if telemetry and cycle_id:
@@ -535,13 +545,82 @@ class StateEngine:
                 old_stock = int(row["in_stock"] or 0)
                 seller_snippet = " ".join(str(item.get("seller_text") or "").split())[:200] or None
                 if confidence == "unknown":
-                    _tel(
-                        "pdp_watch_unknown_stock",
-                        asin=asin,
-                        reason=reason or "unknown",
-                        price=new_price,
-                        seller_snippet=seller_snippet,
-                    )
+                    if reason == "priceless_purchasable" and priceless_alert_enabled:
+                        # A purchasable allowed-seller buybox rendered no price. This is
+                        # exactly the restock-transition state that price extraction
+                        # keeps discarding, so confirm it over a couple of checks and
+                        # alert instead of silently skipping. The alert carries no price
+                        # (webhook template renders "not available"); a later check with
+                        # a real price updates the row via the normal in-stock path.
+                        old_streak = int(row["priceless_streak"] or 0)
+                        new_streak = old_streak + 1
+                        self.conn.execute(
+                            "UPDATE products SET priceless_streak = ? WHERE asin = ?",
+                            (new_streak, asin),
+                        )
+                        new_preorder = 1 if bool(item.get("is_preorder")) else 0
+                        old_preorder = int(row["is_preorder"] or 0)
+                        # Same preorder-suppression gate as the normal restock path:
+                        # preorder->preorder flaps on weak evidence are noise unless the
+                        # preceding OOS was strong-text confirmed.
+                        preorder_suppressed = bool(
+                            new_preorder and old_preorder and not bool(row["last_oos_confirmed"])
+                        )
+                        if old_stock == 0 and new_streak >= priceless_confirm_checks and not preorder_suppressed:
+                            alert = self._emit_stock_alert_if_allowed(
+                                alert_type="back_in_stock",
+                                source=row_source,
+                                asin=asin,
+                                title=title,
+                                price=None,
+                                image_url=image_url,
+                                shipping=ship_line,
+                                config=config,
+                                telemetry=telemetry,
+                                cycle_id=cycle_id,
+                                _tel=_tel,
+                                confirmed_transition=bool(row["last_oos_confirmed"]) and not new_preorder,
+                            )
+                            if alert is not None:
+                                alerts.append(alert)
+                                back_in_stock_count += 1
+                                self.conn.execute(
+                                    """
+                                    UPDATE products
+                                    SET in_stock = 1,
+                                        price = NULL,
+                                        priceless_streak = 0,
+                                        oos_miss_streak = 0,
+                                        is_preorder = ?,
+                                        last_seen = ?,
+                                        last_stock_alert = ?
+                                    WHERE asin = ?
+                                    """,
+                                    (new_preorder, now, now, asin),
+                                )
+                        elif old_stock == 0 and new_streak >= priceless_confirm_checks and preorder_suppressed:
+                            _tel("pdp_preorder_realert_suppressed", asin=asin, price=None)
+                        _tel(
+                            "pdp_watch_priceless_streak",
+                            asin=asin,
+                            streak=new_streak,
+                            confirm_checks=priceless_confirm_checks,
+                            old_stock=old_stock,
+                        )
+                    else:
+                        # Any other unknown result resolves the ASIN away from priceless;
+                        # drop a stale streak so a future restock starts counting fresh.
+                        if int(row["priceless_streak"] or 0):
+                            self.conn.execute(
+                                "UPDATE products SET priceless_streak = 0 WHERE asin = ?", (asin,)
+                            )
+                        _tel(
+                            "pdp_watch_unknown_stock",
+                            asin=asin,
+                            reason=reason or "unknown",
+                            price=new_price,
+                            seller_snippet=seller_snippet,
+                        )
                     skipped_update_count += 1
                     continue
                 if new_stock == 0:
@@ -582,13 +661,29 @@ class StateEngine:
                             miss_streak=miss_streak,
                             confirm_cycles=confirm_cycles,
                         )
-                    oos_confirmed = 1 if oos_strong else (int(row["last_oos_confirmed"] or 0) if old_stock == 0 else 0)
+                    # Arm the confirmed cooldown for the next allocation wave when the
+                    # OOS is either strong page text OR a debounced seller_mismatch that
+                    # has now been observed on `confirm_cycles` consecutive checks. Two
+                    # consecutive parsed-3P-buybox observations ~= a real "Amazon offer
+                    # gone", so treating them as a confirmed transition lets the next
+                    # Amazon wave re-alert on the short confirmed cooldown. Previously
+                    # waves that passed through 3P-buybox interludes never flipped the DB
+                    # (stayed unknown), so no 0->1 edge fired and repeat waves never
+                    # re-alerted. Otherwise keep the prior confirmed flag while already
+                    # OOS, else clear it.
+                    oos_confirmed = (
+                        1
+                        if oos_strong
+                        or (reason == "seller_mismatch" and miss_streak >= confirm_cycles)
+                        else (int(row["last_oos_confirmed"] or 0) if old_stock == 0 else 0)
+                    )
                     self.conn.execute(
                         """
                         UPDATE products
                         SET in_stock = ?,
                             oos_miss_streak = ?,
                             last_oos_confirmed = ?,
+                            priceless_streak = 0,
                             image_url = COALESCE(?, image_url),
                             target_alert_armed = 1
                         WHERE asin = ?
@@ -607,6 +702,7 @@ class StateEngine:
                         SET price = COALESCE(?, price),
                             in_stock = 1,
                             oos_miss_streak = 0,
+                            priceless_streak = 0,
                             is_preorder = ?,
                             last_seen = ?,
                             image_url = COALESCE(?, image_url)
@@ -620,6 +716,7 @@ class StateEngine:
                         UPDATE products
                         SET price = COALESCE(?, price),
                             oos_miss_streak = 0,
+                            priceless_streak = 0,
                             is_preorder = ?,
                             last_seen = ?,
                             image_url = COALESCE(?, image_url)

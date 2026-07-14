@@ -32,5 +32,9 @@
   "aes-llc.html": {
     "pay_price": 69.99,
     "delivery_contains": ["June 4 - 11"]
+  },
+  "generic-buybox.html": {
+    "pay_price": 42.50,
+    "delivery_contains": ["FREE delivery"]
   }
 }

@@ -59,8 +59,11 @@ class TestPdpSelectorConstantsFromPlan(unittest.TestCase):
         self.assertTrue(_PDP_PRICE_PAY_SELECTORS[0].startswith("#qualifiedBuybox"))
 
     def test_pay_selectors_exclude_list_price_path(self) -> None:
-        joined = " ".join(_PDP_PRICE_PAY_SELECTORS)
-        self.assertNotIn("a-text-price", joined)
+        # a-text-price (strike-through list price) may only appear as a :not() negation
+        # guard on the generic .a-price fallbacks, never as a positive selector target.
+        for sel in _PDP_PRICE_PAY_SELECTORS:
+            stripped = sel.replace(":not(.a-text-price)", "")
+            self.assertNotIn("a-text-price", stripped)
 
     def test_buybox_present_untouched(self) -> None:
         self.assertIn("#tabular-buybox", _PDP_BUYBOX_PRESENT_SELECTORS)

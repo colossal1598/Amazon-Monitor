@@ -37,6 +37,24 @@ def _accessibility_label_price(html: str) -> str:
     return (raw or "").strip()
 
 
+def _a_price_offscreen_excluding_text(chunk: str) -> str:
+    """First `.a-price` offscreen amount whose class is not `.a-text-price` (list price)."""
+    for m in re.finditer(r'class="(a-price[^"]*)"', chunk):
+        cls = m.group(1)
+        if "a-text-price" in cls:
+            continue
+        window = chunk[m.end() : m.end() + 400]
+        raw = _first_group(r'<span class="a-offscreen">([^<]*)</span>', window)
+        if raw:
+            return raw.strip()
+    return ""
+
+
+def _price_element_text(chunk: str) -> str:
+    """Bare price element text (e.g. #price_inside_buybox / #newBuyBoxPrice)."""
+    return " ".join(re.sub(r"<[^>]+>", " ", chunk).split())
+
+
 def _pay_price_from_whole_fraction(chunk: str) -> float | None:
     pay = re.search(
         r'class="[^"]*apex-pricetopay-value[^"]*"[\s\S]{0,1200}',
@@ -74,15 +92,43 @@ def extract_pay_price_from_html(html: str) -> float | None:
             _chunk_after_id(html, "tp_price_block_total_price_ww", limit=2_000),
             "__offscreen_only__",
         ),
+        "#qualifiedBuybox .a-price:not(.a-text-price) .a-offscreen": (
+            _chunk_after_id(html, "qualifiedBuybox"),
+            "__a_price_no_text__",
+        ),
+        "#corePrice_feature_div .a-price:not(.a-text-price) .a-offscreen": (
+            _chunk_after_id(html, "corePrice_feature_div"),
+            "__a_price_no_text__",
+        ),
+        "#corePriceDisplay_desktop_feature_div .a-price:not(.a-text-price) .a-offscreen": (
+            _chunk_after_id(html, "corePriceDisplay_desktop_feature_div"),
+            "__a_price_no_text__",
+        ),
+        "#buybox .a-price:not(.a-text-price) .a-offscreen": (
+            _chunk_after_id(html, "buybox"),
+            "__a_price_no_text__",
+        ),
+        "#price_inside_buybox": (
+            _chunk_after_id(html, "price_inside_buybox", limit=300),
+            "__element_text__",
+        ),
+        "#newBuyBoxPrice": (
+            _chunk_after_id(html, "newBuyBoxPrice", limit=300),
+            "__element_text__",
+        ),
     }
     for sel in _PDP_PRICE_PAY_SELECTORS:
-        chunk, kind = selector_patterns[sel]
+        chunk, kind = selector_patterns.get(sel, ("", ""))
         if not chunk:
             continue
         if kind == "__accessibility__":
             raw = _accessibility_label_price(chunk)
         elif kind == "__offscreen_only__":
             raw = _offscreen_in_chunk(chunk, "a-price")
+        elif kind == "__a_price_no_text__":
+            raw = _a_price_offscreen_excluding_text(chunk)
+        elif kind == "__element_text__":
+            raw = _price_element_text(chunk)
         else:
             raw = _offscreen_in_chunk(chunk, kind)
         price = _parse_price_text(raw)

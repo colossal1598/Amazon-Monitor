@@ -41,7 +41,7 @@ from browser_factory import (
 from exceptions import BrowserDisconnected, CaptchaBlocked, NetworkAccessDenied
 from filter_pipeline import run_search_filter_pipeline
 from pdp_helpers import valid_asin
-from pdp_scraper import _scrape_pdp_on_context, pdp_skip_log_label
+from pdp_scraper import _PDP_RETRY_UNKNOWN_REASONS, _scrape_pdp_on_context, pdp_skip_log_label
 from search_scraper import scrape_search_on_context_async
 from settings_store import load_runtime_config
 from state_engine import StateEngine
@@ -137,6 +137,30 @@ def _clamp_tabs(raw: Any) -> int:
         return 2
 
 
+def _compute_fast_retry(
+    *,
+    confidence: str,
+    reason: str,
+    prior_count: int,
+    max_retries: int,
+    retry_seconds: float,
+) -> tuple[float | None, int]:
+    """Decide the next-check interval override for an unknown price-miss result.
+
+    Returns ``(interval_override, new_count)``. ``interval_override`` is ``retry_seconds``
+    while the ASIN keeps returning an unknown no_pay_price/priceless_purchasable row and
+    the consecutive fast-retry count is under ``max_retries``; otherwise ``None`` (normal
+    interval). The count resets to 0 on any other result, per C2.
+    """
+    if (
+        confidence == "unknown"
+        and reason in _PDP_RETRY_UNKNOWN_REASONS
+        and prior_count < max_retries
+    ):
+        return retry_seconds, prior_count + 1
+    return None, 0
+
+
 class RingScheduler:
     """Round-robin freshness scheduler: always hand out the most-overdue ASIN.
 
@@ -174,10 +198,14 @@ class RingScheduler:
             self.checked_out.add(best)
         return best
 
-    def complete(self, asin: str, now: float) -> None:
+    def complete(self, asin: str, now: float, interval_override: float | None = None) -> None:
         self.checked_out.discard(asin)
         if asin in self.next_due:
-            self.next_due[asin] = now + self.interval
+            # interval_override lets the engine schedule a short fast re-check (e.g.
+            # after a no_pay_price/priceless_purchasable miss) instead of waiting the
+            # full freshness interval; None keeps the normal cadence.
+            interval = self.interval if interval_override is None else max(0.0, float(interval_override))
+            self.next_due[asin] = now + interval
 
     def seconds_to_next(self, now: float) -> float:
         pending = [d for a, d in self.next_due.items() if a not in self.checked_out]
@@ -217,6 +245,10 @@ class MonitorEngine:
         self.watch: list[str] = []
         self.scheduler = RingScheduler(60.0)
         self.asin_status: dict[str, dict[str, Any]] = {}
+        # C2 fast re-check bookkeeping: consecutive fast retries per ASIN, and the
+        # interval override the worker's finally hands to scheduler.complete().
+        self._fast_retry_counts: dict[str, int] = {}
+        self._pending_overrides: dict[str, float | None] = {}
         self.jobs: dict[str, dict[str, str | None]] = {
             "stream": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
             "aes": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
@@ -302,6 +334,18 @@ class MonitorEngine:
             return max(15.0, float(self.config.get("asin_check_interval_seconds", 60)))
         except (TypeError, ValueError):
             return 60.0
+
+    def _fast_retry_seconds(self) -> float:
+        try:
+            return max(1.0, float(self.config.get("pdp_unknown_fast_retry_seconds", 15)))
+        except (TypeError, ValueError):
+            return 15.0
+
+    def _fast_retry_max(self) -> int:
+        try:
+            return max(0, int(self.config.get("pdp_unknown_fast_retry_max", 3)))
+        except (TypeError, ValueError):
+            return 3
 
     def _aes_interval_seconds(self) -> float:
         try:
@@ -439,6 +483,7 @@ class MonitorEngine:
             pdp_settle_poll_interval_seconds=float(config.get("pdp_settle_poll_interval_seconds", 1.0)),
             pdp_unknown_retry_seconds=float(config.get("pdp_unknown_retry_seconds", 2.5)),
             pdp_continue_shopping_max_clicks=int(config.get("pdp_continue_shopping_max_clicks", 3)),
+            pdp_dump_no_price_html=bool(config.get("pdp_dump_no_price_html", True)),
         )
         row = rows[0] if rows else None
         self._sweep_checks += 1
@@ -464,6 +509,23 @@ class MonitorEngine:
         if in_stock:
             self._sweep_in_stock += 1
         self.asin_status[asin] = {**status, "result": "ok", "in_stock": in_stock, "price": row.get("price")}
+
+        # C2: a purchasable-but-priceless (or price-still-hydrating) miss is the exact
+        # restock-transition state price extraction keeps discarding. Re-check it in
+        # seconds — not the full freshness interval — up to a bounded number of times
+        # so a real restock alerts fast (paired with the C3 priceless streak).
+        override, new_count = _compute_fast_retry(
+            confidence=str(row.get("stock_confidence") or "").strip().lower(),
+            reason=str(row.get("stock_reason") or "").strip(),
+            prior_count=self._fast_retry_counts.get(asin, 0),
+            max_retries=self._fast_retry_max(),
+            retry_seconds=self._fast_retry_seconds(),
+        )
+        if new_count:
+            self._fast_retry_counts[asin] = new_count
+        else:
+            self._fast_retry_counts.pop(asin, None)
+        self._pending_overrides[asin] = override
 
         alerts, _summary = self.state_engine.process_pdp_watch_candidates(
             [row],
@@ -531,7 +593,20 @@ class MonitorEngine:
                 # telemetry showed retries against the identical keyword-SERP URL
                 # almost never recover once the soft-error window has started.
                 attempt_url = aes_llc_url
-                if outer_attempt == outer_attempts and outer_attempt > 1 and fallback_url:
+                if fallback_url and self._aes_fail_streak > 0:
+                    # C6: recent cycles were soft-error throttled on the keyword SERP —
+                    # lead with the storefront URL (separate throttle bucket) and swap
+                    # the primary keyword URL to the later attempt once it may have cooled.
+                    attempt_url = fallback_url if outer_attempt == 1 else aes_llc_url
+                    LOGGER.info(
+                        "AES/SERP attempt %s/%s leading with fallback URL after fail_streak=%s: %s",
+                        outer_attempt,
+                        outer_attempts,
+                        self._aes_fail_streak,
+                        attempt_url,
+                        extra={"channel": "debug"},
+                    )
+                elif outer_attempt == outer_attempts and outer_attempt > 1 and fallback_url:
                     attempt_url = fallback_url
                     LOGGER.info(
                         "AES/SERP attempt %s/%s using fallback storefront URL: %s",
@@ -632,7 +707,9 @@ class MonitorEngine:
                 LOGGER.warning("check failed asin=%s: %s", asin, exc, extra={"channel": "debug"})
             finally:
                 self.last_progress = time.monotonic()
-                self.scheduler.complete(asin, time.monotonic())
+                self.scheduler.complete(
+                    asin, time.monotonic(), interval_override=self._pending_overrides.pop(asin, None)
+                )
                 self.write_health()
 
     async def _run_session(self) -> None:
