@@ -46,8 +46,12 @@ class TestPdpRowWouldBeUnknown(unittest.TestCase):
             )
         )
 
-    def test_missing_price_with_title_is_confirmed_out_not_unknown(self) -> None:
-        self.assertFalse(
+    def test_missing_price_with_title_and_no_oos_signal_is_unknown(self) -> None:
+        """Title without price and without an explicit OOS signal must be treated
+        as unknown so the in-scrape retry runs — price often hydrates after the
+        buy button (preorder buyboxes). Previously classified confirmed_out,
+        which skipped the retry and missed a live preorder wave (B0GYTRYV7P)."""
+        self.assertTrue(
             _pdp_row_would_be_unknown(
                 asin="B011111111",
                 title="Pokemon Card",

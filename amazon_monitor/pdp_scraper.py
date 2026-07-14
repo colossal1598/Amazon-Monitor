@@ -396,6 +396,22 @@ async def _wait_for_buybox_ready_async(
     return await _pdp_buybox_present_async(page)
 
 
+async def _poll_price_hydration_async(
+    page: Any,
+    *,
+    timeout_s: float,
+    interval_s: float,
+) -> float | None:
+    """Re-try price extraction for a short window while the price block hydrates."""
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    while time.monotonic() < deadline:
+        await asyncio.sleep(max(0.1, float(interval_s)))
+        price = await _extract_pdp_price_async(page)
+        if price is not None:
+            return price
+    return None
+
+
 async def _extract_pdp_page_state_async(
     page: Any,
     *,
@@ -421,11 +437,24 @@ async def _extract_pdp_page_state_async(
             explicit_oos = True
             explicit_reason = infer_reason
         elif await _buybox_purchasable_async(page):
-            LOGGER.info(
-                "PDP pay price missing with purchase action asin=%s (leaving unknown)",
-                asin,
-                extra={"channel": "debug"},
-            )
+            # Purchasable buybox with no price yet: the price block often hydrates a
+            # beat after the buy button (seen on preorder pages). Give it a short,
+            # bounded poll before giving up — this path is rare, so the extra wait
+            # does not affect normal sweep timing.
+            price = await _poll_price_hydration_async(page, timeout_s=4.0, interval_s=0.5)
+            if price is not None:
+                LOGGER.info(
+                    "PDP price hydrated late asin=%s price=%s",
+                    asin,
+                    price,
+                    extra={"channel": "debug"},
+                )
+            else:
+                LOGGER.info(
+                    "PDP pay price missing with purchase action asin=%s (leaving unknown)",
+                    asin,
+                    extra={"channel": "debug"},
+                )
         else:
             explicit_oos = True
             explicit_reason = "no_pay_price"
@@ -785,8 +814,14 @@ def _pdp_row(
         stock_confidence = "confirmed_out"
         stock_reason = "explicit_oos"
     elif price is None and (title or "").strip():
-        # Should not happen when worker sets explicit_oos for title+no price; guard anyway.
-        stock_confidence = "confirmed_out"
+        # Title present, no price, and no explicit OOS signal: the extraction worker
+        # deliberately leaves purchasable-but-priceless pages (price still hydrating,
+        # e.g. preorder buyboxes) as ambiguous. Hardening this into confirmed_out
+        # bypassed the unknown-retry pass and fed the OOS debounce with false
+        # evidence — a live Amazon.com preorder wave was classified OOS in 2s and
+        # missed entirely (B0GYTRYV7P, 2026-07-13). Leave it unknown so the retry
+        # runs and the state engine skips the update instead of flipping stock.
+        stock_confidence = "unknown"
         stock_reason = "no_pay_price"
     else:
         if price is None:

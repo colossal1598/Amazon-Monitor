@@ -163,6 +163,58 @@ function updateAsinCounts(role, count) {
   }
 }
 
+function createTargetPriceInput(item) {
+  const input = document.createElement("input");
+  input.type = "number";
+  input.step = "0.01";
+  input.min = "0.01";
+  input.dir = "ltr";
+  input.className = "target-price-input";
+  input.placeholder = "—";
+  input.value = item.target_price != null ? item.target_price : "";
+
+  const flash = (className) => {
+    input.classList.remove("target-saved", "target-error");
+    input.classList.add(className);
+    window.setTimeout(() => input.classList.remove(className), 1400);
+  };
+
+  input.addEventListener("change", async () => {
+    const raw = String(input.value || "").trim();
+    let targetPrice = null;
+    if (raw !== "") {
+      const n = parseFloat(raw);
+      if (!Number.isFinite(n) || n <= 0) {
+        flash("target-error");
+        showToast("מחיר יעד לא תקין — יש להזין מספר גדול מ־0", true);
+        return;
+      }
+      targetPrice = Math.round(n * 100) / 100;
+    }
+    try {
+      await apiJson("/api/asins/target", {
+        method: "PUT",
+        body: JSON.stringify({ asin: item.asin, target_price: targetPrice }),
+      });
+      input.value = targetPrice != null ? targetPrice : "";
+      flash("target-saved");
+    } catch (err) {
+      flash("target-error");
+      if (!isAuthError(err)) {
+        showToast(`שגיאה בשמירת מחיר יעד: ${err.message}`, true);
+      }
+    }
+  });
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      input.blur();
+    }
+  });
+
+  return input;
+}
+
 function renderAsinTable(role, items) {
   if (role === "watch") {
     state.watchItems = items;
@@ -186,6 +238,13 @@ function renderAsinTable(role, items) {
     const notesTd = document.createElement("td");
     notesTd.textContent = item.notes || "";
     tr.appendChild(notesTd);
+
+    if (role === "watch") {
+      const targetTd = document.createElement("td");
+      targetTd.className = "td-target";
+      targetTd.appendChild(createTargetPriceInput(item));
+      tr.appendChild(targetTd);
+    }
 
     const actionTd = document.createElement("td");
     const removeBtn = document.createElement("button");
@@ -337,6 +396,7 @@ function fillSettings(settings) {
   byId("tpl-new-product").value = templates.new_product || "";
   byId("tpl-price-drop").value = templates.price_drop || "";
   byId("tpl-back-in-stock").value = templates.back_in_stock || "";
+  byId("tpl-price-below-target").value = templates.price_below_target || "";
 }
 
 function collectSettingsPayload() {
@@ -376,6 +436,7 @@ function collectSettingsPayload() {
       new_product: byId("tpl-new-product").value,
       price_drop: byId("tpl-price-drop").value,
       back_in_stock: byId("tpl-back-in-stock").value,
+      price_below_target: byId("tpl-price-below-target").value,
     },
   };
 }
@@ -406,6 +467,7 @@ function bindDirtyTracking() {
     "wa-group-id", "wa-client-to", "price-drop-percent", "max-requests-per-minute",
     "affiliate-tag", "aes-url", "required-keywords", "title-blacklist-phrases",
     "allowed-sellers", "tpl-new-product", "tpl-price-drop", "tpl-back-in-stock",
+    "tpl-price-below-target",
   ];
   for (const id of ids) {
     const el = byId(id);

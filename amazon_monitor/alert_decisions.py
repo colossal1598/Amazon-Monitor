@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 
-AlertType = Literal["new_product", "back_in_stock", "price_drop"]
+AlertType = Literal["new_product", "back_in_stock", "price_drop", "price_below_target"]
 
 
 @dataclass(frozen=True)
@@ -88,3 +88,35 @@ def decide_price_drop(
     if pct_drop < threshold_pct:
         return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_BELOW_THRESHOLD")
     return AlertDecision(emit=True, alert_type="price_drop", skip_reason=None)
+
+
+# Decide if we should send a "price below target" alert: qualifying seller, known price
+# strictly under the configured target, and the per-ASIN hysteresis latch still armed.
+def decide_price_below_target(
+    price: float | None,
+    qualifies: bool,
+    target: float | None,
+    armed: bool,
+) -> AlertDecision:
+    """Whether to emit `price_below_target` (cooldown, if any, is applied by the caller).
+
+    Preconditions: ``qualifies`` already encodes the seller_ok/shippable/price-present
+    check done upstream by the PDP scraper (paid shipping does NOT affect this — only a
+    hard "cannot be shipped" disqualifies, which already makes the item non-qualifying).
+
+    Rules:
+    - No target configured -> never emit.
+    - Item must currently qualify (in-stock, allowed seller) with a known price.
+    - Price must be strictly below the target (item price alone, not price+shipping).
+    - The hysteresis latch (``armed``) must be set; callers disarm after firing and
+      re-arm once price is back at/above target or the item stops qualifying.
+    """
+    if target is None:
+        return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_NO_TARGET")
+    if not qualifies or price is None:
+        return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_NOT_QUALIFYING")
+    if price >= target:
+        return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_PRICE_NOT_BELOW_TARGET")
+    if not armed:
+        return AlertDecision(emit=False, alert_type=None, skip_reason="SKIP_DISARMED")
+    return AlertDecision(emit=True, alert_type="price_below_target", skip_reason=None)

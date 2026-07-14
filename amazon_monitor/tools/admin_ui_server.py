@@ -7,6 +7,7 @@ import binascii
 import hmac
 import json
 import logging
+import math
 import mimetypes
 import os
 import sqlite3
@@ -33,7 +34,14 @@ except ImportError:  # pragma: no cover - fallback for minimal test environments
         return False
 
 from pdp_helpers import valid_asin
-from settings_store import add_asin, list_asin_entries, load_runtime_config, remove_asin, set_setting
+from settings_store import (
+    add_asin,
+    list_asin_entries,
+    load_runtime_config,
+    remove_asin,
+    set_asin_target_price,
+    set_setting,
+)
 
 try:
     import sqlite_web  # noqa: F401
@@ -387,6 +395,27 @@ def _bandwidth_summary(monitor_db_path: str) -> dict[str, Any]:
     }
 
 
+def _parse_target_price(raw: Any) -> tuple[bool, float | None]:
+    """Validate an optional target_price value. Returns (ok, value).
+
+    None/absent is valid (clears the target). Otherwise must be a finite
+    float > 0.
+    """
+    if raw is None:
+        return True, None
+    if isinstance(raw, bool):
+        return False, None
+    if not isinstance(raw, (int, float, str)):
+        return False, None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return False, None
+    if not math.isfinite(value) or value <= 0:
+        return False, None
+    return True, value
+
+
 def _parse_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     content_length = int(handler.headers.get("Content-Length", "0"))
     raw = handler.rfile.read(content_length) if content_length > 0 else b"{}"
@@ -425,7 +454,28 @@ class AdminUIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _drain_request_body(self) -> None:
+        """Consume any unread request body before responding early (401/400).
+
+        Closing the connection with unread bytes in the socket buffer makes
+        Windows send a TCP RST, which can destroy the in-flight response before
+        the client reads it (observed as ConnectionAbortedError/WinError 10053
+        on unauthenticated POSTs). Bounded read so a huge bogus body can't
+        stall the handler thread.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return
+        remaining = min(max(0, length), 1_048_576)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def _send_unauthorized(self) -> None:
+        self._drain_request_body()
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="Amazon Monitor Admin UI", charset="UTF-8"')
         self.send_header("Content-Length", "0")
@@ -523,6 +573,28 @@ class AdminUIHandler(BaseHTTPRequestHandler):
         if not self._require_auth():
             return
         parsed = urlparse(self.path)
+
+        if parsed.path == "/api/asins/target":
+            try:
+                payload = _parse_json_body(self)
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+                return
+            asin = str(payload.get("asin") or "").strip().upper()
+            if not valid_asin(asin):
+                self._json(400, {"ok": False, "error": "invalid_asin"})
+                return
+            price_ok, target_price = _parse_target_price(payload.get("target_price"))
+            if not price_ok:
+                self._json(400, {"ok": False, "error": "invalid_target_price"})
+                return
+            found = set_asin_target_price(self.db_path, asin, target_price)
+            if not found:
+                self._json(404, {"ok": False, "error": "not_found"})
+                return
+            self._json(200, {"ok": True, "asin": asin, "target_price": target_price})
+            return
+
         if parsed.path != "/api/settings":
             self._json(404, {"ok": False, "error": "not_found"})
             return
@@ -579,8 +651,15 @@ class AdminUIHandler(BaseHTTPRequestHandler):
             if not valid_asin(asin):
                 self._json(400, {"ok": False, "error": "invalid_asin"})
                 return
-            add_asin(self.db_path, asin, role, notes=notes or None)
-            self._json(200, {"ok": True, "asin": asin, "role": role, "notes": notes})
+            price_ok, target_price = _parse_target_price(payload.get("target_price"))
+            if not price_ok:
+                self._json(400, {"ok": False, "error": "invalid_target_price"})
+                return
+            add_asin(self.db_path, asin, role, notes=notes or None, target_price=target_price)
+            self._json(
+                200,
+                {"ok": True, "asin": asin, "role": role, "notes": notes, "target_price": target_price},
+            )
             return
 
         if path == "/api/sqlite/start":

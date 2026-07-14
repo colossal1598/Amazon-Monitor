@@ -161,12 +161,14 @@
             <input id="watch-notes-input" type="text" placeholder="הערה (לא חובה)">
             <button id="watch-add-btn" class="btn btn-primary" type="button">הוספה</button>
           </div>
-          <table class="data-table asin-table">
-            <thead>
-              <tr><th>קוד מוצר</th><th>הערות</th><th class="th-action"></th></tr>
-            </thead>
-            <tbody id="watch-body"></tbody>
-          </table>
+          <div class="table-scroll">
+            <table class="data-table asin-table watch-table">
+              <thead>
+                <tr><th>קוד מוצר</th><th>הערות</th><th class="th-target">מחיר יעד ($)</th><th class="th-action"></th></tr>
+              </thead>
+              <tbody id="watch-body"></tbody>
+            </table>
+          </div>
           <p class="empty-note hidden" id="watch-empty">אין מוצרים במעקב — הוסיפו קוד מוצר למעלה</p>
         </div>
 
@@ -229,7 +231,7 @@
           <h2>תבניות הודעה</h2>
           <p class="hint">
             שדות נתמכים:
-            <code>{title}</code> <code>{price_text}</code> <code>{shipping}</code> <code>{affiliate_link}</code>
+            <code>{title}</code> <code>{price_text}</code> <code>{shipping}</code> <code>{affiliate_link}</code> <code>{target_price}</code>
           </p>
           <div class="field">
             <label for="tpl-new-product">מוצר חדש</label>
@@ -242,6 +244,10 @@
           <div class="field">
             <label for="tpl-back-in-stock">חזרה למלאי</label>
             <textarea id="tpl-back-in-stock" class="tpl-editor" rows="7"></textarea>
+          </div>
+          <div class="field">
+            <label for="tpl-price-below-target">ירידה מתחת למחיר יעד</label>
+            <textarea id="tpl-price-below-target" class="tpl-editor" rows="7"></textarea>
           </div>
         </div>
 

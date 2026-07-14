@@ -225,6 +225,33 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
             finally:
                 se.conn.close()
 
+    def test_unknown_no_pay_price_does_not_flip_stock(self) -> None:
+        """Purchasable-but-priceless scrape (unknown/no_pay_price) is ambiguous:
+        the state engine must skip the update, not feed the OOS debounce."""
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=1, price=19.99)
+                unknown_row = {
+                    "asin": "B011111111",
+                    "title": "Pokemon Card",
+                    "price": None,
+                    "in_stock": False,
+                    "shipping_text": "",
+                    "image_url": None,
+                    "seller": "pdp_watch",
+                    "stock_confidence": "unknown",
+                    "stock_reason": "no_pay_price",
+                }
+                for _ in range(3):
+                    alerts, _ = se.process_pdp_watch_candidates([dict(unknown_row)], {"B011111111"})
+                    self.assertEqual(alerts, [])
+                stock, price = _stock_and_price(se, "B011111111")
+                self.assertEqual(stock, 1)
+                self.assertEqual(price, 19.99)
+            finally:
+                se.conn.close()
+
     def test_confirmed_oos_row_marks_oos(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
@@ -293,6 +320,43 @@ class TestProcessPdpWatchSkip(unittest.TestCase):
                     ("B011111111",),
                 ).fetchall()
                 self.assertEqual([r[0] for r in rows], ["back_in_stock"])
+            finally:
+                se.conn.close()
+
+    def test_confirmed_preorder_wave_realerts(self) -> None:
+        """A preorder that sold out with STRONG page evidence and reopens is a real
+        allocation wave — it must alert (missed live wave, B0GYTRYV7P 2026-07-13)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=0, price=57.92)
+                se.conn.execute(
+                    "UPDATE products SET is_preorder = 1, last_oos_confirmed = 1 WHERE asin = ?",
+                    ("B011111111",),
+                )
+                se.conn.commit()
+                row = _pdp_row("B011111111", 57.92)
+                row["is_preorder"] = True
+                alerts, _ = se.process_pdp_watch_candidates([row], {"B011111111"})
+                self.assertEqual([a["type"] for a in alerts], ["back_in_stock"])
+            finally:
+                se.conn.close()
+
+    def test_weak_evidence_preorder_flap_stays_suppressed(self) -> None:
+        """Preorder 0->1 flips whose OOS was weak evidence (buybox churn) are noise."""
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                _seed_row(se, "B011111111", in_stock=0, price=57.92)
+                se.conn.execute(
+                    "UPDATE products SET is_preorder = 1, last_oos_confirmed = 0 WHERE asin = ?",
+                    ("B011111111",),
+                )
+                se.conn.commit()
+                row = _pdp_row("B011111111", 57.92)
+                row["is_preorder"] = True
+                alerts, _ = se.process_pdp_watch_candidates([row], {"B011111111"})
+                self.assertEqual(alerts, [])
             finally:
                 se.conn.close()
 

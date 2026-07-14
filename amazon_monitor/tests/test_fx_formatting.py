@@ -79,6 +79,41 @@ class TestFormatMessagePriceDrop(unittest.TestCase):
         self.assertNotIn("$100.00", msg)
 
 
+class TestFormatMessagePriceBelowTarget(unittest.TestCase):
+    def setUp(self) -> None:
+        _reset_fx_globals()
+
+    def test_price_below_target_mentions_target_and_shipping(self) -> None:
+        cfg = {"fx_enabled": False}
+        msg = webhook_sender._format_message(
+            {
+                "type": "price_below_target",
+                "title": "Pokemon Booster Box",
+                "price": 15.0,
+                "new_price": 15.0,
+                "target_price": 20.0,
+                "shipping": "משלוח: $7.99",
+                "affiliate_link": "https://www.amazon.com/dp/B011111111?tag=x",
+            },
+            cfg,
+        )
+        self.assertIn("20.00$", msg)
+        self.assertIn("$15.00", msg)
+        self.assertIn("משלוח: $7.99", msg)
+        self.assertIn("https://www.amazon.com/dp/B011111111?tag=x", msg)
+
+    def test_price_below_target_is_user_overridable(self) -> None:
+        self.assertIn("price_below_target", webhook_sender.USER_OVERRIDABLE_MESSAGE_KEYS)
+        cfg = {
+            "fx_enabled": False,
+            "wa_message_templates": {"price_below_target": "custom {target_price}"},
+        }
+        msg = webhook_sender._format_message(
+            {"type": "price_below_target", "target_price": 12.5}, cfg
+        )
+        self.assertEqual(msg, "custom 12.50")
+
+
 class TestBumpSearchTickRefreshCadence(unittest.TestCase):
     def setUp(self) -> None:
         _reset_fx_globals()

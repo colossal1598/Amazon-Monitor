@@ -104,6 +104,11 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     # The "all clear, back to normal" follow-up ping sent after a stalled/degraded
     # alert recovers. Considered noise on its own — off by default.
     "client_alert_recovery_enabled": False,
+    # Minimum gap between two price_below_target alerts for the same ASIN. The
+    # alert has its own arm/disarm hysteresis (fires once per below-target
+    # crossing); this cooldown additionally guards against a fast re-cross
+    # (price bounces back above target and dips below again) within the window.
+    "target_price_alert_cooldown_hours": 6,
     "fx_fallback_usd_ils": 3,
     "fx_request_timeout_seconds": 5,
     "affiliate_tag": "yourclient-20",
@@ -164,6 +169,11 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(str(row[1]) == column for row in rows)
+
+
 def _ensure_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -185,6 +195,8 @@ def _ensure_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_asins_role ON asins(role, enabled);
         """
     )
+    if not _table_has_column(conn, "asins", "target_price"):
+        conn.execute("ALTER TABLE asins ADD COLUMN target_price REAL")
 
 
 def _decode_value(raw_value: str) -> Any:
@@ -266,7 +278,7 @@ def list_asin_entries(db_path: str, role: str) -> list[dict[str, Any]]:
         _ensure_tables(conn)
         rows = conn.execute(
             """
-            SELECT asin, notes, created_at, updated_at
+            SELECT asin, notes, created_at, updated_at, target_price
             FROM asins
             WHERE role = ? AND enabled = 1
             ORDER BY created_at ASC, asin ASC
@@ -279,6 +291,7 @@ def list_asin_entries(db_path: str, role: str) -> list[dict[str, Any]]:
             "notes": str(row["notes"] or ""),
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
+            "target_price": float(row["target_price"]) if row["target_price"] is not None else None,
         }
         for row in rows
     ]
@@ -291,6 +304,7 @@ def add_asin(
     *,
     enabled: bool = True,
     notes: str | None = None,
+    target_price: float | None = None,
 ) -> None:
     role_norm = _valid_role(role)
     normalized = _normalize_asins([asin])
@@ -298,20 +312,47 @@ def add_asin(
         return
     asin_norm = normalized[0]
     now = _utc_iso()
+    target_price_val = float(target_price) if target_price is not None else None
     with closing(_connect(db_path)) as conn:
         _ensure_tables(conn)
         conn.execute(
             """
-            INSERT INTO asins(asin, role, enabled, notes, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO asins(asin, role, enabled, notes, created_at, updated_at, target_price)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(asin, role) DO UPDATE SET
                 enabled = excluded.enabled,
                 notes = excluded.notes,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                target_price = excluded.target_price
             """,
-            (asin_norm, role_norm, 1 if enabled else 0, notes, now, now),
+            (asin_norm, role_norm, 1 if enabled else 0, notes, now, now, target_price_val),
         )
         conn.commit()
+
+
+def set_asin_target_price(db_path: str, asin: str, target_price: float | None) -> bool:
+    """Set (or clear, with None) the target price for a watched ASIN.
+
+    Returns False when there is no ``watch`` row for this ASIN (nothing to update).
+    """
+    normalized = _normalize_asins([asin])
+    if not normalized:
+        return False
+    asin_norm = normalized[0]
+    now = _utc_iso()
+    target_price_val = float(target_price) if target_price is not None else None
+    with closing(_connect(db_path)) as conn:
+        _ensure_tables(conn)
+        cursor = conn.execute(
+            """
+            UPDATE asins
+            SET target_price = ?, updated_at = ?
+            WHERE asin = ? AND role = 'watch'
+            """,
+            (target_price_val, now, asin_norm),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
 
 
 def remove_asin(db_path: str, asin: str, role: str) -> None:
@@ -424,6 +465,19 @@ def _env(name: str) -> str | None:
     return None
 
 
+def _watch_target_prices(db_path: str) -> dict[str, float]:
+    with closing(_connect(db_path)) as conn:
+        _ensure_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT asin, target_price
+            FROM asins
+            WHERE role = 'watch' AND enabled = 1 AND target_price IS NOT NULL
+            """
+        ).fetchall()
+    return {str(row["asin"]).upper(): float(row["target_price"]) for row in rows}
+
+
 def load_runtime_config(db_path: str) -> dict[str, Any]:
     config: dict[str, Any] = copy.deepcopy(DEFAULT_RUNTIME_CONFIG)
     with closing(_connect(db_path)) as conn:
@@ -437,6 +491,7 @@ def load_runtime_config(db_path: str) -> dict[str, Any]:
 
     config["pdp_watch_asins"] = list_asins(db_path, "watch")
     config["blacklist"] = list_asins(db_path, "blacklist")
+    config["pdp_watch_target_prices"] = _watch_target_prices(db_path)
     config.pop("wa_api_key", None)
 
     wa_api_url = _env("WA_API_URL")

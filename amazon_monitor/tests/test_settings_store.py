@@ -8,11 +8,13 @@ from unittest.mock import patch
 from settings_store import (
     add_asin,
     get_setting,
+    list_asin_entries,
     list_asins,
     load_runtime_config,
     migrate_yaml_to_db,
     remove_asin,
     replace_asins,
+    set_asin_target_price,
     set_setting,
 )
 
@@ -97,6 +99,54 @@ class TestSettingsStore(unittest.TestCase):
             self.assertEqual(cfg.get("price_drop_percent"), 15)
             self.assertEqual(cfg.get("pdp_watch_asins"), ["B066666666"])
             self.assertEqual(cfg.get("blacklist"), ["B077777777"])
+
+    def test_target_price_defaults_to_none_and_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "monitor.db")
+            add_asin(db_path, "B088888888", "watch")
+
+            entries = list_asin_entries(db_path, "watch")
+            self.assertEqual(len(entries), 1)
+            self.assertIn("target_price", entries[0])
+            self.assertIsNone(entries[0]["target_price"])
+
+            add_asin(db_path, "B099999999", "watch", target_price=49.99)
+            entries = list_asin_entries(db_path, "watch")
+            by_asin = {e["asin"]: e["target_price"] for e in entries}
+            self.assertEqual(by_asin["B099999999"], 49.99)
+            self.assertIsNone(by_asin["B088888888"])
+
+    def test_set_asin_target_price_updates_existing_watch_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "monitor.db")
+            add_asin(db_path, "B011112222", "watch")
+
+            self.assertTrue(set_asin_target_price(db_path, "b011112222", 15.5))
+            entries = list_asin_entries(db_path, "watch")
+            self.assertEqual(entries[0]["target_price"], 15.5)
+
+            # Clearing with None disables the alert again.
+            self.assertTrue(set_asin_target_price(db_path, "B011112222", None))
+            entries = list_asin_entries(db_path, "watch")
+            self.assertIsNone(entries[0]["target_price"])
+
+    def test_set_asin_target_price_returns_false_for_missing_watch_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "monitor.db")
+            self.assertFalse(set_asin_target_price(db_path, "B033334444", 10.0))
+
+            # Present only as blacklist, not watch -> still False.
+            add_asin(db_path, "B033334444", "blacklist")
+            self.assertFalse(set_asin_target_price(db_path, "B033334444", 10.0))
+
+    def test_load_runtime_config_exposes_pdp_watch_target_prices(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "monitor.db")
+            add_asin(db_path, "B055556666", "watch", target_price=29.5)
+            add_asin(db_path, "B066667777", "watch")
+
+            cfg = load_runtime_config(db_path)
+            self.assertEqual(cfg.get("pdp_watch_target_prices"), {"B055556666": 29.5})
 
 
 if __name__ == "__main__":

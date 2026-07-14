@@ -9,7 +9,12 @@ from typing import Any
 
 import image_cache
 
-from alert_decisions import decide_back_in_stock, decide_new_product, decide_price_drop
+from alert_decisions import (
+    decide_back_in_stock,
+    decide_new_product,
+    decide_price_below_target,
+    decide_price_drop,
+)
 from pdp_helpers import normalize_title_line, shipping_display_for
 
 LOGGER = logging.getLogger(__name__)
@@ -92,7 +97,9 @@ class StateEngine:
                     image_url TEXT,
                     oos_miss_streak INTEGER NOT NULL DEFAULT 0,
                     last_oos_confirmed INTEGER NOT NULL DEFAULT 0,
-                    is_preorder INTEGER NOT NULL DEFAULT 0
+                    is_preorder INTEGER NOT NULL DEFAULT 0,
+                    target_alert_armed INTEGER NOT NULL DEFAULT 1,
+                    target_alert_last_sent TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS aes_products (
@@ -158,6 +165,10 @@ class StateEngine:
                 )
         if not self._table_has_column("products", "is_preorder"):
             self.conn.execute("ALTER TABLE products ADD COLUMN is_preorder INTEGER NOT NULL DEFAULT 0")
+        if not self._table_has_column("products", "target_alert_armed"):
+            self.conn.execute("ALTER TABLE products ADD COLUMN target_alert_armed INTEGER NOT NULL DEFAULT 1")
+        if not self._table_has_column("products", "target_alert_last_sent"):
+            self.conn.execute("ALTER TABLE products ADD COLUMN target_alert_last_sent TEXT")
 
     def _maybe_cache_image(
         self,
@@ -345,6 +356,45 @@ class StateEngine:
             "shipping": shipping,
         }
 
+    def _target_price_alert_decision(
+        self,
+        *,
+        price: float | None,
+        qualifies: bool,
+        target: float,
+        armed: bool,
+        last_sent: str | None,
+        cooldown_hours: float,
+    ) -> tuple[bool, bool]:
+        """Hysteresis + cooldown gate for the ``price_below_target`` alert.
+
+        Returns ``(should_fire, new_armed_state)``. The item is re-armed any time it
+        is not currently below target (price back at/above target, OOS, or price
+        missing) so the next crossing can alert again. While it stays below target,
+        firing only happens once (armed -> disarmed), and re-firing after a re-arm is
+        additionally blocked until ``cooldown_hours`` has passed since the last
+        ``price_below_target`` alert for this ASIN, to survive a scan loop bouncing the
+        price back and forth across the target.
+        """
+        below_target = qualifies and price is not None and price < target
+        if not below_target:
+            return False, True
+        decision = decide_price_below_target(price, qualifies, target, armed)
+        if not decision.emit:
+            return False, armed
+        if last_sent and cooldown_hours > 0:
+            try:
+                sent_at = datetime.fromisoformat(str(last_sent))
+                if sent_at.tzinfo is None:
+                    sent_at = sent_at.replace(tzinfo=timezone.utc)
+                if utc_now() - sent_at < timedelta(hours=cooldown_hours):
+                    # Still armed: once the cooldown elapses this can fire without
+                    # needing another above-target re-arm first.
+                    return False, armed
+            except ValueError:
+                pass
+        return True, False
+
     # Update the database from watched product-page checks and generate alerts, while skipping updates for pages that failed to scrape.
     def process_pdp_watch_candidates(
         self,
@@ -367,6 +417,7 @@ class StateEngine:
         new_count = 0
         back_in_stock_count = 0
         price_drop_count = 0
+        target_alert_count = 0
         skipped_update_count = 0
         by_asin: dict[str, dict[str, Any]] = {}
         for item in candidates:
@@ -376,6 +427,13 @@ class StateEngine:
             by_asin[asin_key] = item
         watch_upper = {a.upper() for a in watch_asins}
         _SCRAPE_DEBUG_REASONS = frozenset({"navigation_failed", "parse_failed", "goto_failed"})
+        target_prices = (config or {}).get("pdp_watch_target_prices") or {}
+        if not isinstance(target_prices, dict):
+            target_prices = {}
+        try:
+            target_cooldown_hours = float((config or {}).get("target_price_alert_cooldown_hours", 6))
+        except (TypeError, ValueError):
+            target_cooldown_hours = 6.0
 
         def _tel(event: str, *, asin: str | None = None, **fields: Any) -> None:
             if telemetry and cycle_id:
@@ -437,6 +495,34 @@ class StateEngine:
                         if alert is not None:
                             alerts.append(alert)
                             new_count += 1
+                    target = target_prices.get(asin)
+                    if target is not None:
+                        should_fire, _new_armed = self._target_price_alert_decision(
+                            price=new_price,
+                            qualifies=bool(new_stock == 1),
+                            target=float(target),
+                            armed=True,
+                            last_sent=None,
+                            cooldown_hours=target_cooldown_hours,
+                        )
+                        if should_fire:
+                            target_alert = self._build_alert(
+                                "price_below_target",
+                                row_source,
+                                asin,
+                                title,
+                                new_price,
+                                image_url=image_url,
+                                shipping=ship_line,
+                            )
+                            target_alert["target_price"] = float(target)
+                            self._record_alert(target_alert)
+                            self.conn.execute(
+                                "UPDATE products SET target_alert_armed = 0, target_alert_last_sent = ? WHERE asin = ?",
+                                (now, asin),
+                            )
+                            alerts.append(target_alert)
+                            target_alert_count += 1
                     continue
 
                 # PDP image extraction often comes back empty (explicit-OOS pages skip it,
@@ -503,7 +589,8 @@ class StateEngine:
                         SET in_stock = ?,
                             oos_miss_streak = ?,
                             last_oos_confirmed = ?,
-                            image_url = COALESCE(?, image_url)
+                            image_url = COALESCE(?, image_url),
+                            target_alert_armed = 1
                         WHERE asin = ?
                         """,
                         (0 if flip_oos else 1, miss_streak, oos_confirmed, image_url, asin),
@@ -542,13 +629,59 @@ class StateEngine:
                     )
                 self._maybe_cache_image(asin, image_url, config)
 
+                target = target_prices.get(asin)
+                if target is not None:
+                    prior_armed = bool(row["target_alert_armed"]) if row["target_alert_armed"] is not None else True
+                    prior_last_sent = row["target_alert_last_sent"]
+                    should_fire, new_armed = self._target_price_alert_decision(
+                        price=new_price,
+                        qualifies=True,
+                        target=float(target),
+                        armed=prior_armed,
+                        last_sent=prior_last_sent,
+                        cooldown_hours=target_cooldown_hours,
+                    )
+                    if should_fire:
+                        target_alert = self._build_alert(
+                            "price_below_target",
+                            row_source,
+                            asin,
+                            title,
+                            new_price,
+                            image_url=image_url,
+                            shipping=ship_line,
+                        )
+                        target_alert["target_price"] = float(target)
+                        self._record_alert(target_alert)
+                        self.conn.execute(
+                            "UPDATE products SET target_alert_armed = 0, target_alert_last_sent = ? WHERE asin = ?",
+                            (now, asin),
+                        )
+                        alerts.append(target_alert)
+                        target_alert_count += 1
+                    elif new_armed != prior_armed:
+                        self.conn.execute(
+                            "UPDATE products SET target_alert_armed = ? WHERE asin = ?",
+                            (1 if new_armed else 0, asin),
+                        )
+
                 stock_decision = decide_back_in_stock(old_stock, 1)
                 emitted_back_in_stock = False
-                if stock_decision.emit and new_preorder and old_preorder:
-                    # Preorder allocation waves open/sell out repeatedly before the
-                    # release date; each wave is a real 0->1 flip but not a genuine
-                    # restock. Alert once when the preorder is first seen open,
-                    # suppress every repeat while the listing remains a preorder.
+                if (
+                    stock_decision.emit
+                    and new_preorder
+                    and old_preorder
+                    and not bool(row["last_oos_confirmed"])
+                ):
+                    # Preorder buyboxes flap on weak evidence (missing price, buybox
+                    # rotation) constantly; those 0->1 flips are scrape noise, not a
+                    # new allocation wave, so they stay suppressed. But when the
+                    # preceding OOS was CONFIRMED by strong page text (a real
+                    # sell-out), a preorder reopening is a genuine allocation wave
+                    # the client wants immediately — let it through to the normal
+                    # emit path, which still applies the confirmed/normal cooldowns.
+                    # (A live Amazon.com preorder wave was missed on 2026-07-13
+                    # because this suppressed every preorder->preorder re-alert.)
                     _tel(
                         "pdp_preorder_realert_suppressed",
                         asin=asin,
@@ -626,6 +759,7 @@ class StateEngine:
                 "new_count": new_count,
                 "back_in_stock_count": back_in_stock_count,
                 "price_drop_count": price_drop_count,
+                "target_alert_count": target_alert_count,
                 "skipped_update_count": skipped_update_count,
                 "asins_without_scrape_row": missing_candidates,
             }

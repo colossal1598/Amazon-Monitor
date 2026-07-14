@@ -104,7 +104,11 @@ class TestPdpRowNoPayPrice(unittest.TestCase):
         self.assertEqual(row["stock_confidence"], "confirmed_out")
         self.assertFalse(row["in_stock"])
 
-    def test_title_without_price_guard_in_pdp_row(self) -> None:
+    def test_title_without_price_and_no_oos_signal_is_unknown(self) -> None:
+        """Purchasable-but-priceless pages (price still hydrating, e.g. preorders)
+        must stay ambiguous: classifying them confirmed_out skipped the unknown
+        retry and fed false evidence into the OOS debounce (missed live preorder
+        wave, B0GYTRYV7P 2026-07-13)."""
         row = _pdp_row(
             "B011111111",
             title="Pokemon Box",
@@ -115,8 +119,9 @@ class TestPdpRowNoPayPrice(unittest.TestCase):
             allowed=["amazon.com"],
             explicit_oos=False,
         )
-        self.assertEqual(row["stock_confidence"], "confirmed_out")
+        self.assertEqual(row["stock_confidence"], "unknown")
         self.assertEqual(row["stock_reason"], "no_pay_price")
+        self.assertFalse(row["in_stock"])
 
 
 if __name__ == "__main__":

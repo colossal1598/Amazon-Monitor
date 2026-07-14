@@ -516,9 +516,18 @@ button:focus-visible {
 
 /* ===== Tables ===== */
 
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
 .data-table {
   width: 100%;
   border-collapse: collapse;
+}
+
+.watch-table {
+  min-width: 460px;
 }
 
 .data-table th,
@@ -551,6 +560,34 @@ button:focus-visible {
 
 .th-action {
   width: 70px;
+}
+
+.th-target {
+  width: 120px;
+}
+
+.td-target {
+  padding-inline: 6px;
+}
+
+.target-price-input {
+  width: 100%;
+  min-width: 88px;
+  padding: 6px 8px;
+  font-size: 0.9rem;
+  border-radius: 8px;
+  text-align: left;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.target-price-input.target-saved {
+  border-color: #43d17c;
+  background: #eafcf1;
+}
+
+.target-price-input.target-error {
+  border-color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .empty-cell,
@@ -886,5 +923,15 @@ button:focus-visible {
 
   .add-row input[maxlength="10"] {
     flex: 1 1 100%;
+  }
+
+  .th-target {
+    width: 100px;
+  }
+
+  .target-price-input {
+    min-width: 76px;
+    padding: 6px;
+    font-size: 0.86rem;
   }
 }

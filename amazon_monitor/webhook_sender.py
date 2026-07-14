@@ -28,7 +28,9 @@ def _post_wa(config: dict[str, Any], payload: dict[str, Any]) -> None:
 
 
 # YAML may only override these product-facing templates; operational alerts always use strings below.
-USER_OVERRIDABLE_MESSAGE_KEYS = frozenset({"default", "new_product", "price_drop", "back_in_stock"})
+USER_OVERRIDABLE_MESSAGE_KEYS = frozenset(
+    {"default", "new_product", "price_drop", "back_in_stock", "price_below_target"}
+)
 
 DEFAULT_MESSAGE_TEMPLATES = {
     "default": (
@@ -54,6 +56,13 @@ DEFAULT_MESSAGE_TEMPLATES = {
     ),
     "back_in_stock": (
         "Back in stock!\n"
+        "Title: {title}\n"
+        "Price: {price_text}\n"
+        "{shipping}\n"
+        "Link: {affiliate_link}"
+    ),
+    "price_below_target": (
+        "המחיר ירד מתחת למחיר היעד ({target_price}$)!\n"
         "Title: {title}\n"
         "Price: {price_text}\n"
         "{shipping}\n"
@@ -108,6 +117,16 @@ def _price_line_parts(amount: Any, config: dict[str, Any]) -> tuple[str, str, st
     return usd + suffix, usd, suffix
 
 
+# Turn a target price number into the bare "12.34" text used before the "$" in the price_below_target template.
+def _format_target_price(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return ""
+
+
 # Create the final WhatsApp message text by choosing the right template and filling in the alert details.
 def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> str:
     alert_type = str(alert_payload.get("type") or "default")
@@ -144,6 +163,7 @@ def _format_message(alert_payload: dict[str, Any], config: dict[str, Any]) -> st
             "price_text_ils_suffix": price_text_ils_suffix,
             "error_message": alert_payload.get("error_message"),
             "shipping": (alert_payload.get("shipping") or "").strip(),
+            "target_price": _format_target_price(alert_payload.get("target_price")),
         }
     )
     return template.format_map(values)
@@ -173,6 +193,7 @@ def send_alert(alert_dict: dict[str, Any], config: dict[str, Any]) -> None:
         "affiliate_link": f"https://www.amazon.com/dp/{asin}?tag={tag}" if asin else None,
         "timestamp": alert_dict.get("timestamp") or datetime.now(timezone.utc).isoformat(),
         "shipping": alert_dict.get("shipping"),
+        "target_price": alert_dict.get("target_price"),
     }
     wa_payload = {
         "to": _pick_recipient(config, operational=False),
