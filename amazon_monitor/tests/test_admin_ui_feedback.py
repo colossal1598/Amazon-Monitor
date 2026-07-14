@@ -29,7 +29,8 @@ def _seed_monitor_db(db_path: Path) -> None:
         );
         CREATE TABLE products (
             asin TEXT PRIMARY KEY,
-            title TEXT
+            title TEXT,
+            price REAL
         );
         """
     )
@@ -138,6 +139,35 @@ class AdminUIFeedbackTests(unittest.TestCase):
         # price falls back to old_price when new_price is null
         self.assertEqual(alerts[1]["price"], 30.0)
         self.assertIsNone(alerts[1]["title"])
+
+    def test_recent_price_falls_back_to_product(self) -> None:
+        # Legacy alerts recorded before old/new price were persisted carry NULL
+        # prices; the endpoint must surface products.price instead, and only
+        # render nothing when the product has no price either.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE products SET price = 19.99 WHERE asin = 'B0PRODUCT1'")
+        now = datetime.now(timezone.utc).isoformat()
+        cur = conn.execute(
+            "INSERT INTO alerts (asin, alert_type, source, old_price, new_price, sent_at)"
+            " VALUES ('B0PRODUCT1', 'back_in_stock', 'pdp_watch', NULL, NULL, ?)",
+            (now,),
+        )
+        priced_id = cur.lastrowid
+        # No products row for this asin -> no fallback price available.
+        cur = conn.execute(
+            "INSERT INTO alerts (asin, alert_type, source, old_price, new_price, sent_at)"
+            " VALUES ('B0NOPRICE', 'back_in_stock', 'pdp_watch', NULL, NULL, ?)",
+            (now,),
+        )
+        null_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+        status, payload = self._request("GET", "/api/alerts/recent")
+        self.assertEqual(status, 200)
+        by_id = {a["alert_id"]: a for a in payload["alerts"]}
+        self.assertEqual(by_id[priced_id]["price"], 19.99)
+        self.assertIsNone(by_id[null_id]["price"])
 
     def test_recent_days_clamped(self) -> None:
         status, payload = self._request("GET", "/api/alerts/recent?days=999")

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>משוב התראות — מעקב אמזון</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="feedback-page">
+  <!-- ===== Login (direct visit while logged out) ===== -->
+  <div id="login-screen" class="login-screen hidden">
+    <form id="login-form" class="login-card">
+      <div class="login-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.6L3 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5z"/></svg>
+      </div>
+      <h2>משוב התראות</h2>
+      <p class="muted">התחברות לפאנל הניהול</p>
+      <label for="login-user">שם משתמש</label>
+      <input id="login-user" type="text" autocomplete="username" required>
+      <label for="login-pass">סיסמה</label>
+      <input id="login-pass" type="password" autocomplete="current-password" required>
+      <button class="btn btn-primary" type="submit">כניסה</button>
+      <p id="login-error" class="login-error hidden"></p>
+    </form>
+  </div>
+
+  <!-- ===== Feedback app ===== -->
+  <div id="feedback-app" class="fb-page-wrap hidden">
+    <header class="fb-topbar">
+      <div class="fb-topbar-row">
+        <a class="fb-back" href="/">→ חזרה לפאנל</a>
+        <button id="logout-btn" class="fb-logout" type="button">התנתקות</button>
+      </div>
+      <h1 class="fb-page-title">משוב התראות</h1>
+      <p class="fb-page-sub">סמנו אם ההתראה הייתה טובה, מה הייתה הבעיה, ומתי ראיתם את השינוי בפועל באמזון. השמירה אוטומטית.</p>
+      <div class="fb-controls">
+        <label class="fb-range-label" for="feedback-days">טווח זמן</label>
+        <select id="feedback-days" class="fb-range">
+          <option value="1">יום אחרון</option>
+          <option value="3">3 ימים</option>
+          <option value="7" selected>7 ימים</option>
+          <option value="14">14 יום</option>
+          <option value="30">30 יום</option>
+        </select>
+        <button id="feedback-refresh" class="btn btn-secondary fb-refresh" type="button">רענון</button>
+      </div>
+    </header>
+
+    <main id="feedback-list" class="fb-list">
+      <div class="fb-state fb-loading">טוען התראות...</div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/feedback.js"></script>
+</body>
+</html>

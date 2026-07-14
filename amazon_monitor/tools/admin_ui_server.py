@@ -444,11 +444,15 @@ def _recent_alerts(db_path: str, days: int) -> list[dict[str, Any]]:
     try:
         _ensure_feedback_table(conn)
         conn.commit()
+        # products is LEFT JOINed for the title anyway; pull p.price in the same
+        # join so historical alerts (recorded before _record_alert started
+        # persisting old/new price) can fall back to the product's last-known
+        # price instead of showing "no price".
         rows = conn.execute(
             f"""
             SELECT a.id AS alert_id, a.sent_at AS sent_at, a.alert_type AS alert_type,
                    a.asin AS asin, a.old_price AS old_price, a.new_price AS new_price,
-                   a.source AS source, p.title AS title,
+                   a.source AS source, p.title AS title, p.price AS product_price,
                    f.alert_id AS f_alert_id, f.verdict AS f_verdict, f.tags AS f_tags,
                    f.note AS f_note, f.seen_at AS f_seen_at
             FROM alerts a
@@ -468,6 +472,11 @@ def _recent_alerts(db_path: str, days: int) -> list[dict[str, Any]]:
         new_price = row["new_price"]
         old_price = row["old_price"]
         price = new_price if new_price is not None else old_price
+        # Fallback for legacy alerts that carry neither old nor new price:
+        # use the current product price. Only when both are missing does the
+        # client render "no price".
+        if price is None:
+            price = row["product_price"]
         feedback = None
         if row["f_alert_id"] is not None:
             feedback = {
@@ -699,7 +708,14 @@ class AdminUIHandler(BaseHTTPRequestHandler):
         """HTML/JS/CSS load without auth; only /api/* needs credentials."""
         if path in ("", "/"):
             return True
-        return path in {"/index.html", "/help.html", "/app.js", "/styles.css"}
+        return path in {
+            "/index.html",
+            "/help.html",
+            "/feedback.html",
+            "/app.js",
+            "/feedback.js",
+            "/styles.css",
+        }
 
     def _serve_static(self, path: str) -> None:
         rel = "index.html" if path in ("", "/") else path.lstrip("/")

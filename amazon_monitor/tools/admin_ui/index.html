@@ -58,10 +58,10 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h.01a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
           <span>הגדרות מתקדמות</span>
         </button>
-        <button class="nav-item" id="feedback-open-btn" type="button">
+        <a class="nav-item" href="/feedback.html">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.5 8.5 0 0 1-12.4 7.6L3 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5z"/><path d="M8 11h.01M12 11h.01M16 11h.01"/></svg>
           <span>משוב התראות</span>
-        </button>
+        </a>
       </nav>
 
       <div class="sidebar-footer">
@@ -415,30 +415,6 @@
         <div class="modal-actions">
           <button id="bulk-cancel-btn" class="btn btn-ghost" type="button">ביטול</button>
           <button id="bulk-apply-btn" class="btn btn-primary" type="button">הוספת הרשימה</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Alert feedback modal -->
-    <div id="feedback-modal" class="modal feedback-modal hidden" role="dialog" aria-modal="true" aria-labelledby="feedback-modal-title">
-      <div class="modal-content feedback-content">
-        <div class="feedback-head">
-          <h3 id="feedback-modal-title">משוב התראות</h3>
-          <div class="feedback-head-actions">
-            <label class="feedback-days-label" for="feedback-days">טווח:</label>
-            <select id="feedback-days" class="feedback-days">
-              <option value="1">יום</option>
-              <option value="3">3 ימים</option>
-              <option value="7" selected>7 ימים</option>
-              <option value="14">14 יום</option>
-              <option value="30">30 יום</option>
-            </select>
-            <button id="feedback-close-btn" class="btn btn-ghost" type="button">סגירה</button>
-          </div>
-        </div>
-        <p class="muted feedback-intro">סמנו אם ההתראה הייתה טובה, מה הייתה הבעיה, ומתי ראיתם את השינוי בפועל באמזון.</p>
-        <div id="feedback-list" class="feedback-list">
-          <p class="empty-cell">טוען...</p>
         </div>
       </div>
     </div>
