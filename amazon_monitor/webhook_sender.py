@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,21 +11,60 @@ import image_cache
 LOGGER = logging.getLogger(__name__)
 
 
-# Send a WhatsApp-style message to your webhook by posting the prepared payload and quietly logging if it fails.
-def _post_wa(config: dict[str, Any], payload: dict[str, Any]) -> None:
+# Send a WhatsApp-style message to your webhook, retrying transient failures.
+def _post_wa(config: dict[str, Any], payload: dict[str, Any]) -> bool:
+    """POST to the wa-server; returns True on success.
+
+    A restock alert is time-critical and the alert row is already recorded in the
+    DB before dispatch (cooldowns armed), so a dropped send is silently lost to the
+    client forever. Production 2026-07-15: wa-server returned 500 on every call for
+    minutes and every alert in that window vanished. Bounded retries with backoff
+    cover short wa-server restarts/hiccups; a persistently dead wa-server still
+    fails after the last attempt (logged loudly) rather than blocking the engine.
+    """
     url = config.get("wa_api_url")
     api_key = config.get("wa_api_key")
     if not url:
         LOGGER.warning("wa_api_url is not configured; skipping send.")
-        return
+        return False
     headers = {}
     if api_key:
         headers["x-api-key"] = api_key
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        response.raise_for_status()
-    except Exception as exc:
-        LOGGER.error("WhatsApp API call failed (%s): %s", url, exc)
+        attempts = max(1, int(config.get("wa_send_attempts", 3)))
+    except (TypeError, ValueError):
+        attempts = 3
+    try:
+        backoff_base = max(0.5, float(config.get("wa_send_retry_backoff_seconds", 2.0)))
+    except (TypeError, ValueError):
+        backoff_base = 2.0
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            response.raise_for_status()
+            if attempt > 1:
+                LOGGER.info("WhatsApp send succeeded on retry %s/%s", attempt, attempts)
+            return True
+        except Exception as exc:  # noqa: BLE001 - any send failure is retryable here
+            last_exc = exc
+            if attempt < attempts:
+                LOGGER.warning(
+                    "WhatsApp API call failed (%s) attempt %s/%s, retrying: %s",
+                    url,
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                time.sleep(backoff_base * attempt)
+    LOGGER.error(
+        "WhatsApp API call failed after %s attempts (%s): %s — ALERT LOST: %s",
+        attempts,
+        url,
+        last_exc,
+        str(payload.get("message", ""))[:120],
+    )
+    return False
 
 
 # YAML may only override these product-facing templates; operational alerts always use strings below.
