@@ -416,6 +416,153 @@ async function loadFeedback() {
   }
 }
 
+/* ===== Missed-restock report ===== */
+
+function nowIlLocalValue() {
+  // datetime-local wants "YYYY-MM-DDTHH:MM" in the user's wall-clock (IL).
+  const p = ilParts(new Date().toISOString());
+  if (!p) {
+    return "";
+  }
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+}
+
+async function loadMissedAsins() {
+  const select = byId("missed-asin");
+  try {
+    const payload = await apiJson("/api/asins?role=watch");
+    const items = payload.items || [];
+    select.innerHTML = "";
+    if (!items.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "אין מוצרים במעקב";
+      select.appendChild(opt);
+      return;
+    }
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "בחרו מוצר...";
+    select.appendChild(placeholder);
+    for (const item of items) {
+      const opt = document.createElement("option");
+      opt.value = item.asin;
+      const note = String(item.notes || "").trim();
+      opt.textContent = note ? `${item.asin} — ${note}` : item.asin;
+      select.appendChild(opt);
+    }
+  } catch (err) {
+    if (!isAuthError(err)) {
+      select.innerHTML = '<option value="">שגיאה בטעינת מוצרים</option>';
+    }
+  }
+}
+
+async function loadMissedReports() {
+  const list = byId("missed-list");
+  list.innerHTML = '<div class="fb-state">טוען דיווחים...</div>';
+  try {
+    const payload = await apiJson("/api/alerts/missed?days=7");
+    const reports = payload.reports || [];
+    list.innerHTML = "";
+    if (!reports.length) {
+      const empty = document.createElement("div");
+      empty.className = "fb-state";
+      empty.textContent = "אין דיווחים בשבוע האחרון";
+      list.appendChild(empty);
+      return;
+    }
+    for (const report of reports) {
+      const row = document.createElement("div");
+      row.className = "missed-item";
+      const head = document.createElement("div");
+      head.className = "missed-item-head";
+      const asin = document.createElement("span");
+      asin.className = "fbc-pill";
+      asin.textContent = report.asin;
+      const seen = document.createElement("time");
+      seen.className = "fbc-time";
+      seen.textContent = formatIlShort(report.seen_at);
+      head.append(asin, seen);
+      row.appendChild(head);
+      const noteText = String(report.note || "").trim();
+      if (noteText) {
+        const note = document.createElement("p");
+        note.className = "missed-item-note";
+        note.textContent = noteText;
+        row.appendChild(note);
+      }
+      list.appendChild(row);
+    }
+  } catch (err) {
+    if (!isAuthError(err)) {
+      list.innerHTML = '<div class="fb-state">לא ניתן לטעון דיווחים</div>';
+    }
+  }
+}
+
+function setMissedStatus(text, kind) {
+  const status = byId("missed-status");
+  status.textContent = text || "";
+  status.classList.toggle("ok", kind === "ok");
+  status.classList.toggle("err", kind === "err");
+}
+
+async function submitMissedReport(ev) {
+  ev.preventDefault();
+  const submit = byId("missed-submit");
+  const asin = String(byId("missed-asin").value || "").trim();
+  const seenLocal = String(byId("missed-seen").value || "").trim();
+  const note = String(byId("missed-note").value || "").trim();
+  if (!asin) {
+    setMissedStatus("בחרו מוצר", "err");
+    return;
+  }
+  if (!seenLocal) {
+    setMissedStatus("בחרו תאריך ושעה", "err");
+    return;
+  }
+  // datetime-local yields "YYYY-MM-DDTHH:MM" (or with seconds); trim to minutes.
+  const seenAt = seenLocal.length > 16 ? seenLocal.slice(0, 16) : seenLocal;
+  submit.disabled = true;
+  setMissedStatus("שולח...", null);
+  try {
+    await apiJson("/api/alerts/missed", {
+      method: "POST",
+      body: JSON.stringify({ asin, seen_at: seenAt, note }),
+    });
+    setMissedStatus("✓ הדיווח נשלח", "ok");
+    byId("missed-note").value = "";
+    byId("missed-asin").value = "";
+    byId("missed-seen").value = nowIlLocalValue();
+    showToast("הדיווח נשלח, תודה");
+    await loadMissedReports();
+  } catch (err) {
+    if (!isAuthError(err)) {
+      setMissedStatus("✗ שליחת הדיווח נכשלה — נסו שוב", "err");
+      showToast("שגיאה בשליחת הדיווח", true);
+    }
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+function toggleMissedPanel() {
+  const panel = byId("missed-panel");
+  const toggle = byId("missed-toggle");
+  const willOpen = panel.classList.contains("hidden");
+  panel.classList.toggle("hidden", !willOpen);
+  toggle.setAttribute("aria-expanded", willOpen ? "true" : "false");
+  if (willOpen) {
+    setMissedStatus("", null);
+    if (!byId("missed-seen").value) {
+      byId("missed-seen").value = nowIlLocalValue();
+    }
+    loadMissedAsins();
+    loadMissedReports();
+  }
+}
+
 /* ===== Wiring ===== */
 
 function bindEvents() {
@@ -443,6 +590,9 @@ function bindEvents() {
 
   byId("feedback-days").addEventListener("change", loadFeedback);
   byId("feedback-refresh").addEventListener("click", loadFeedback);
+
+  byId("missed-toggle").addEventListener("click", toggleMissedPanel);
+  byId("missed-form").addEventListener("submit", submitMissedReport);
 }
 
 async function init() {

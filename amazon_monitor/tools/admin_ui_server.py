@@ -597,6 +597,113 @@ def _validate_feedback_payload(
     }
 
 
+def _ensure_missed_table(conn: sqlite3.Connection) -> None:
+    """Create the missed_reports table lazily (admin server owns it; the
+    monitor engine never touches it). Records restocks the bot never alerted on,
+    reported manually by the client from the feedback page."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS missed_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            asin TEXT,
+            seen_at TEXT,
+            note TEXT,
+            created_at TEXT
+        )
+        """
+    )
+
+
+def _validate_missed_payload(
+    payload: dict[str, Any],
+) -> tuple[str | None, dict[str, Any]]:
+    """Validate a missed-report POST body. Returns (error_code, parsed).
+    error_code is None on success; parsed holds asin/seen_at/note."""
+    asin = payload.get("asin")
+    if not isinstance(asin, str):
+        return "invalid_asin", {}
+    asin = asin.strip().upper()
+    if not valid_asin(asin):
+        return "invalid_asin", {}
+
+    seen_at = payload.get("seen_at")
+    if not isinstance(seen_at, str):
+        return "invalid_seen_at", {}
+    seen_at = seen_at.strip()
+    try:
+        datetime.strptime(seen_at, _SEEN_AT_FMT)
+    except ValueError:
+        return "invalid_seen_at", {}
+
+    note = payload.get("note")
+    if note is None:
+        note = ""
+    if not isinstance(note, str):
+        return "invalid_note", {}
+    note = note.strip()[:500]
+
+    return None, {"asin": asin, "seen_at": seen_at, "note": note}
+
+
+def _insert_missed_report(
+    db_path: str, *, asin: str, seen_at: str, note: str
+) -> dict[str, Any]:
+    """Insert a missed-restock report and return the stored row."""
+    created_at = datetime.now(timezone.utc).isoformat()
+    conn = _open_monitor_conn(db_path)
+    try:
+        _ensure_missed_table(conn)
+        cur = conn.execute(
+            """
+            INSERT INTO missed_reports (asin, seen_at, note, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (asin, seen_at, note, created_at),
+        )
+        conn.commit()
+        report_id = int(cur.lastrowid)
+    finally:
+        conn.close()
+    return {
+        "id": report_id,
+        "asin": asin,
+        "seen_at": seen_at,
+        "note": note,
+        "created_at": created_at,
+    }
+
+
+def _recent_missed_reports(db_path: str, days: int) -> list[dict[str, Any]]:
+    days = max(1, min(30, int(days)))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    conn = _open_monitor_conn(db_path)
+    try:
+        _ensure_missed_table(conn)
+        conn.commit()
+        rows = conn.execute(
+            """
+            SELECT id, asin, seen_at, note, created_at
+            FROM missed_reports
+            WHERE created_at >= ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 200
+            """,
+            (cutoff,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "id": row["id"],
+            "asin": row["asin"],
+            "seen_at": row["seen_at"],
+            "note": row["note"] or "",
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
 def _parse_target_price(raw: Any) -> tuple[bool, float | None]:
     """Validate an optional target_price value. Returns (ok, value).
 
@@ -787,6 +894,18 @@ class AdminUIHandler(BaseHTTPRequestHandler):
                 {"ok": True, "days": days, "alerts": _recent_alerts(self.db_path, days)},
             )
             return
+        if path == "/api/alerts/missed":
+            raw_days = (parse_qs(parsed.query).get("days", [""])[0] or "").strip()
+            try:
+                days = int(raw_days) if raw_days else 7
+            except ValueError:
+                days = 7
+            days = max(1, min(30, days))
+            self._json(
+                200,
+                {"ok": True, "days": days, "reports": _recent_missed_reports(self.db_path, days)},
+            )
+            return
 
         self._json(404, {"ok": False, "error": "not_found"})
 
@@ -926,6 +1045,25 @@ class AdminUIHandler(BaseHTTPRequestHandler):
                 self._json(404, {"ok": False, "error": "alert_not_found"})
                 return
             self._json(200, {"ok": True, "feedback": feedback})
+            return
+
+        if path == "/api/alerts/missed":
+            try:
+                payload = _parse_json_body(self)
+            except ValueError as exc:
+                self._json(400, {"ok": False, "error": str(exc)})
+                return
+            error, parsed = _validate_missed_payload(payload)
+            if error is not None:
+                self._json(400, {"ok": False, "error": error})
+                return
+            report = _insert_missed_report(
+                self.db_path,
+                asin=parsed["asin"],
+                seen_at=parsed["seen_at"],
+                note=parsed["note"],
+            )
+            self._json(200, {"ok": True, "report": report})
             return
 
         self._json(404, {"ok": False, "error": "not_found"})

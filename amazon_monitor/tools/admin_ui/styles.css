@@ -1328,3 +1328,108 @@ button:focus-visible {
   }
 
 }
+
+/* ===== Missed-restock report ===== */
+
+.fb-controls-secondary {
+  margin-top: 10px;
+}
+
+.missed-panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.missed-intro {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.missed-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.missed-label {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin-top: 8px;
+}
+
+.missed-field {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font: inherit;
+  color: var(--text);
+  background: var(--card);
+}
+
+.missed-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.missed-status {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.missed-status.ok {
+  color: #1a9c54;
+}
+
+.missed-status.err {
+  color: var(--danger);
+}
+
+.missed-reports {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.missed-reports-title {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+.missed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.missed-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--bg, var(--card));
+}
+
+.missed-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.missed-item-note {
+  margin: 8px 0 0;
+  font-size: 0.9rem;
+  color: var(--text);
+  line-height: 1.4;
+}

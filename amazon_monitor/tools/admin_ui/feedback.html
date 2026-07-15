@@ -44,7 +44,35 @@
         </select>
         <button id="feedback-refresh" class="btn btn-secondary fb-refresh" type="button">רענון</button>
       </div>
+      <div class="fb-controls fb-controls-secondary">
+        <button id="missed-toggle" class="btn btn-secondary" type="button" aria-expanded="false">＋ דיווח פספוס</button>
+      </div>
     </header>
+
+    <!-- ===== Missed-restock report (bot never alerted) ===== -->
+    <section id="missed-panel" class="missed-panel hidden">
+      <p class="missed-intro">ראיתם מוצר שחזר למלאי אך לא קיבלתם התראה? דווחו כאן כדי שנוכל לבדוק.</p>
+      <form id="missed-form" class="missed-form">
+        <label class="missed-label" for="missed-asin">מוצר (ASIN)</label>
+        <select id="missed-asin" class="missed-field" required>
+          <option value="">טוען מוצרים...</option>
+        </select>
+        <label class="missed-label" for="missed-seen">מתי ראיתם את השינוי באמזון?</label>
+        <input id="missed-seen" class="missed-field" type="datetime-local" required>
+        <label class="missed-label" for="missed-note">הערה (לא חובה)</label>
+        <input id="missed-note" class="missed-field" type="text" maxlength="500" placeholder="פרטים נוספים...">
+        <div class="missed-actions">
+          <button id="missed-submit" class="btn btn-primary" type="submit">שלח דיווח</button>
+          <span id="missed-status" class="missed-status"></span>
+        </div>
+      </form>
+      <div class="missed-reports">
+        <h3 class="missed-reports-title">דיווחים אחרונים (7 ימים)</h3>
+        <div id="missed-list" class="missed-list">
+          <div class="fb-state">טוען דיווחים...</div>
+        </div>
+      </div>
+    </section>
 
     <main id="feedback-list" class="fb-list">
       <div class="fb-state fb-loading">טוען התראות...</div>
