@@ -7,6 +7,8 @@ from monitor_engine import (
     _SweepMeterView,
     _compute_fast_retry,
     _degraded_burst_reached,
+    _mass_flip_tripped,
+    _should_check_aod,
 )
 
 
@@ -254,6 +256,7 @@ class TestRegisterDegradedPage(unittest.TestCase):
         eng._fast_retry_counts = {}
         eng._pending_overrides = {}
         eng._degraded_events = deque()
+        eng._breaker_degraded_events = deque()
         eng._recycle_requested = False
         return eng
 
@@ -272,6 +275,138 @@ class TestRegisterDegradedPage(unittest.TestCase):
         self.assertFalse(eng._recycle_requested)
         eng._register_degraded_page("B0AAAA0001")
         self.assertTrue(eng._recycle_requested)
+
+
+class TestShouldCheckAod(unittest.TestCase):
+    """F1 gating: previously-in-stock ASINs always re-check AOD; OOS ASINs throttle by interval."""
+
+    def test_prior_in_stock_always_checks(self) -> None:
+        # Even with a just-now last-AOD timestamp, a previously in-stock ASIN re-checks.
+        self.assertTrue(
+            _should_check_aod(
+                prior_in_stock=True, now=1000.0, last_aod=999.0, min_interval_seconds=240.0
+            )
+        )
+
+    def test_oos_checks_once_interval_elapsed(self) -> None:
+        self.assertTrue(
+            _should_check_aod(
+                prior_in_stock=False, now=1300.0, last_aod=1000.0, min_interval_seconds=240.0
+            )
+        )
+
+    def test_oos_within_interval_does_not_check(self) -> None:
+        self.assertFalse(
+            _should_check_aod(
+                prior_in_stock=False, now=1100.0, last_aod=1000.0, min_interval_seconds=240.0
+            )
+        )
+
+    def test_oos_first_ever_check_allowed(self) -> None:
+        # last_aod defaults to 0.0; a large now trivially clears the interval.
+        self.assertTrue(
+            _should_check_aod(
+                prior_in_stock=False, now=5000.0, last_aod=0.0, min_interval_seconds=240.0
+            )
+        )
+
+
+class TestMassFlipTripped(unittest.TestCase):
+    """F2 circuit-breaker core: 2 distinct flips + degraded context within window -> trip."""
+
+    def test_two_distinct_flips_with_degraded_context_trips(self) -> None:
+        events: deque[tuple[float, str]] = deque()
+        first = _mass_flip_tripped(
+            events, 1000.0, "A", window_seconds=120.0, min_flips=2, degraded_context=True
+        )
+        second = _mass_flip_tripped(
+            events, 1030.0, "B", window_seconds=120.0, min_flips=2, degraded_context=True
+        )
+        self.assertFalse(first)  # one distinct ASIN so far
+        self.assertTrue(second)  # two distinct ASINs within the window
+
+    def test_single_asin_repeated_does_not_trip(self) -> None:
+        events: deque[tuple[float, str]] = deque()
+        results = [
+            _mass_flip_tripped(
+                events, t, "A", window_seconds=120.0, min_flips=2, degraded_context=True
+            )
+            for t in (1000.0, 1030.0, 1060.0)
+        ]
+        # Same ASIN flapping is a single-ASIN sellout, never a mass flip.
+        self.assertEqual(results, [False, False, False])
+
+    def test_two_distinct_flips_without_degraded_context_does_not_trip(self) -> None:
+        events: deque[tuple[float, str]] = deque()
+        _mass_flip_tripped(
+            events, 1000.0, "A", window_seconds=120.0, min_flips=2, degraded_context=False
+        )
+        tripped = _mass_flip_tripped(
+            events, 1030.0, "B", window_seconds=120.0, min_flips=2, degraded_context=False
+        )
+        self.assertFalse(tripped)
+
+    def test_flip_expiry_out_of_window(self) -> None:
+        events: deque[tuple[float, str]] = deque()
+        _mass_flip_tripped(
+            events, 1000.0, "A", window_seconds=120.0, min_flips=2, degraded_context=True
+        )
+        # 200s later B flips: A has aged out, so only one distinct ASIN remains.
+        tripped = _mass_flip_tripped(
+            events, 1200.0, "B", window_seconds=120.0, min_flips=2, degraded_context=True
+        )
+        self.assertFalse(tripped)
+        self.assertEqual(list(events), [(1200.0, "B")])
+
+
+class TestMassFlipBreakerEngaged(unittest.TestCase):
+    """MonitorEngine._mass_flip_breaker_engaged: trip -> hold + recycle; holds subsequent flips."""
+
+    @staticmethod
+    def _engine(config: dict | None = None) -> MonitorEngine:
+        eng = MonitorEngine.__new__(MonitorEngine)
+        eng.config = config or {}
+        eng._flip_events = deque()
+        eng._breaker_degraded_events = deque()
+        eng._breaker_until = 0.0
+        eng._recycle_requested = False
+        eng._aes_fail_streak = 0
+        eng._cycle_id = 0
+        eng.telemetry = None  # unused when cycle_id == 0 path is guarded
+        return eng
+
+    def test_two_flips_under_degraded_trips_and_requests_recycle(self) -> None:
+        eng = self._engine({"mass_flip_min_flips": 2, "mass_flip_window_seconds": 120})
+        eng._breaker_degraded_events.append(1000.0)  # a degraded_page skip in-window
+        self.assertFalse(eng._mass_flip_breaker_engaged("A", 1000.0))
+        engaged = eng._mass_flip_breaker_engaged("B", 1010.0)
+        self.assertTrue(engaged)
+        self.assertTrue(eng._recycle_requested)
+        self.assertGreater(eng._breaker_until, 1010.0)
+
+    def test_aes_fail_streak_supplies_degraded_context(self) -> None:
+        eng = self._engine({"mass_flip_min_flips": 2, "mass_flip_window_seconds": 120})
+        eng._aes_fail_streak = 1  # AES soft-fail counts as degraded context
+        eng._mass_flip_breaker_engaged("A", 1000.0)
+        self.assertTrue(eng._mass_flip_breaker_engaged("B", 1010.0))
+
+    def test_no_degraded_context_does_not_engage(self) -> None:
+        eng = self._engine({"mass_flip_min_flips": 2, "mass_flip_window_seconds": 120})
+        eng._mass_flip_breaker_engaged("A", 1000.0)
+        self.assertFalse(eng._mass_flip_breaker_engaged("B", 1010.0))
+        self.assertFalse(eng._recycle_requested)
+
+    def test_active_breaker_holds_further_flips_until_expiry(self) -> None:
+        eng = self._engine({"mass_flip_min_flips": 2, "mass_flip_window_seconds": 120})
+        eng._breaker_degraded_events.append(1000.0)
+        eng._mass_flip_breaker_engaged("A", 1000.0)
+        eng._mass_flip_breaker_engaged("B", 1010.0)  # trips, hold until 1010+120=1130
+        # A third ASIN mid-hold is still held.
+        self.assertTrue(eng._mass_flip_breaker_engaged("C", 1100.0))
+        # After the hold expires with no fresh degraded context, a lone flip is not held.
+        eng._breaker_degraded_events.clear()
+        eng._aes_fail_streak = 0
+        self.assertFalse(eng._mass_flip_breaker_engaged("D", 2000.0))
 
 
 class TestRingSchedulerSecondsToNext(unittest.TestCase):

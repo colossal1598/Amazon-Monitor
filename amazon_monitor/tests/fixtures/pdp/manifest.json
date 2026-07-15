@@ -56,5 +56,12 @@
   },
   "skeleton-offers.html": {
     "skeleton": true
+  },
+  "aod-offers.html": {
+    "aod": true,
+    "allowed": ["amazon.com", "amazon export"],
+    "expected_offer_count": 3,
+    "expected_allowed_price": 65.94,
+    "sellers": ["ACG ECOM", "Amazon.com", "TszDirect"]
   }
 }

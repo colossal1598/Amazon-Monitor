@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+<head><title>AOD Offers Fragment</title></head>
+<body>
+<!--
+  Static AOD (All Offers Display) ajax fragment, mirroring the live panel for B0DLQJ613B
+  (probed 2026-07-15): a pinned 3P offer plus #aod-offer list rows. CRITICAL: every FBA
+  offer renders "Ships from Amazon.com" in #aod-offer-shipsFrom, so seller matching must use
+  the #aod-offer-soldBy NAME only. One offer is sold by Amazon.com (the allowed offer living
+  in AOD while a 3P holds the buybox). The Amazon.com row deliberately ships an EMPTY
+  .a-offscreen so the .a-price-whole/.a-price-fraction fallback is exercised.
+-->
+<div id="all-offers-display">
+<div id="aod-container">
+
+  <!-- Pinned offer: buybox held by a 3P seller (ACG ECOM), fulfilled by Amazon (FBA). -->
+  <div id="aod-pinned-offer" class="a-section aod-information-block">
+    <div id="aod-offer-price" class="a-section">
+      <span class="a-price" data-a-color="base"><span class="a-offscreen">$79.95</span><span aria-hidden="true"><span class="a-price-symbol">$</span><span class="a-price-whole">79<span class="a-price-decimal">.</span></span><span class="a-price-fraction">95</span></span></span>
+    </div>
+    <div id="aod-offer-soldBy" class="a-section aod-clearing-block">
+      <div class="a-fixed-left-grid-col a-col-left"><span class="a-size-small a-color-tertiary">Sold by</span></div>
+      <div class="a-fixed-left-grid-col a-col-right"><a id="aod-offer-soldBy" class="a-size-small a-link-normal" href="/sp?seller=A00ACGECOM">ACG ECOM</a> <span class="a-size-small a-color-tertiary">Seller rating is 92% positive over the last 12 months</span></div>
+    </div>
+    <div id="aod-offer-shipsFrom" class="a-section aod-clearing-block">
+      <div class="a-fixed-left-grid-col a-col-left"><span class="a-size-small a-color-tertiary">Ships from</span></div>
+      <div class="a-fixed-left-grid-col a-col-right"><span class="a-size-small a-color-base">Amazon.com</span></div>
+    </div>
+  </div>
+
+  <div id="aod-offer-list" class="a-section">
+
+    <!-- List offer 1: the Amazon.com offer living in AOD (allowed). Empty .a-offscreen -> whole/fraction fallback. -->
+    <div id="aod-offer" class="a-section aod-information-block" data-aod-atc-action="1">
+      <div id="aod-offer-price" class="a-section">
+        <span class="a-price" data-a-color="base"><span class="a-offscreen"></span><span aria-hidden="true"><span class="a-price-symbol">$</span><span class="a-price-whole">65<span class="a-price-decimal">.</span></span><span class="a-price-fraction">94</span></span></span>
+      </div>
+      <div id="aod-offer-soldBy" class="a-section aod-clearing-block">
+        <div class="a-fixed-left-grid-col a-col-left"><span class="a-size-small a-color-tertiary">Sold by</span></div>
+        <div class="a-fixed-left-grid-col a-col-right"><span class="a-size-small a-color-base">Amazon.com</span></div>
+      </div>
+      <div id="aod-offer-shipsFrom" class="a-section aod-clearing-block">
+        <div class="a-fixed-left-grid-col a-col-left"><span class="a-size-small a-color-tertiary">Ships from</span></div>
+        <div class="a-fixed-left-grid-col a-col-right"><span class="a-size-small a-color-base">Amazon.com</span></div>
+      </div>
+    </div>
+
+    <!-- List offer 2: another FBA 3P seller (TszDirect). shipsFrom Amazon.com must NOT match. -->
+    <div id="aod-offer" class="a-section aod-information-block" data-aod-atc-action="1">
+      <div id="aod-offer-price" class="a-section">
+        <span class="a-price" data-a-color="base"><span class="a-offscreen">$70.00</span><span aria-hidden="true"><span class="a-price-symbol">$</span><span class="a-price-whole">70<span class="a-price-decimal">.</span></span><span class="a-price-fraction">00</span></span></span>
+      </div>
+      <div id="aod-offer-soldBy" class="a-section aod-clearing-block">
+        <div class="a-fixed-left-grid-col a-col-left"><span class="a-size-small a-color-tertiary">Sold by</span></div>
+        <div class="a-fixed-left-grid-col a-col-right"><a id="aod-offer-soldBy" class="a-size-small a-link-normal" href="/sp?seller=A00TSZDIR">TszDirect</a> <span class="a-size-small a-color-tertiary">Seller rating is 88% positive over the last 12 months</span></div>
+      </div>
+      <div id="aod-offer-shipsFrom" class="a-section aod-clearing-block">
+        <div class="a-fixed-left-grid-col a-col-left"><span class="a-size-small a-color-tertiary">Ships from</span></div>
+        <div class="a-fixed-left-grid-col a-col-right"><span class="a-size-small a-color-base">Amazon.com</span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</div>
+</body>
+</html>

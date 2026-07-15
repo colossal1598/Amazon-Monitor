@@ -181,6 +181,47 @@ def _degraded_burst_reached(
     return len(events) >= threshold
 
 
+def _should_check_aod(
+    *,
+    prior_in_stock: bool,
+    now: float,
+    last_aod: float,
+    min_interval_seconds: float,
+) -> bool:
+    """F1 gating: fetch AOD on a mismatch when the ASIN was previously in stock (transition
+    accuracy — always), or when the min interval since the last AOD fetch has elapsed.
+
+    Pure logic so the gating decision is testable without the browser/engine.
+    """
+    if prior_in_stock:
+        return True
+    return (now - last_aod) >= min_interval_seconds
+
+
+def _mass_flip_tripped(
+    events: "deque[tuple[float, str]]",
+    ts: float,
+    asin: str,
+    *,
+    window_seconds: float,
+    min_flips: int,
+    degraded_context: bool,
+) -> bool:
+    """F2 circuit breaker core: record an in-stock->OOS flip and report whether it trips.
+
+    Appends ``(ts, asin)``, drops events older than ``window_seconds``, and returns True when
+    at least ``min_flips`` DISTINCT ASINs flipped inside the window AND a degraded context is
+    present in the same window (>=1 degraded_page skip or an AES soft-fail). A single-ASIN
+    sellout can never reach ``min_flips`` (>=2), so normal sellouts are unaffected. Pure logic
+    over a caller-owned deque, mirroring ``_degraded_burst_reached`` for testability.
+    """
+    events.append((ts, asin))
+    while events and ts - events[0][0] > window_seconds:
+        events.popleft()
+    distinct = {a for _, a in events}
+    return len(distinct) >= min_flips and degraded_context
+
+
 class RingScheduler:
     """Round-robin freshness scheduler: always hand out the most-overdue ASIN.
 
@@ -299,6 +340,14 @@ class MonitorEngine:
         # Both are cleared at the start of every session.
         self._degraded_events: deque[float] = deque()
         self._recycle_requested = False
+        # F1 AOD gating: per-ASIN last-AOD-fetch monotonic timestamp.
+        self._aod_last_checked: dict[str, float] = {}
+        # F2 mass-flip circuit breaker: rolling window of (monotonic_ts, asin) in-stock->OOS
+        # flips, a rolling window of degraded_page skip timestamps (the "degraded context"),
+        # and the monotonic instant the breaker hold expires. All cleared per session.
+        self._flip_events: deque[tuple[float, str]] = deque()
+        self._breaker_degraded_events: deque[float] = deque()
+        self._breaker_until = 0.0
         self.jobs: dict[str, dict[str, str | None]] = {
             "stream": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
             "aes": {"last_started_at": None, "last_success_at": None, "last_error_at": None, "last_error_message": None},
@@ -409,6 +458,91 @@ class MonitorEngine:
         except (TypeError, ValueError):
             return 180.0
 
+    def _pdp_aod_min_interval_seconds(self) -> float:
+        try:
+            return max(60.0, float(self.config.get("pdp_aod_min_interval_seconds", 240)))
+        except (TypeError, ValueError):
+            return 240.0
+
+    def _mass_flip_min_flips(self) -> int:
+        # Clamp >= 2 so a single-ASIN sellout can never trip the breaker.
+        try:
+            return max(2, int(self.config.get("mass_flip_min_flips", 2)))
+        except (TypeError, ValueError):
+            return 2
+
+    def _mass_flip_window_seconds(self) -> float:
+        try:
+            return max(30.0, float(self.config.get("mass_flip_window_seconds", 120)))
+        except (TypeError, ValueError):
+            return 120.0
+
+    def _mass_flip_hold_seconds(self) -> float:
+        try:
+            return max(30.0, float(self.config.get("mass_flip_hold_seconds", 120)))
+        except (TypeError, ValueError):
+            return 120.0
+
+    def _breaker_degraded_context(self, now: float, window_seconds: float) -> bool:
+        """True when the mass-flip window also saw degraded scraping (skeleton skip or AES fail).
+
+        A mass flip alone is a real mass sellout; only paired with degraded context is it the
+        soft-block storm the breaker guards against (23 duplicate back_in_stock overnight).
+        """
+        while (
+            self._breaker_degraded_events
+            and now - self._breaker_degraded_events[0] > window_seconds
+        ):
+            self._breaker_degraded_events.popleft()
+        if self._breaker_degraded_events:
+            return True
+        return self._aes_fail_streak > 0
+
+    def _mass_flip_breaker_engaged(self, asin: str, now: float) -> bool:
+        """Register an in-stock->OOS flip; return True when the row must be held as a skip.
+
+        Trips (and starts a hold + requests recycle) when >= mass_flip_min_flips distinct
+        ASINs flip within the window under a degraded context; once tripped, every flip row
+        stays a degraded skip for the hold period instead of reaching the state engine.
+        """
+        window = self._mass_flip_window_seconds()
+        breaker_active = now < self._breaker_until
+        degraded_ctx = self._breaker_degraded_context(now, window)
+        tripped = _mass_flip_tripped(
+            self._flip_events,
+            now,
+            asin,
+            window_seconds=window,
+            min_flips=self._mass_flip_min_flips(),
+            degraded_context=degraded_ctx,
+        )
+        if tripped and not breaker_active:
+            self._breaker_until = now + self._mass_flip_hold_seconds()
+            breaker_active = True
+            distinct = len({a for _, a in self._flip_events})
+            LOGGER.warning(
+                "Mass-flip circuit breaker tripped: %s distinct ASINs flipped in-stock->OOS "
+                "within %.0fs under degraded scraping; holding %.0fs and recycling session.",
+                distinct,
+                window,
+                self._mass_flip_hold_seconds(),
+            )
+            try:
+                self.telemetry.debug(
+                    self._cycle_id,
+                    "mass_flip_breaker_tripped",
+                    asin=asin,
+                    distinct_flips=distinct,
+                    window_seconds=window,
+                    hold_seconds=self._mass_flip_hold_seconds(),
+                )
+            except Exception:  # noqa: BLE001 - telemetry is best-effort
+                LOGGER.debug("mass-flip telemetry write failed", exc_info=True)
+        if breaker_active:
+            self._recycle_requested = True
+            return True
+        return False
+
     def _register_degraded_page(self, asin: str) -> None:
         """Handle a degraded_page skip: fast-retry the ASIN and track the burst for recycle.
 
@@ -429,6 +563,9 @@ class MonitorEngine:
         else:
             self._fast_retry_counts.pop(asin, None)
         self._pending_overrides[asin] = override
+        # F2: this degraded_page skip is part of the "degraded context" the mass-flip
+        # breaker requires alongside a burst of in-stock->OOS flips.
+        self._breaker_degraded_events.append(time.monotonic())
         if _degraded_burst_reached(
             self._degraded_events,
             time.monotonic(),
@@ -560,6 +697,22 @@ class MonitorEngine:
         config = self.config
         delay_range = _coerce_range(config.get("pdp_watch_scroll_delay_seconds"), (0.25, 0.65))
         jitter = _coerce_range(config.get("pdp_watch_tab_jitter_seconds"), (0.15, 0.55))
+        # F1 gating (per-ASIN): read the prior in-stock memory (an "ok" status row carries
+        # in_stock) before this check overwrites it, then decide whether the PDP worker may
+        # fetch the AOD panel on a seller_mismatch — always when previously in stock, else
+        # at most every pdp_aod_min_interval_seconds.
+        prior_status = self.asin_status.get(asin)
+        prior_in_stock = bool(
+            prior_status
+            and prior_status.get("result") == "ok"
+            and prior_status.get("in_stock")
+        )
+        allow_aod = _should_check_aod(
+            prior_in_stock=prior_in_stock,
+            now=time.monotonic(),
+            last_aod=self._aod_last_checked.get(asin, 0.0),
+            min_interval_seconds=self._pdp_aod_min_interval_seconds(),
+        )
         rows, _elapsed = await _scrape_pdp_on_context(
             context,
             [asin],
@@ -574,6 +727,7 @@ class MonitorEngine:
             pdp_unknown_retry_seconds=float(config.get("pdp_unknown_retry_seconds", 2.5)),
             pdp_continue_shopping_max_clicks=int(config.get("pdp_continue_shopping_max_clicks", 3)),
             pdp_dump_no_price_html=bool(config.get("pdp_dump_no_price_html", True)),
+            allow_aod=allow_aod,
         )
         row = rows[0] if rows else None
         self._sweep_checks += 1
@@ -599,8 +753,32 @@ class MonitorEngine:
             LOGGER.info("%s skipped %s", asin, pdp_skip_log_label(row), extra={"channel": "lifecycle"})
             return
 
-        self._sweep_ok += 1
+        # F1: the PDP worker opened the AOD panel this check (in-stock, priceless, or
+        # offers-present-but-none-allowed) — record the timestamp so OOS ASINs throttle to
+        # the min interval (previously-in-stock ASINs always re-check regardless).
+        if row.get("aod_checked"):
+            self._aod_last_checked[asin] = time.monotonic()
+
         in_stock = bool(row.get("in_stock"))
+        confidence = str(row.get("stock_confidence") or "").strip().lower()
+
+        # F2: mass-flip circuit breaker. A single in-stock->OOS flip is a normal sellout, but
+        # a burst of them under degraded scraping is a soft-block storm that spammed duplicate
+        # back_in_stock alerts overnight. While the breaker is engaged, hold these flip rows as
+        # degraded skips (fast-retry, request recycle) instead of flipping DB state.
+        if prior_in_stock and not in_stock and confidence == "confirmed_out":
+            if self._mass_flip_breaker_engaged(asin, time.monotonic()):
+                self._register_degraded_page(asin)
+                self._sweep_skip += 1
+                self.asin_status[asin] = {**status, "result": "skip:mass_flip_breaker"}
+                LOGGER.warning(
+                    "%s held by mass-flip breaker (degraded skip, not flipped OOS)",
+                    asin,
+                    extra={"channel": "lifecycle"},
+                )
+                return
+
+        self._sweep_ok += 1
         if in_stock:
             self._sweep_in_stock += 1
         self.asin_status[asin] = {**status, "result": "ok", "in_stock": in_stock, "price": row.get("price")}
@@ -771,6 +949,15 @@ class MonitorEngine:
         )
         deduped = dedupe_alerts_by_asin(aes_alerts)
         for alert in deduped:
+            # F3: log ALERT parity with the PDP dispatch path — client-received AES alerts
+            # previously left zero log trace, so an AES-sourced alert was untraceable.
+            LOGGER.info(
+                "ALERT %s %s price=%s (aes serp)",
+                alert.get("type"),
+                alert.get("asin"),
+                alert.get("price"),
+                extra={"channel": "lifecycle"},
+            )
             await asyncio.to_thread(send_alert, alert, config)
         self._sweep_aes_counts = (len(aes_items), len(candidates), len(deduped))
         self._sweep_aes_summary = aes_summary
@@ -829,6 +1016,10 @@ class MonitorEngine:
         # Fresh session: clear any degraded-page burst state carried from the prior one.
         self._degraded_events.clear()
         self._recycle_requested = False
+        # F2: a new browser clears the soft-block storm, so drop stale flip/breaker state.
+        self._flip_events.clear()
+        self._breaker_degraded_events.clear()
+        self._breaker_until = 0.0
 
         async with async_playwright() as pw:
             browser, context = await create_async_stealth_context(pw, headless=headless, config=self.config)

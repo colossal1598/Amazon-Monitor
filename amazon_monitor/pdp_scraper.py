@@ -1653,6 +1653,283 @@ async def _extract_accordion_offer_state_async(
     }
 
 
+# --- F1: All Offers Display (AOD) offer check ----------------------------------------------------
+#
+# When the buybox/accordion seller mismatches (a 3P seller holds the featured offer) the
+# allowed Amazon offer can still be alive inside the "All Offers Display" panel (evidence:
+# B0DLQJ613B, 926 consecutive seller_mismatch OOS while Amazon Export's offer lived in AOD).
+# On a would-be seller_mismatch/confirmed_out row we open the AOD ajax panel on the same
+# context and re-check for an allowed-seller offer.
+
+# Working AOD ajax endpoint. The plan's gp/product/ajax?...experienceId=aodAjaxMain form
+# returns 404; this ref-scoped path is the request the live PDP "New (N) from" ingress
+# click issues (captured from the live panel for B0DLQJ613B, 2026-07-15) and returns 200
+# with the offers HTML fragment.
+_AOD_URL_TEMPLATE = (
+    "https://www.amazon.com/gp/product/ajax/aodAjaxMain/ref=dp_aod_NEW_mbc"
+    "?asin={asin}&m=&qid=&smid=&sourcecustomerorglistid=&sourcecustomerorglistitemid=&sr=&pc=dp"
+)
+
+# PDP ingress hint that other offers exist. Cheap precondition read off the already-loaded
+# PDP page: if it is absent AND the buybox is 3P (seller_mismatch), there are no other
+# offers, so we keep confirmed_out WITHOUT paying for an AOD fetch.
+_AOD_INGRESS_SELECTORS = (
+    'span[data-action="show-all-offers-display"] a',
+    'span[data-action="show-all-offers-display"]',
+    "#dynamic-aod-ingress",
+    "#aod-ingress-link",
+    "#buybox-see-all-buying-choices",
+)
+
+# Each AOD offer block carries id="aod-pinned-offer" (featured) or id="aod-offer" (list rows).
+# The trailing quote keeps id="aod-offer" from also matching aod-offer-soldBy/-price/-list.
+_AOD_BLOCK_ID_RE = re.compile(r'id="aod-(?:pinned-offer|offer)"')
+
+
+async def _aod_ingress_present_async(page: Any) -> bool:
+    """True when the PDP shows an 'other offers exist' ingress (AOD worth fetching)."""
+    for sel in _AOD_INGRESS_SELECTORS:
+        try:
+            if await page.query_selector(sel):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _split_aod_offer_blocks(html: str) -> list[str]:
+    """Split the AOD fragment into one HTML chunk per offer (pinned + list rows)."""
+    starts: list[int] = []
+    for m in _AOD_BLOCK_ID_RE.finditer(html or ""):
+        tag_start = (html or "").rfind("<div", 0, m.start())
+        if tag_start != -1:
+            starts.append(tag_start)
+    starts = sorted(set(starts))
+    if not starts:
+        return []
+    bounds = starts + [len(html)]
+    return [html[bounds[i] : bounds[i + 1]] for i in range(len(starts))]
+
+
+def _aod_offer_seller_name(block: str) -> str:
+    """Seller NAME from an offer's ``#aod-offer-soldBy`` region ONLY.
+
+    Critical (live-verified 2026-07-15): every FBA 3P offer renders "Ships from Amazon.com"
+    in ``#aod-offer-shipsFrom``. Matching allowed sellers against combined soldBy+shipsFrom
+    text false-positives on every FBA offer, so the match blob must NEVER include shipsFrom.
+    The soldBy region renders like "Sold by ACG ECOM Seller rating is ..."; we bound the
+    region before shipsFrom, strip the leading "Sold by", and cut at "Seller rating".
+    """
+    idx = block.find('id="aod-offer-soldBy"')
+    if idx < 0:
+        return ""
+    region = block[idx:]
+    end = region.find('id="aod-offer-shipsFrom"')
+    if end != -1:
+        # Back up to the opening '<' of the shipsFrom tag so no partial tag survives the
+        # strip (and the fulfiller name can never leak into the seller match blob).
+        lt = region.rfind("<", 0, end)
+        region = region[:lt] if lt != -1 else region[:end]
+    else:
+        region = region[:800]
+    # The region starts inside the soldBy opening tag (at its id= attribute); drop the rest
+    # of that tag so the leftover attributes are not read as text.
+    gt = region.find(">")
+    if gt != -1:
+        region = region[gt + 1 :]
+    text = " ".join(re.sub(r"<[^>]+>", " ", region).split())
+    text = re.sub(r"(?i)^\s*sold by\s*", "", text)
+    text = re.split(r"(?i)\bseller rating\b", text)[0]
+    return text.strip()
+
+
+def _aod_offer_price(block: str) -> float | None:
+    """Pay price from one offer block: ``.a-price .a-offscreen`` first, then whole/fraction.
+
+    Live AOD often ships an EMPTY ``.a-offscreen`` node, so the ``.a-price-whole`` /
+    ``.a-price-fraction`` spans (same fallback the accordion row parser uses) are required.
+    """
+    m = re.search(
+        r'class="a-price[^"]*"[\s\S]{0,400}?class="a-offscreen">\s*([^<]+?)\s*<',
+        block,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        price = _parse_price_text(m.group(1))
+        if price is not None:
+            return price
+    wm = re.search(r'class="a-price-whole"[^>]*>\s*([\d,]+)', block)
+    if wm:
+        whole = wm.group(1).replace(",", "").replace(".", "")
+        fm = re.search(r'class="a-price-fraction"[^>]*>\s*(\d+)', block)
+        frac = fm.group(1) if fm else ""
+        if whole.isdigit():
+            cents = frac if frac.isdigit() else "00"
+            return float(f"{whole}.{cents}")
+    return None
+
+
+def parse_aod_offers(html: str) -> list[dict[str, Any]]:
+    """Parse the AOD fragment into ``[{"seller_text": name, "price": float|None}, ...]``.
+
+    ``seller_text`` is the sold-by seller NAME only (never the shipsFrom fulfiller).
+    """
+    offers: list[dict[str, Any]] = []
+    for block in _split_aod_offer_blocks(html or ""):
+        seller = _aod_offer_seller_name(block)
+        price = _aod_offer_price(block)
+        if seller or price is not None:
+            offers.append({"seller_text": seller, "price": price})
+    return offers
+
+
+def select_allowed_aod_offer(
+    offers: list[dict[str, Any]], allowed: list[str]
+) -> dict[str, Any] | None:
+    """First AOD offer whose sold-by seller name matches an allowed substring, else None."""
+    for offer in offers:
+        if merchant_matches_allowed(str(offer.get("seller_text") or ""), allowed):
+            return offer
+    return None
+
+
+def _apply_aod_outcome(
+    asin: str,
+    row: dict[str, Any],
+    offers: list[dict[str, Any]] | None,
+    allowed: list[str],
+) -> dict[str, Any]:
+    """Map AOD offers onto a seller_mismatch row. Pure logic (no page / no I/O).
+
+    Outcomes:
+      - no offers (fetch failed / empty / captcha / skeleton-like): degraded skip row
+        (absence of evidence — never confirmed_out).
+      - allowed offer WITH a price: in-stock at that price, stock_reason "aod_offer".
+      - allowed offer WITHOUT a parseable price (live: AOD ``.a-offscreen`` often blank):
+        priceless_purchasable — an in-stock signal without a price, so the existing
+        priceless streak/alert path can confirm it instead of dropping to confirmed_out.
+      - offers present but none allowed: keep the original seller_mismatch confirmed_out row.
+    ``row["aod_checked"] = True`` is attached on every non-degraded outcome.
+    """
+    if not offers:
+        return _pdp_skip_row(asin, "degraded_page", skip_detail="aod_failed")
+    matched = select_allowed_aod_offer(offers, allowed)
+    row = dict(row)
+    row["aod_checked"] = True
+    if matched is None:
+        return row
+    seller_text = str(matched.get("seller_text") or "").strip()
+    price = matched.get("price")
+    if isinstance(price, (int, float)):
+        row["in_stock"] = True
+        row["price"] = price
+        row["stock_confidence"] = "confirmed_in"
+        row["stock_reason"] = "aod_offer"
+    else:
+        row["in_stock"] = False
+        row["price"] = None
+        row["stock_confidence"] = "unknown"
+        row["stock_reason"] = "priceless_purchasable"
+        row["buybox_purchasable"] = True
+    if seller_text:
+        row["seller_text"] = seller_text[:2000]
+    return row
+
+
+async def _fetch_aod_offers_async(context: Any, asin: str) -> list[dict[str, Any]] | None:
+    """Open the AOD ajax panel on the context and return parsed offers, or None on failure.
+
+    Acquires a global rate-limiter token first (like the main PDP nav), opens a NEW page on
+    the same context, navigates with the PDP nav pattern/timeouts, and always closes the page.
+    Driver-dead / global-network errors propagate (fatal, session recycle); every other
+    failure (nav timeout, captcha, empty content) returns None so the caller degrades safely.
+    """
+    if browser_factory.global_rate_limiter:
+        await asyncio.to_thread(browser_factory.global_rate_limiter.acquire)
+    url = _AOD_URL_TEMPLATE.format(asin=asin)
+    try:
+        page = await context.new_page()
+    except Exception as exc:
+        if is_driver_disconnected_error(exc):
+            raise BrowserDisconnected(
+                f"Browser/driver connection lost opening AOD page for {asin}: {exc}", exc
+            ) from exc
+        LOGGER.info(
+            "PDP AOD new_page failed asin=%s (ignored): %s", asin, exc, extra={"channel": "debug"}
+        )
+        return None
+    try:
+        page.set_default_timeout(2_000)
+        page.set_default_navigation_timeout(_PDP_GOTO_TIMEOUT_MS)
+        try:
+            await page.goto(
+                url, wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=_PDP_GOTO_TIMEOUT_MS
+            )
+        except Exception as e:
+            if _is_network_error(e):
+                raise NetworkAccessDenied(f"AOD network error for {asin}: {e}", e) from e
+            if is_driver_disconnected_error(e):
+                raise BrowserDisconnected(
+                    f"Browser/driver connection lost navigating AOD for {asin}: {e}", e
+                ) from e
+            LOGGER.info(
+                "PDP AOD navigation failed asin=%s: %s", asin, e, extra={"channel": "debug"}
+            )
+            return None
+        if await _is_hard_captcha_async(page):
+            LOGGER.info("PDP AOD hard captcha asin=%s", asin, extra={"channel": "debug"})
+            return None
+        try:
+            html = await page.content()
+        except Exception:
+            return None
+        return parse_aod_offers(html)
+    finally:
+        try:
+            await page.close()
+        except Exception as close_exc:
+            LOGGER.info(
+                "PDP AOD page close failed asin=%s (ignored): %s",
+                asin,
+                close_exc,
+                extra={"channel": "debug"},
+            )
+
+
+async def _apply_aod_offer_check(
+    context: Any, asin: str, allowed: list[str], row: dict[str, Any]
+) -> dict[str, Any]:
+    """Fetch the AOD panel and fold the result into a seller_mismatch row (see _apply_aod_outcome)."""
+    offers = await _fetch_aod_offers_async(context, asin)
+    result = _apply_aod_outcome(asin, row, offers, allowed)
+    if result.get("_skip_update"):
+        LOGGER.info(
+            "PDP AOD unavailable asin=%s -> degraded skip (no evidence)",
+            asin,
+            extra={"channel": "debug"},
+        )
+    elif result.get("in_stock"):
+        LOGGER.info(
+            "PDP AOD allowed offer asin=%s price=%s -> in_stock",
+            asin,
+            result.get("price"),
+            extra={"channel": "lifecycle"},
+        )
+    elif result.get("stock_reason") == "priceless_purchasable":
+        LOGGER.info(
+            "PDP AOD allowed offer (no price) asin=%s -> priceless_purchasable",
+            asin,
+            extra={"channel": "lifecycle"},
+        )
+    else:
+        LOGGER.info(
+            "PDP AOD offers present, none allowed asin=%s (seller_mismatch kept)",
+            asin,
+            extra={"channel": "debug"},
+        )
+    return result
+
+
 async def _scrape_pdp_on_context(
     context: Any,
     normalized: list[str],
@@ -1668,6 +1945,7 @@ async def _scrape_pdp_on_context(
     pdp_unknown_retry_seconds: float = 2.5,
     pdp_continue_shopping_max_clicks: int = _PDP_CONTINUE_SHOPPING_MAX_CLICKS_DEFAULT,
     pdp_dump_no_price_html: bool = True,
+    allow_aod: bool = False,
 ) -> tuple[list[dict[str, Any]], float]:
     """Scrape watch ASINs on an existing async BrowserContext (caller owns bandwidth meter)."""
     cycle_started = time.monotonic()
@@ -1953,6 +2231,21 @@ async def _scrape_pdp_on_context(
                 if explicit_oos and explicit_reason:
                     row["stock_reason"] = explicit_reason
                 row["is_preorder"] = bool(state.get("is_preorder"))
+
+                # F1: a would-be seller_mismatch/confirmed_out row means a 3P seller holds
+                # the featured offer — but the allowed Amazon offer may still live in the
+                # All Offers Display panel. Only when the engine allows it (per-ASIN gating)
+                # and the PDP shows an ingress that other offers exist do we pay for an AOD
+                # fetch; otherwise the confirmed_out row flows to the existing debounce.
+                if (
+                    allow_aod
+                    and not row.get("in_stock")
+                    and str(row.get("stock_confidence") or "") == "confirmed_out"
+                    and str(row.get("stock_reason") or "") == "seller_mismatch"
+                    and await _aod_ingress_present_async(page)
+                ):
+                    row = await _apply_aod_offer_check(context, asin, allowed, row)
+
                 elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
                 _attach_scrape_meta(
                     row,

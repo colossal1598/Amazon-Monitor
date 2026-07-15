@@ -27,7 +27,7 @@ class TestPdpSelectorsFromHtml(unittest.TestCase):
             # return the featured row, i.e. the wrong offer). They are asserted in
             # test_pdp_accordion.py. Skeleton (degraded) fixtures have no price/delivery
             # by design and are asserted in test_pdp_skeleton.py.
-            if expected.get("accordion") or expected.get("skeleton"):
+            if expected.get("accordion") or expected.get("skeleton") or expected.get("aod"):
                 continue
             with self.subTest(fixture=filename):
                 html = (FIXTURES_DIR / filename).read_text(encoding="utf-8", errors="replace")
@@ -48,7 +48,7 @@ class TestPdpSelectorsFromHtml(unittest.TestCase):
 
     def test_delivery_text_all_fixtures(self) -> None:
         for filename, expected in MANIFEST.items():
-            if expected.get("accordion") or expected.get("skeleton"):
+            if expected.get("accordion") or expected.get("skeleton") or expected.get("aod"):
                 continue
             with self.subTest(fixture=filename):
                 html = (FIXTURES_DIR / filename).read_text(encoding="utf-8", errors="replace")
