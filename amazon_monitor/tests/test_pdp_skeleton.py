@@ -17,8 +17,6 @@ import unittest
 from pathlib import Path
 
 from pdp_scraper import (
-    _SKELETON_ACTIVE_ROW_FALSE_SELECTOR,
-    _SKELETON_ACTIVE_ROW_TRUE_SELECTOR,
     _page_offers_skeleton_async,
     _pdp_skip_row,
     pdp_skip_log_label,
@@ -61,24 +59,18 @@ def _detect(selectors: dict[str, object]) -> bool:
 class TestSkeletonDetectorAsync(unittest.TestCase):
     """Directly exercise the production async detector via a fake page."""
 
-    def test_marker_a_all_false_no_true(self) -> None:
-        # An initial-active-row="false" element exists and no ="true" element does.
-        self.assertTrue(
-            _detect(
-                {
-                    _SKELETON_ACTIVE_ROW_FALSE_SELECTOR: _FakeEl(),
-                    _SKELETON_ACTIVE_ROW_TRUE_SELECTOR: None,
-                }
-            )
-        )
-
-    def test_marker_a_negative_when_a_true_row_exists(self) -> None:
-        # A real (non-skeleton) page has an active row flagged ="true".
+    def test_active_row_marker_removed_carries_no_signal(self) -> None:
+        # REGRESSION 2026-07-15: a live healthy in-stock PDP showed 301
+        # initial-active-row="false" elements and zero ="true" — the attribute is
+        # meaningless as a degradation signal. A page matching only that pattern
+        # (no empty-corePrice evidence) must NOT be classified skeleton; in prod
+        # it caused rendered-but-priceless pages to trip degraded-burst recycles
+        # every ~2 minutes.
         self.assertFalse(
             _detect(
                 {
-                    _SKELETON_ACTIVE_ROW_FALSE_SELECTOR: _FakeEl(),
-                    _SKELETON_ACTIVE_ROW_TRUE_SELECTOR: _FakeEl(),
+                    '[data-csa-c-is-in-initial-active-row="false"]': _FakeEl(),
+                    '[data-csa-c-is-in-initial-active-row="true"]': None,
                 }
             )
         )

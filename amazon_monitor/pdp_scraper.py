@@ -784,17 +784,21 @@ async def _detect_preorder_async(page: Any, *, availability_text: str) -> bool:
     return False
 
 
-# Skeleton (degraded-page) detection. During Amazon soft-block windows (~3.5 min,
-# hitting all watched ASINs at once) the PDP is served as a server-rendered SKELETON:
-# every offer widget carries data-csa-c-is-in-initial-active-row="false" with NONE
-# ="true", #corePrice_feature_div renders empty, and there is no `.a-price .a-offscreen`
-# node anywhere on the ~840KB page — yet a purchase button still renders. Left alone
-# this classifies as no_pay_price/priceless_purchasable (false price-less alerts) or
-# lets stale OOS/mismatch evidence flip state. A skeleton is a scrape failure, not
-# evidence: the caller turns it into a degraded_page skip row and a session recycle
-# clears it. Both markers below were verified against production HTML dumps (2026-07-14).
-_SKELETON_ACTIVE_ROW_FALSE_SELECTOR = '[data-csa-c-is-in-initial-active-row="false"]'
-_SKELETON_ACTIVE_ROW_TRUE_SELECTOR = '[data-csa-c-is-in-initial-active-row="true"]'
+# Skeleton (degraded-page) detection. During Amazon soft-block windows the PDP is
+# served as a server-rendered SKELETON: #corePrice_feature_div renders empty and
+# there is no `.a-price .a-offscreen` node anywhere on the ~840KB page — yet a
+# purchase button still renders. Left alone this classifies as
+# no_pay_price/priceless_purchasable (false price-less alerts) or lets stale
+# OOS/mismatch evidence flip state. A skeleton is a scrape failure, not evidence:
+# the caller turns it into a degraded_page skip row.
+#
+# A second marker was originally used here — data-csa-c-is-in-initial-active-row
+# ="false" present with no ="true" anywhere — and REMOVED on 2026-07-15: a live
+# check of a perfectly healthy in-stock PDP (29 price nodes, full buybox) showed
+# 301 ="false" and zero ="true", i.e. the attribute carries no degradation signal
+# at all. In production it made every rendered-but-priceless page (a state Amazon
+# serves persistently to a flagged IP) register as a degraded burst, driving a
+# session-recycle loop every ~2 minutes that disrupted the whole watch list.
 
 
 async def _page_offers_skeleton_async(page: Any, *, asin: str = "") -> bool:
@@ -802,28 +806,19 @@ async def _page_offers_skeleton_async(page: Any, *, asin: str = "") -> bool:
 
     Checked ONLY on would-be no_pay_price/priceless_purchasable rows (not explicit_oos,
     price None, title present) — real OOS pages carry explicit text and never reach here.
-    Detected via EITHER empirically verified marker:
-      (a) an initial-active-row="false" element exists and no ="true" element exists; OR
-      (b) #corePrice_feature_div exists with empty/whitespace inner text AND no
-          `.a-price .a-offscreen` element exists anywhere on the page.
-    Emits one debug line naming the matched marker when positive.
+    Single discriminative marker: #corePrice_feature_div exists with empty/whitespace
+    inner text AND no `.a-price .a-offscreen` element exists anywhere on the page
+    (a healthy PDP carries dozens of offscreen price nodes site-wide).
     """
     marker = ""
     try:
-        if await page.query_selector(_SKELETON_ACTIVE_ROW_FALSE_SELECTOR) is not None:
-            if await page.query_selector(_SKELETON_ACTIVE_ROW_TRUE_SELECTOR) is None:
-                marker = "initial_active_row_all_false"
+        core = await page.query_selector("#corePrice_feature_div")
+        if core is not None:
+            core_text = (await core.inner_text() or "").strip()
+            if not core_text and await page.query_selector(".a-price .a-offscreen") is None:
+                marker = "empty_core_price_no_offscreen"
     except Exception:
         marker = ""
-    if not marker:
-        try:
-            core = await page.query_selector("#corePrice_feature_div")
-            if core is not None:
-                core_text = (await core.inner_text() or "").strip()
-                if not core_text and await page.query_selector(".a-price .a-offscreen") is None:
-                    marker = "empty_core_price_no_offscreen"
-        except Exception:
-            marker = ""
     if marker:
         LOGGER.info(
             "PDP degraded skeleton detected asin=%s marker=%s",
