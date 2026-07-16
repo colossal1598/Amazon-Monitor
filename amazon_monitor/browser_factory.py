@@ -321,20 +321,25 @@ def headed_launch_chrome_args(config: dict[str, Any] | None = None) -> list[str]
     Headed is the production mode of record since 2026-07-16: Amazon serves the
     headless browser PDPs with the entire offer block (buybox/price) stripped —
     verified empirically (headed: 100% clean sweeps; headless: constant
-    offer-less skeletons on the same session/IP/code). The window is pushed
-    off-screen so it doesn't disturb the machine's user, and background
-    throttling is disabled because Chrome deprioritizes rendering/timers of
-    occluded windows — which would re-create the exact half-hydrated-page
-    misreads headed mode exists to fix.
+    offer-less skeletons on the same session/IP/code).
+
+    DEFAULT IS NO EXTRA ARGS. An off-screen window + anti-throttling flags were
+    tried on 2026-07-16 and reverted within hours: skeletons AND captchas
+    returned immediately — the flags/window position are themselves an
+    automation fingerprint. The machine is bot-dedicated, so visible windows
+    are fine (and useful for eyeballing what the bot sees). The off-screen
+    variant remains available behind browser_window_offscreen=true for
+    machines where visible windows are unacceptable — use with that risk in
+    mind.
     """
-    args = [
+    if not bool((config or {}).get("browser_window_offscreen", False)):
+        return []
+    return [
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding",
         "--disable-background-timer-throttling",
+        "--window-position=-32000,-32000",
     ]
-    if bool((config or {}).get("browser_window_offscreen", True)):
-        args.append("--window-position=-32000,-32000")
-    return args
 
 
 async def create_async_stealth_context(
@@ -350,7 +355,9 @@ async def create_async_stealth_context(
     viewport = {"width": random.randint(1870, 1970), "height": random.randint(1030, 1130)}
     launch_args: dict[str, Any] = {"channel": "chrome", "headless": headless}
     if not headless:
-        launch_args["args"] = headed_launch_chrome_args(config)
+        extra_args = headed_launch_chrome_args(config)
+        if extra_args:
+            launch_args["args"] = extra_args
     if proxy_url:
         launch_args["proxy"] = {"server": proxy_url}
 
