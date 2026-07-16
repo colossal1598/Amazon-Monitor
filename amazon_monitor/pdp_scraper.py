@@ -489,6 +489,100 @@ async def _wait_for_buybox_ready_async(
     return await _pdp_buybox_present_async(page)
 
 
+async def _detect_offer_state_signal_async(page: Any) -> str | None:
+    """Return the first RESOLVABLE offer-state signal present, or None if none yet.
+
+    Checked in priority order each poll tick — a hydrated price beats an OOS/alt-offers
+    marker that may just be pre-render scaffolding. Per-selector exceptions are swallowed
+    exactly like the sibling gate helpers do; the signal is only a readiness hint.
+      "price"      any `.a-price .a-offscreen` that parses, non-empty #corePrice_feature_div,
+                   or a hidden buybox pay-price input.
+      "oos"        #outOfStock present, or #availability text reads as OOS (strong/weak).
+      "alt_offers" a see-all-buying-options / AOD ingress that other offers exist.
+      "accordion"  >= 2 accordion offer rows rendered.
+    """
+    # price
+    try:
+        nodes = await page.query_selector_all(".a-price .a-offscreen")
+    except Exception:
+        nodes = []
+    for el in nodes or []:
+        try:
+            if _parse_price_text(await _read_text_async(el)) is not None:
+                return "price"
+        except Exception:
+            continue
+    try:
+        core = await page.query_selector("#corePrice_feature_div")
+        if core is not None and (await core.inner_text() or "").strip():
+            return "price"
+    except Exception:
+        pass
+    try:
+        if await _extract_hidden_buybox_price_async(page) is not None:
+            return "price"
+    except Exception:
+        pass
+    # oos
+    try:
+        if await page.query_selector("#outOfStock"):
+            return "oos"
+    except Exception:
+        pass
+    try:
+        avail = await page.query_selector("#availability")
+        if avail is not None and _oos_text_level(await avail.inner_text() or ""):
+            return "oos"
+    except Exception:
+        pass
+    # alt_offers
+    try:
+        if await _see_all_buying_options_present_async(page):
+            return "alt_offers"
+    except Exception:
+        pass
+    try:
+        if await _aod_ingress_present_async(page):
+            return "alt_offers"
+    except Exception:
+        pass
+    # accordion
+    try:
+        rows = await page.query_selector_all(_ACCORDION_ROW_SELECTOR)
+        if rows is not None and len(rows) >= 2:
+            return "accordion"
+    except Exception:
+        pass
+    return None
+
+
+async def _wait_for_offer_state_async(
+    page: Any,
+    *,
+    timeout_s: float,
+    poll_interval_s: float,
+) -> str:
+    """Poll until a RESOLVABLE OFFER STATE appears; return its signal name ("timeout" if none).
+
+    Unlike the container-presence gate, this waits for a state extraction can actually
+    classify (a parseable price, an OOS marker, an alt-offers ingress, or a multi-row
+    accordion). On a slow machine #availability renders seconds before the price widgets
+    hydrate, so the container gate passes almost instantly and extraction ran on a
+    half-built page — producing false `degraded_page` skeleton skips. The returned signal
+    is a readiness hint only; the caller extracts regardless of which signal (or timeout)
+    it gets.
+    """
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    interval = max(0.1, min(float(poll_interval_s), float(timeout_s) or 0.1))
+    while True:
+        signal = await _detect_offer_state_signal_async(page)
+        if signal is not None:
+            return signal
+        if time.monotonic() >= deadline:
+            return "timeout"
+        await asyncio.sleep(interval)
+
+
 async def _poll_price_hydration_async(
     page: Any,
     *,
@@ -805,8 +899,11 @@ async def _page_offers_skeleton_async(page: Any, *, asin: str = "") -> bool:
     """True when the PDP is a server-rendered skeleton (soft-block degraded page).
 
     Checked ONLY on would-be no_pay_price/priceless_purchasable rows (not explicit_oos,
-    price None, title present) — real OOS pages carry explicit text and never reach here.
-    Single discriminative marker: #corePrice_feature_div exists with empty/whitespace
+    price None, title present) AND ONLY when the offer-state wait TIMED OUT — if any offer
+    signal (price/oos/alt_offers/accordion) rendered, the page hydrated and a price-less
+    result is a real classification, never a skeleton. This gate is what stops the false
+    degraded_page skip loop on slow-hydrating ASINs. Real OOS pages carry explicit text and
+    never reach here. Single discriminative marker: #corePrice_feature_div exists with empty/whitespace
     inner text AND no `.a-price .a-offscreen` element exists anywhere on the page
     (a healthy PDP carries dozens of offscreen price nodes site-wide).
     """
@@ -2093,13 +2190,36 @@ async def _scrape_pdp_on_context(
                 await _dismiss_continue_shopping_async(
                     page, max_clicks=continue_clicks, asin=asin
                 )
+                # (a) Short container gate — still fast-fails a genuinely dead page. Capped
+                # so it cannot eat the whole settle budget: #availability appears seconds
+                # before the price widgets hydrate on a slow machine, so this gate passes
+                # almost instantly and must NOT be the readiness signal on its own.
+                gate_started = time.monotonic()
                 buybox_ready = await _wait_for_buybox_ready_async(
                     page,
-                    timeout_s=settle_s,
+                    timeout_s=min(3.0, settle_s),
                     poll_interval_s=settle_poll_s,
                 )
+                # (b) Spend the remaining settle budget polling for a RESOLVABLE offer state
+                # (price / oos / alt_offers / accordion) so extraction runs on a hydrated
+                # page, not a half-built one (the false-skeleton-skip root cause).
+                remaining_settle_s = max(0.0, settle_s - (time.monotonic() - gate_started))
+                offer_wait_started = time.monotonic()
+                offer_signal = await _wait_for_offer_state_async(
+                    page,
+                    timeout_s=remaining_settle_s,
+                    poll_interval_s=settle_poll_s,
+                )
+                offer_state_resolved = offer_signal != "timeout"
                 await _dismiss_continue_shopping_async(
                     page, max_clicks=continue_clicks, asin=asin
+                )
+                LOGGER.debug(
+                    "PDP offer-state asin=%s signal=%s waited=%.1fs",
+                    asin,
+                    offer_signal,
+                    time.monotonic() - offer_wait_started,
+                    extra={"channel": "debug"},
                 )
                 if not buybox_ready:
                     LOGGER.info(
@@ -2190,13 +2310,17 @@ async def _scrape_pdp_on_context(
 
                 # Degraded (skeleton) page: title rendered but no price and no explicit
                 # OOS text — the exact would-be no_pay_price/priceless_purchasable state.
-                # The unknown-retry above already ran (a slow-hydrating real page recovers
-                # there); if it is STILL price-less and the skeleton markers are present,
-                # this is a soft-block scrape failure, not evidence. Emit a degraded_page
-                # skip row so the state engine ignores it. The no-price HTML dump already
-                # fired inside _extract_pdp_page_state_async (that is how this was found).
+                # Only reachable when the offer-state wait TIMED OUT: if any offer signal
+                # (price/oos/alt_offers/accordion) was seen the page hydrated and a
+                # price-less result is a real classification, not a soft-block skeleton —
+                # running the skeleton check there caused the false-skip loop on
+                # slow-hydrating ASINs. When the wait genuinely timed out and the skeleton
+                # markers are present, this is a scrape failure, not evidence: emit a
+                # degraded_page skip row so the state engine ignores it. The no-price HTML
+                # dump already fired inside _extract_pdp_page_state_async.
                 if (
-                    not explicit_oos
+                    not offer_state_resolved
+                    and not explicit_oos
                     and price is None
                     and title
                     and await _page_offers_skeleton_async(page, asin=asin)
