@@ -315,6 +315,28 @@ def create_stealth_context(
     return context
 
 
+def headed_launch_chrome_args(config: dict[str, Any] | None = None) -> list[str]:
+    """Chrome args for headed (non-headless) production runs.
+
+    Headed is the production mode of record since 2026-07-16: Amazon serves the
+    headless browser PDPs with the entire offer block (buybox/price) stripped —
+    verified empirically (headed: 100% clean sweeps; headless: constant
+    offer-less skeletons on the same session/IP/code). The window is pushed
+    off-screen so it doesn't disturb the machine's user, and background
+    throttling is disabled because Chrome deprioritizes rendering/timers of
+    occluded windows — which would re-create the exact half-hydrated-page
+    misreads headed mode exists to fix.
+    """
+    args = [
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+    ]
+    if bool((config or {}).get("browser_window_offscreen", True)):
+        args.append("--window-position=-32000,-32000")
+    return args
+
+
 async def create_async_stealth_context(
     pw,
     *,
@@ -327,6 +349,8 @@ async def create_async_stealth_context(
     ua = random.choice(USER_AGENTS)
     viewport = {"width": random.randint(1870, 1970), "height": random.randint(1030, 1130)}
     launch_args: dict[str, Any] = {"channel": "chrome", "headless": headless}
+    if not headless:
+        launch_args["args"] = headed_launch_chrome_args(config)
     if proxy_url:
         launch_args["proxy"] = {"server": proxy_url}
 

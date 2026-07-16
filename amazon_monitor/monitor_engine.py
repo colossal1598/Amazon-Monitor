@@ -1022,7 +1022,29 @@ class MonitorEngine:
         self._breaker_until = 0.0
 
         async with async_playwright() as pw:
-            browser, context = await create_async_stealth_context(pw, headless=headless, config=self.config)
+            try:
+                browser, context = await create_async_stealth_context(pw, headless=headless, config=self.config)
+            except Exception as exc:
+                if headless:
+                    raise
+                # Headed is the production mode of record (headless gets served
+                # offer-less PDPs), but it needs a desktop session — after a reboot
+                # into a session-less context the launch fails. A blind bot beats a
+                # dead bot: fall back to headless for this session and tell the
+                # operator, instead of crash-looping until someone logs in.
+                LOGGER.error(
+                    "Headed browser launch failed (%s); falling back to headless for this "
+                    "session — PDP offer data may be degraded until a desktop session exists.",
+                    exc,
+                )
+                client_alerts.maybe_alert(
+                    "cycle_failed",
+                    self.config,
+                    self.telemetry,
+                    cycle_id=self._cycle_id,
+                    detail=f"headed launch failed, running headless fallback: {exc}",
+                )
+                browser, context = await create_async_stealth_context(pw, headless=True, config=self.config)
             self._meter = usage_metrics.BandwidthMeter(self.config)
             self._meter.attach_context_async(context)
             self.engine_status = "running"
