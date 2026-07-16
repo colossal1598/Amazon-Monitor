@@ -311,6 +311,55 @@ class TestShouldCheckAod(unittest.TestCase):
         )
 
 
+class TestAodFailureBackoff(unittest.TestCase):
+    """F1 backoff (_account_aod_outcome): a failed side-fetch records the per-ASIN timestamp
+    (so it throttles instead of hot-looping) and counts toward the engine-wide disable; any
+    successful fetch resets the counter."""
+
+    @staticmethod
+    def _engine(config: dict | None = None) -> MonitorEngine:
+        eng = MonitorEngine.__new__(MonitorEngine)
+        eng.config = config or {}
+        eng._aod_last_checked = {}
+        eng._aod_consecutive_failures = 0
+        eng._aod_disabled_until = 0.0
+        return eng
+
+    @staticmethod
+    def _row(outcome: str) -> dict:
+        return {"asin": "B0AAAA0001", "aod_checked": True, "aod_outcome": outcome}
+
+    def test_fetch_failed_records_timestamp_and_counts(self) -> None:
+        eng = self._engine()
+        eng._account_aod_outcome("B0AAAA0001", self._row("fetch_failed"), 1000.0)
+        self.assertEqual(eng._aod_last_checked["B0AAAA0001"], 1000.0)
+        self.assertEqual(eng._aod_consecutive_failures, 1)
+        self.assertEqual(eng._aod_disabled_until, 0.0)
+
+    def test_threshold_disables_aod_for_window(self) -> None:
+        eng = self._engine({"aod_fail_disable_threshold": 5, "aod_fail_disable_minutes": 30})
+        for _ in range(4):
+            eng._account_aod_outcome("B0AAAA0001", self._row("fetch_failed"), 1000.0)
+        self.assertEqual(eng._aod_disabled_until, 0.0)  # not yet at threshold
+        eng._account_aod_outcome("B0AAAA0001", self._row("fetch_failed"), 1000.0)  # 5th
+        self.assertEqual(eng._aod_consecutive_failures, 5)
+        self.assertEqual(eng._aod_disabled_until, 1000.0 + 30 * 60.0)
+
+    def test_success_resets_counter(self) -> None:
+        eng = self._engine()
+        for _ in range(3):
+            eng._account_aod_outcome("B0AAAA0001", self._row("fetch_failed"), 1000.0)
+        self.assertEqual(eng._aod_consecutive_failures, 3)
+        eng._account_aod_outcome("B0AAAA0001", self._row("no_allowed_offer"), 1001.0)
+        self.assertEqual(eng._aod_consecutive_failures, 0)
+
+    def test_row_not_aod_checked_is_noop(self) -> None:
+        eng = self._engine()
+        eng._account_aod_outcome("B0AAAA0001", {"asin": "B0AAAA0001"}, 1000.0)
+        self.assertNotIn("B0AAAA0001", eng._aod_last_checked)
+        self.assertEqual(eng._aod_consecutive_failures, 0)
+
+
 class TestMassFlipTripped(unittest.TestCase):
     """F2 circuit-breaker core: 2 distinct flips + degraded context within window -> trip."""
 

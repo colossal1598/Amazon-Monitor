@@ -342,6 +342,12 @@ class MonitorEngine:
         self._recycle_requested = False
         # F1 AOD gating: per-ASIN last-AOD-fetch monotonic timestamp.
         self._aod_last_checked: dict[str, float] = {}
+        # F1 AOD failure backoff: consecutive engine-wide AOD fetch failures, and the monotonic
+        # instant an engine-wide AOD disable expires. A chronically 404ing endpoint must not add
+        # a failing side-request to every seller_mismatch check, so after a threshold of
+        # consecutive failures AOD is skipped entirely for a cool-off window. Any success resets.
+        self._aod_consecutive_failures = 0
+        self._aod_disabled_until = 0.0
         # F2 mass-flip circuit breaker: rolling window of (monotonic_ts, asin) in-stock->OOS
         # flips, a rolling window of degraded_page skip timestamps (the "degraded context"),
         # and the monotonic instant the breaker hold expires. All cleared per session.
@@ -463,6 +469,48 @@ class MonitorEngine:
             return max(60.0, float(self.config.get("pdp_aod_min_interval_seconds", 240)))
         except (TypeError, ValueError):
             return 240.0
+
+    def _aod_fail_disable_threshold(self) -> int:
+        try:
+            return max(1, int(self.config.get("aod_fail_disable_threshold", 5)))
+        except (TypeError, ValueError):
+            return 5
+
+    def _aod_fail_disable_minutes(self) -> float:
+        try:
+            return max(1.0, float(self.config.get("aod_fail_disable_minutes", 30)))
+        except (TypeError, ValueError):
+            return 30.0
+
+    def _account_aod_outcome(self, asin: str, row: dict[str, Any], now: float) -> None:
+        """Record AOD gating state from a scraped row (F1 timestamp + failure backoff).
+
+        Any row the worker AOD-checked (in_stock / priceless / none-allowed / fetch_failed) carries
+        ``aod_checked=True``. Recording the per-ASIN timestamp here — INCLUDING on fetch_failed —
+        makes the min-interval throttle apply to failures too, so a chronically failing endpoint can
+        no longer hot-loop AOD on every check. Consecutive engine-wide fetch failures are counted;
+        crossing the disable threshold logs ONE warning and suppresses AOD for the cool-off window.
+        Any successful fetch (offer_found / no_allowed_offer) resets the counter.
+        """
+        if not row.get("aod_checked"):
+            return
+        self._aod_last_checked[asin] = now
+        outcome = str(row.get("aod_outcome") or "")
+        if outcome == "fetch_failed":
+            self._aod_consecutive_failures += 1
+            if (
+                self._aod_consecutive_failures >= self._aod_fail_disable_threshold()
+                and self._aod_disabled_until <= now
+            ):
+                self._aod_disabled_until = now + self._aod_fail_disable_minutes() * 60.0
+                LOGGER.warning(
+                    "AOD fetch disabled for %.0f min after %d consecutive failures",
+                    self._aod_fail_disable_minutes(),
+                    self._aod_consecutive_failures,
+                    extra={"channel": "lifecycle"},
+                )
+        elif outcome in ("offer_found", "no_allowed_offer"):
+            self._aod_consecutive_failures = 0
 
     def _mass_flip_min_flips(self) -> int:
         # Clamp >= 2 so a single-ASIN sellout can never trip the breaker.
@@ -707,7 +755,7 @@ class MonitorEngine:
             and prior_status.get("result") == "ok"
             and prior_status.get("in_stock")
         )
-        allow_aod = _should_check_aod(
+        allow_aod = time.monotonic() >= self._aod_disabled_until and _should_check_aod(
             prior_in_stock=prior_in_stock,
             now=time.monotonic(),
             last_aod=self._aod_last_checked.get(asin, 0.0),
@@ -753,11 +801,12 @@ class MonitorEngine:
             LOGGER.info("%s skipped %s", asin, pdp_skip_log_label(row), extra={"channel": "lifecycle"})
             return
 
-        # F1: the PDP worker opened the AOD panel this check (in-stock, priceless, or
-        # offers-present-but-none-allowed) — record the timestamp so OOS ASINs throttle to
-        # the min interval (previously-in-stock ASINs always re-check regardless).
-        if row.get("aod_checked"):
-            self._aod_last_checked[asin] = time.monotonic()
+        # F1: the PDP worker opened the AOD panel this check (in-stock, priceless,
+        # offers-present-but-none-allowed, or a failed side-fetch) — record the timestamp so
+        # OOS ASINs throttle to the min interval (previously-in-stock ASINs always re-check),
+        # and drive the engine-wide failure backoff. fetch_failed rows are ordinary buybox
+        # rows now (not skips), so this runs for them too — no more immediate AOD retry.
+        self._account_aod_outcome(asin, row, time.monotonic())
 
         in_stock = bool(row.get("in_stock"))
         confidence = str(row.get("stock_confidence") or "").strip().lower()

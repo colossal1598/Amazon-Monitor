@@ -1245,6 +1245,10 @@ def pdp_skip_log_label(row: dict[str, Any]) -> str:
         return "timeout"
     if reason == "captcha_run_aborted":
         return "captcha_aborted"
+    # AOD side-fetch failures no longer emit skip rows at all (they keep the buybox row),
+    # but if any future path still tags one, label it "aod" — never the misleading "skeleton".
+    if detail == "aod_failed":
+        return "aod"
     if reason == "degraded_page" or detail in ("skeleton", "not_ready"):
         return "skeleton"
     if detail == "empty_parse":
@@ -1757,10 +1761,33 @@ async def _extract_accordion_offer_state_async(
 # returns 404; this ref-scoped path is the request the live PDP "New (N) from" ingress
 # click issues (captured from the live panel for B0DLQJ613B, 2026-07-15) and returns 200
 # with the offers HTML fragment.
+#
+# CRITICAL (prod fix 2026-07-16): this endpoint 404s on direct page navigation — it only
+# answers an XHR issued from the product page's own context. The fetch MUST carry the
+# `x-requested-with: XMLHttpRequest` header (the ajax marker); same-origin cookies, referer
+# and TLS fingerprint ride along automatically. See _fetch_aod_offers_async / _AOD_FETCH_JS.
 _AOD_URL_TEMPLATE = (
     "https://www.amazon.com/gp/product/ajax/aodAjaxMain/ref=dp_aod_NEW_mbc"
     "?asin={asin}&m=&qid=&smid=&sourcecustomerorglistid=&sourcecustomerorglistitemid=&sr=&pc=dp"
 )
+
+# In-page XHR used to fetch the AOD fragment. This module deliberately avoids page.evaluate
+# everywhere else (query_selector is enough and cheaper), but the AOD ajax endpoint rejects a
+# direct navigation with a 404/error page (verified in prod); the ONLY thing that returns the
+# 200 offers fragment is an XMLHttpRequest issued from the already-open product page context,
+# which supplies the right cookies/referer/fingerprint and the required ajax header. Returns the
+# response text on r.ok, else an empty string (never throws — the caller treats "" as failure).
+_AOD_FETCH_JS = """
+async (url) => {
+    try {
+        const r = await fetch(url, {headers: {'x-requested-with': 'XMLHttpRequest'}});
+        if (!r.ok) return '';
+        return await r.text();
+    } catch (err) {
+        return '';
+    }
+}
+"""
 
 # PDP ingress hint that other offers exist. Cheap precondition read off the already-loaded
 # PDP page: if it is absent AND the buybox is 3P (seller_mismatch), there are no other
@@ -1893,23 +1920,35 @@ def _apply_aod_outcome(
 ) -> dict[str, Any]:
     """Map AOD offers onto a seller_mismatch row. Pure logic (no page / no I/O).
 
+    Every outcome carries ``row["aod_checked"] = True`` (so the engine records the per-ASIN
+    timestamp and throttles) plus a ``row["aod_outcome"]`` tag.
+
     Outcomes:
-      - no offers (fetch failed / empty / captcha / skeleton-like): degraded skip row
-        (absence of evidence — never confirmed_out).
+      - fetch/parse failed (no offers: fetch error / empty fragment / zero blocks): KEEP the
+        original buybox-derived row unchanged (still seller_mismatch/confirmed_out) and tag
+        ``aod_outcome="fetch_failed"``. Rationale: the PDP itself was healthy and fully
+        readable — a failed side-fetch must NOT erase good buybox evidence by turning a clean
+        page into a degraded skip (that mislabeled perfect pages "skeleton", fed the
+        degraded-burst recycle counter, and — because a skip records no AOD timestamp — hot-
+        looped AOD on every 3P-buybox check). The existing C9 OOS debounce still protects
+        against premature flips. ``aod_outcome="offer_found"``/``"no_allowed_offer"`` mark the
+        two success paths.
       - allowed offer WITH a price: in-stock at that price, stock_reason "aod_offer".
       - allowed offer WITHOUT a parseable price (live: AOD ``.a-offscreen`` often blank):
         priceless_purchasable — an in-stock signal without a price, so the existing
         priceless streak/alert path can confirm it instead of dropping to confirmed_out.
       - offers present but none allowed: keep the original seller_mismatch confirmed_out row.
-    ``row["aod_checked"] = True`` is attached on every non-degraded outcome.
     """
-    if not offers:
-        return _pdp_skip_row(asin, "degraded_page", skip_detail="aod_failed")
-    matched = select_allowed_aod_offer(offers, allowed)
     row = dict(row)
     row["aod_checked"] = True
-    if matched is None:
+    if not offers:
+        row["aod_outcome"] = "fetch_failed"
         return row
+    matched = select_allowed_aod_offer(offers, allowed)
+    if matched is None:
+        row["aod_outcome"] = "no_allowed_offer"
+        return row
+    row["aod_outcome"] = "offer_found"
     seller_text = str(matched.get("seller_text") or "").strip()
     price = matched.get("price")
     if isinstance(price, (int, float)):
@@ -1928,97 +1967,71 @@ def _apply_aod_outcome(
     return row
 
 
-async def _fetch_aod_offers_async(context: Any, asin: str) -> list[dict[str, Any]] | None:
-    """Open the AOD ajax panel on the context and return parsed offers, or None on failure.
+async def _fetch_aod_offers_async(page: Any, asin: str) -> list[dict[str, Any]] | None:
+    """Fetch the AOD fragment via an in-page XHR on the ALREADY-OPEN product page.
 
-    Acquires a global rate-limiter token first (like the main PDP nav), opens a NEW page on
-    the same context, navigates with the PDP nav pattern/timeouts, and always closes the page.
-    Driver-dead / global-network errors propagate (fatal, session recycle); every other
-    failure (nav timeout, captcha, empty content) returns None so the caller degrades safely.
+    Prod fix (2026-07-16): the previous implementation navigated a NEW page to the ajax URL,
+    which 404s in production — the endpoint only answers an XHR from the product page context.
+    Here the fetch is issued in-page (see _AOD_FETCH_JS): same cookies/referer/fingerprint, plus
+    the required ajax header. Main extraction is already complete and the page is closed right
+    after this check, so we set the fetched fragment as the page content and run the existing
+    static parser against it — mirroring the verified live experiment 1:1.
+
+    Returns parsed offers, or None on any failure (empty/whitespace fragment, zero offer blocks,
+    or a swallowed page error) so the caller degrades to a fetch_failed outcome. Driver-dead /
+    global-network errors propagate (fatal → session recycle).
     """
-    if browser_factory.global_rate_limiter:
-        await asyncio.to_thread(browser_factory.global_rate_limiter.acquire)
     url = _AOD_URL_TEMPLATE.format(asin=asin)
     try:
-        page = await context.new_page()
+        aod_html = await page.evaluate(_AOD_FETCH_JS, url)
+    except Exception as exc:
+        if _is_network_error(exc):
+            raise NetworkAccessDenied(f"AOD network error for {asin}: {exc}", exc) from exc
+        if is_driver_disconnected_error(exc):
+            raise BrowserDisconnected(
+                f"Browser/driver connection lost fetching AOD for {asin}: {exc}", exc
+            ) from exc
+        LOGGER.info(
+            "PDP AOD in-page fetch failed asin=%s: %s", asin, exc, extra={"channel": "debug"}
+        )
+        return None
+    if not aod_html or not str(aod_html).strip():
+        return None
+    try:
+        await page.set_content(aod_html)
+        rendered = await page.content()
     except Exception as exc:
         if is_driver_disconnected_error(exc):
             raise BrowserDisconnected(
-                f"Browser/driver connection lost opening AOD page for {asin}: {exc}", exc
+                f"Browser/driver connection lost rendering AOD for {asin}: {exc}", exc
             ) from exc
-        LOGGER.info(
-            "PDP AOD new_page failed asin=%s (ignored): %s", asin, exc, extra={"channel": "debug"}
-        )
+        # set_content is a best-effort mirror of the live experiment; if it fails, still parse
+        # the raw fetched fragment so a rendering hiccup never loses real offer evidence.
+        rendered = str(aod_html)
+    offers = parse_aod_offers(rendered)
+    if not offers:
         return None
-    try:
-        page.set_default_timeout(2_000)
-        page.set_default_navigation_timeout(_PDP_GOTO_TIMEOUT_MS)
-        try:
-            await page.goto(
-                url, wait_until=browser_factory.NAV_WAIT_UNTIL, timeout=_PDP_GOTO_TIMEOUT_MS
-            )
-        except Exception as e:
-            if _is_network_error(e):
-                raise NetworkAccessDenied(f"AOD network error for {asin}: {e}", e) from e
-            if is_driver_disconnected_error(e):
-                raise BrowserDisconnected(
-                    f"Browser/driver connection lost navigating AOD for {asin}: {e}", e
-                ) from e
-            LOGGER.info(
-                "PDP AOD navigation failed asin=%s: %s", asin, e, extra={"channel": "debug"}
-            )
-            return None
-        if await _is_hard_captcha_async(page):
-            LOGGER.info("PDP AOD hard captcha asin=%s", asin, extra={"channel": "debug"})
-            return None
-        try:
-            html = await page.content()
-        except Exception:
-            return None
-        return parse_aod_offers(html)
-    finally:
-        try:
-            await page.close()
-        except Exception as close_exc:
-            LOGGER.info(
-                "PDP AOD page close failed asin=%s (ignored): %s",
-                asin,
-                close_exc,
-                extra={"channel": "debug"},
-            )
+    return offers
 
 
 async def _apply_aod_offer_check(
-    context: Any, asin: str, allowed: list[str], row: dict[str, Any]
+    page: Any, asin: str, allowed: list[str], row: dict[str, Any]
 ) -> dict[str, Any]:
     """Fetch the AOD panel and fold the result into a seller_mismatch row (see _apply_aod_outcome)."""
-    offers = await _fetch_aod_offers_async(context, asin)
+    offers = await _fetch_aod_offers_async(page, asin)
     result = _apply_aod_outcome(asin, row, offers, allowed)
-    if result.get("_skip_update"):
-        LOGGER.info(
-            "PDP AOD unavailable asin=%s -> degraded skip (no evidence)",
-            asin,
-            extra={"channel": "debug"},
-        )
-    elif result.get("in_stock"):
-        LOGGER.info(
-            "PDP AOD allowed offer asin=%s price=%s -> in_stock",
-            asin,
-            result.get("price"),
-            extra={"channel": "lifecycle"},
-        )
-    elif result.get("stock_reason") == "priceless_purchasable":
-        LOGGER.info(
-            "PDP AOD allowed offer (no price) asin=%s -> priceless_purchasable",
-            asin,
-            extra={"channel": "lifecycle"},
-        )
-    else:
-        LOGGER.info(
-            "PDP AOD offers present, none allowed asin=%s (seller_mismatch kept)",
-            asin,
-            extra={"channel": "debug"},
-        )
+    outcome = str(result.get("aod_outcome") or "")
+    # One line per AOD check, at the outcome's natural level: a real restock (offer_found +
+    # in_stock) is lifecycle; a kept-mismatch or a failed side-fetch is debug noise.
+    channel = "lifecycle" if outcome == "offer_found" and result.get("in_stock") else "debug"
+    LOGGER.info(
+        "PDP AOD check asin=%s outcome=%s in_stock=%s price=%s",
+        asin,
+        outcome or "?",
+        bool(result.get("in_stock")),
+        result.get("price"),
+        extra={"channel": channel},
+    )
     return result
 
 
@@ -2363,7 +2376,7 @@ async def _scrape_pdp_on_context(
                     and str(row.get("stock_reason") or "") == "seller_mismatch"
                     and await _aod_ingress_present_async(page)
                 ):
-                    row = await _apply_aod_offer_check(context, asin, allowed, row)
+                    row = await _apply_aod_offer_check(page, asin, allowed, row)
 
                 elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
                 _attach_scrape_meta(
