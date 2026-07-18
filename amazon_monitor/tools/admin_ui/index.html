@@ -232,6 +232,56 @@
         </div>
 
         <div class="card">
+          <h2>צינון והתראות כפולות</h2>
+          <p class="hint">בכל השדות: 0 מבטל את המנגנון</p>
+          <div class="row">
+            <div class="field">
+              <label for="stock-alert-same-price-dedupe-minutes">מניעת התראה חוזרת באותו מחיר (דקות)</label>
+              <input id="stock-alert-same-price-dedupe-minutes" type="number" min="0" step="1">
+              <p class="hint">חוסם הקפצות חוזרות של אותו מוצר באותו מחיר; שינוי מחיר תמיד יתריע</p>
+            </div>
+            <div class="field">
+              <label for="cross-source-alert-dedupe-minutes">מניעת כפילות בין מקורות (דקות)</label>
+              <input id="cross-source-alert-dedupe-minutes" type="number" min="0" step="1">
+              <p class="hint">אותה התראה מעמוד מוצר ומחנות הספק בתוך החלון — נשלחת פעם אחת</p>
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="stock-alert-confirmed-cooldown-minutes">צינון אחרי אזל מלאי מאומת (דקות)</label>
+              <input id="stock-alert-confirmed-cooldown-minutes" type="number" min="0" step="1">
+              <p class="hint">קצר — כדי שגלי חזרה למלאי אמיתיים יתריעו מהר</p>
+            </div>
+            <div class="field">
+              <label for="stock-alert-cooldown-minutes">צינון בין התראות מלאי זהות (דקות)</label>
+              <input id="stock-alert-cooldown-minutes" type="number" min="0" step="1">
+              <p class="hint">כשהאזל־מלאי הקודם לא היה מאומת (רעש סריקה)</p>
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="pdp-oos-confirm-cycles">בדיקות רצופות לאישור אזל — עמוד מוצר</label>
+              <input id="pdp-oos-confirm-cycles" type="number" min="1" max="10" step="1">
+            </div>
+            <div class="field">
+              <label for="aes-oos-confirm-cycles">בדיקות רצופות לאישור אזל — חנות ספק</label>
+              <input id="aes-oos-confirm-cycles" type="number" min="1" max="10" step="1">
+            </div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label for="target-price-alert-cooldown-hours">צינון התראת מחיר יעד (שעות)</label>
+              <input id="target-price-alert-cooldown-hours" type="number" min="0" step="1">
+            </div>
+            <div class="field">
+              <label for="pdp-priceless-alert-cooldown-minutes">צינון התראה ללא מחיר (דקות)</label>
+              <input id="pdp-priceless-alert-cooldown-minutes" type="number" min="0" step="1">
+              <p class="hint">חזרה למלאי שזוהתה בלי שהמחיר הספיק להיטען</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
           <h2>תבניות הודעה</h2>
           <p class="hint">
             שדות נתמכים:

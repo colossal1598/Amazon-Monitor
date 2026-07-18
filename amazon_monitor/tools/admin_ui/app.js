@@ -362,6 +362,11 @@ function parsePositiveInt(raw, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function parseNonNegInt(raw, fallback) {
+  const n = parseInt(String(raw || "").trim(), 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 function parsePercent(raw, fallback) {
   const n = parseInt(String(raw || "").trim(), 10);
   if (!Number.isFinite(n)) {
@@ -386,6 +391,20 @@ function fillSettings(settings) {
   byId("price-drop-percent").value = settings.price_drop_percent ?? "";
   byId("max-requests-per-minute").value = settings.max_requests_per_minute ?? "";
   byId("affiliate-tag").value = settings.affiliate_tag || "";
+
+  byId("stock-alert-same-price-dedupe-minutes").value =
+    settings.stock_alert_same_price_dedupe_minutes ?? "";
+  byId("cross-source-alert-dedupe-minutes").value =
+    settings.cross_source_alert_dedupe_minutes ?? "";
+  byId("stock-alert-confirmed-cooldown-minutes").value =
+    settings.stock_alert_confirmed_cooldown_minutes ?? "";
+  byId("stock-alert-cooldown-minutes").value = settings.stock_alert_cooldown_minutes ?? "";
+  byId("pdp-oos-confirm-cycles").value = settings.pdp_oos_confirm_cycles ?? "";
+  byId("aes-oos-confirm-cycles").value = settings.aes_oos_confirm_cycles ?? "";
+  byId("target-price-alert-cooldown-hours").value =
+    settings.target_price_alert_cooldown_hours ?? "";
+  byId("pdp-priceless-alert-cooldown-minutes").value =
+    settings.pdp_priceless_alert_cooldown_minutes ?? "";
 
   byId("aes-url").value = ((settings.search_urls || {}).aes_llc) || "";
   byId("required-keywords").value = (settings.required_keywords || []).join("\n");
@@ -426,6 +445,19 @@ function collectSettingsPayload() {
     price_drop_percent: parsePercent(byId("price-drop-percent").value, 10),
     max_requests_per_minute: parsePositiveInt(byId("max-requests-per-minute").value, 25),
     affiliate_tag: String(byId("affiliate-tag").value || "").trim(),
+    stock_alert_same_price_dedupe_minutes: parseNonNegInt(
+      byId("stock-alert-same-price-dedupe-minutes").value, 360),
+    cross_source_alert_dedupe_minutes: parseNonNegInt(
+      byId("cross-source-alert-dedupe-minutes").value, 15),
+    stock_alert_confirmed_cooldown_minutes: parseNonNegInt(
+      byId("stock-alert-confirmed-cooldown-minutes").value, 10),
+    stock_alert_cooldown_minutes: parseNonNegInt(byId("stock-alert-cooldown-minutes").value, 60),
+    pdp_oos_confirm_cycles: parsePositiveInt(byId("pdp-oos-confirm-cycles").value, 2),
+    aes_oos_confirm_cycles: parsePositiveInt(byId("aes-oos-confirm-cycles").value, 3),
+    target_price_alert_cooldown_hours: parseNonNegInt(
+      byId("target-price-alert-cooldown-hours").value, 6),
+    pdp_priceless_alert_cooldown_minutes: parseNonNegInt(
+      byId("pdp-priceless-alert-cooldown-minutes").value, 30),
     search_urls: {
       aes_llc: String(byId("aes-url").value || "").trim(),
     },
@@ -468,6 +500,10 @@ function bindDirtyTracking() {
     "affiliate-tag", "aes-url", "required-keywords", "title-blacklist-phrases",
     "allowed-sellers", "tpl-new-product", "tpl-price-drop", "tpl-back-in-stock",
     "tpl-price-below-target",
+    "stock-alert-same-price-dedupe-minutes", "cross-source-alert-dedupe-minutes",
+    "stock-alert-confirmed-cooldown-minutes", "stock-alert-cooldown-minutes",
+    "pdp-oos-confirm-cycles", "aes-oos-confirm-cycles",
+    "target-price-alert-cooldown-hours", "pdp-priceless-alert-cooldown-minutes",
   ];
   for (const id of ids) {
     const el = byId(id);

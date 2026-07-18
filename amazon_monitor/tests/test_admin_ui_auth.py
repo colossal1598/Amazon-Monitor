@@ -210,8 +210,11 @@ class AdminUIAuthTests(unittest.TestCase):
                     "wa_client_to": "972501234567@c.us",
                     "price_drop_percent": 15,
                     "max_requests_per_minute": 8,
-                    "pdp_watch_max_concurrent_tabs": 3,
+                    "stock_alert_same_price_dedupe_minutes": 240,
                     "affiliate_tag": "test-tag",
+                    # Legacy key nothing reads: accepted by the API but pruned on the
+                    # next load, so it must NOT come back in the response settings.
+                    "pdp_watch_max_concurrent_tabs": 3,
                 }
             }
         ).encode("utf-8")
@@ -227,8 +230,9 @@ class AdminUIAuthTests(unittest.TestCase):
         self.assertEqual(settings.get("wa_client_to"), "972501234567@c.us")
         self.assertEqual(settings.get("price_drop_percent"), 15)
         self.assertEqual(settings.get("max_requests_per_minute"), 8)
-        self.assertEqual(settings.get("pdp_watch_max_concurrent_tabs"), 3)
+        self.assertEqual(settings.get("stock_alert_same_price_dedupe_minutes"), 240)
         self.assertEqual(settings.get("affiliate_tag"), "test-tag")
+        self.assertNotIn("pdp_watch_max_concurrent_tabs", settings)
         conn.close()
 
 

@@ -25,7 +25,10 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "stream_concurrent_tabs": 2,
     "aes_check_minutes": 5,
     "browser_recycle_minutes": 60,
-    "playwright_headless": True,
+    # Headed is the production mode of record: headless sessions get served
+    # offer-less (nav-shell) PDPs. The engine falls back to headless (with a
+    # client alert) when no desktop session exists.
+    "playwright_headless": False,
     "max_requests_per_minute": 25,
     "captcha_recovery_pause_seconds": 120,
     "price_drop_percent": 10,
@@ -35,7 +38,6 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "required_keywords": ["pokemon", "tcg"],
     "title_blacklist_phrases": [],
     "pdp_allowed_seller_substrings": ["amazon.com", "amazon export"],
-    "pdp_watch_max_concurrent_tabs": 3,
     "pdp_watch_max_attempts": 2,
     "pdp_watch_tab_jitter_seconds": [0.15, 0.55],
     "pdp_watch_scroll_delay_seconds": [0.25, 0.65],
@@ -52,6 +54,11 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     # by explicit evidence (PDP/card said "currently unavailable" etc.). Real
     # sell-out -> restock cycles are common for Pokemon drops and must re-alert fast.
     "stock_alert_confirmed_cooldown_minutes": 10,
+    # Suppress a back_in_stock at the SAME price as the last one within this window,
+    # unless the preceding OOS was a strong page-text sellout (last_oos_reason).
+    # Kills seller-rotation / SERP-flap re-alert churn; price changes always alert.
+    # 0 disables.
+    "stock_alert_same_price_dedupe_minutes": 360,
     # Consecutive AES/SERP cycles an item must look out-of-stock (absent from the
     # filtered page or non-qualifying row) before the mirror flips to OOS. 1 = old
     # immediate behavior.
@@ -61,8 +68,43 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     # Strong page text ("currently unavailable" etc.) still flips immediately.
     # 1 = old immediate behavior.
     "pdp_oos_confirm_cycles": 2,
-    "pdp_title_wait_ms": 6_000,
-    "pdp_price_wait_ms": 2_000,
+    # Price-less purchasable buybox (price never rendered) restock path: alert after
+    # this many consecutive priceless checks, on its own cooldown.
+    "pdp_priceless_restock_alert": True,
+    "pdp_priceless_confirm_checks": 2,
+    "pdp_priceless_alert_cooldown_minutes": 30,
+    # Legacy preorder->preorder re-alert gate, default OFF (kept as rollback lever
+    # for flapping spam; suppressing consumes the 0->1 edge — see state_engine).
+    "pdp_preorder_realert_suppression": False,
+    # C2 fast-recheck for unknown/priceless rows: override interval and max repeats.
+    "pdp_unknown_fast_retry_seconds": 15,
+    "pdp_unknown_fast_retry_max": 3,
+    # Degraded-page (skeleton/nav-shell) burst -> proactive session recycle.
+    "degraded_recycle_threshold": 4,
+    "degraded_recycle_window_seconds": 180,
+    # F1 AOD side-fetch gating: min gap per OOS ASIN (previously-in-stock ASINs
+    # always re-check), and engine-wide disable after consecutive fetch failures.
+    "pdp_aod_min_interval_seconds": 240,
+    "aod_fail_disable_threshold": 5,
+    "aod_fail_disable_minutes": 30,
+    # F2 mass-flip circuit breaker: >= min_flips DISTINCT in-stock ASINs flipping
+    # OOS inside the window under a degraded context = poisoned session; hold flips
+    # as degraded skips for hold_seconds and request a recycle.
+    "mass_flip_min_flips": 2,
+    "mass_flip_window_seconds": 120,
+    "mass_flip_hold_seconds": 120,
+    # Consecutive AES soft-fail cycles before the engine recycles the session.
+    "aes_recycle_fail_streak": 2,
+    # Dump the PDP HTML to data/debug_no_price on no-price extractions (keep-20).
+    "pdp_dump_no_price_html": True,
+    # Off-screen browser window experiment — OFF: it fingerprints (2026-07-16).
+    "browser_window_offscreen": False,
+    "metrics_enabled": True,
+    # Watchdog: engine restarted if no progress for this long.
+    "watchdog_stall_seconds": 600,
+    # WhatsApp webhook delivery retries (webhook_sender).
+    "wa_send_attempts": 3,
+    "wa_send_retry_backoff_seconds": 2.0,
     # AES/SERP result-card wait per attempt. Kept short: this is a lightweight 1-page
     # check and normally resolves in a few seconds; a long timeout here just delays
     # detection of dead/error pages and risks overlapping the next scheduled cycle.
@@ -478,10 +520,28 @@ def _watch_target_prices(db_path: str) -> dict[str, float]:
     return {str(row["asin"]).upper(): float(row["target_price"]) for row in rows}
 
 
+# Settings rows that no code reads anymore. Pruned on every load_runtime_config so
+# stale overrides stop masquerading as tunables (production carried max_cycle_seconds /
+# pdp_poll_minutes from the pre-streaming scheduler era, plus superseded PDP waits).
+_REMOVED_SETTINGS_KEYS: tuple[str, ...] = (
+    "max_cycle_seconds",
+    "pdp_poll_minutes",
+    "pdp_title_wait_ms",
+    "pdp_price_wait_ms",
+    "pdp_watch_max_concurrent_tabs",
+)
+
+
 def load_runtime_config(db_path: str) -> dict[str, Any]:
     config: dict[str, Any] = copy.deepcopy(DEFAULT_RUNTIME_CONFIG)
     with closing(_connect(db_path)) as conn:
         _ensure_tables(conn)
+        removed = conn.execute(
+            f"DELETE FROM settings WHERE key IN ({','.join('?' * len(_REMOVED_SETTINGS_KEYS))})",
+            _REMOVED_SETTINGS_KEYS,
+        )
+        if removed.rowcount:
+            conn.commit()
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
     for row in rows:
         key = str(row["key"])

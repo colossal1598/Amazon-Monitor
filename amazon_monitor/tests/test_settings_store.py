@@ -148,6 +148,35 @@ class TestSettingsStore(unittest.TestCase):
             cfg = load_runtime_config(db_path)
             self.assertEqual(cfg.get("pdp_watch_target_prices"), {"B055556666": 29.5})
 
+    def test_load_runtime_config_prunes_removed_legacy_keys(self) -> None:
+        # Production carried dead rows (max_cycle_seconds / pdp_poll_minutes from the
+        # pre-streaming era); they must vanish from both the config and the db.
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "monitor.db")
+            set_setting(db_path, "max_cycle_seconds", 300)
+            set_setting(db_path, "pdp_title_wait_ms", 6000)
+            set_setting(db_path, "aes_check_minutes", 7)
+
+            cfg = load_runtime_config(db_path)
+            self.assertNotIn("max_cycle_seconds", cfg)
+            self.assertNotIn("pdp_title_wait_ms", cfg)
+            self.assertEqual(cfg.get("aes_check_minutes"), 7)
+            self.assertIsNone(get_setting(db_path, "max_cycle_seconds"))
+            self.assertIsNone(get_setting(db_path, "pdp_title_wait_ms"))
+
+    def test_defaults_expose_hidden_knobs(self) -> None:
+        # Keys the engine reads must exist in the defaults so /api/settings lists
+        # them (previously invisible until explicitly set).
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = load_runtime_config(str(Path(tmp) / "monitor.db"))
+            self.assertEqual(cfg.get("stock_alert_same_price_dedupe_minutes"), 360)
+            self.assertEqual(cfg.get("pdp_aod_min_interval_seconds"), 240)
+            self.assertEqual(cfg.get("mass_flip_min_flips"), 2)
+            self.assertEqual(cfg.get("watchdog_stall_seconds"), 600)
+            self.assertFalse(cfg.get("pdp_preorder_realert_suppression"))
+            # Headed is the production mode of record.
+            self.assertIs(cfg.get("playwright_headless"), False)
+
 
 if __name__ == "__main__":
     unittest.main()
