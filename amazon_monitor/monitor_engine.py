@@ -1059,6 +1059,15 @@ class MonitorEngine:
             return
 
         headless = bool(self.config.get("playwright_headless", True))
+        if headless:
+            # Headed is the production mode of record: headless sessions get served
+            # offer-less (nav-shell) PDPs — those now become degraded_page skips, so a
+            # headless session mostly burns checks instead of collecting evidence. Say
+            # so once per session; production should run playwright_headless=false.
+            LOGGER.warning(
+                "playwright_headless=true — headless sessions are served offer-less "
+                "PDPs (nav_shell skips); set playwright_headless=false for production."
+            )
         tabs = _clamp_tabs(self.config.get("stream_concurrent_tabs", 2))
         session_started = time.monotonic()
         recycle_after = self._recycle_seconds()

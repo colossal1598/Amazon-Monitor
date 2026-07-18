@@ -187,6 +187,23 @@ def is_offers_skeleton_from_html(html: str) -> bool:
     return False
 
 
+def is_nav_shell_from_html(html: str) -> bool:
+    """Static mirror of pdp_scraper._page_is_nav_shell_async (regex, no Playwright).
+
+    A nav shell has NO product-body container at all — every id on the page is nav
+    chrome. Any one product container present means a real (possibly degraded) PDP.
+    """
+    for element_id in ("dp", "ppd", "centerCol", "productTitle", "availability"):
+        if f'id="{element_id}"' in html:
+            return False
+    return True
+
+
+def is_fallback_detail_from_html(html: str) -> bool:
+    """Static mirror of pdp_scraper._page_is_fallback_detail_async."""
+    return re.search(r'name="clientName"\s+value="FallbackDetailPage"', html) is not None
+
+
 def extract_list_price_from_html(html: str) -> float | None:
     chunk = _chunk_after_id(html, "corePriceDisplay_desktop_feature_div")
     raw = _offscreen_in_chunk(chunk, "apex-basisprice-value")

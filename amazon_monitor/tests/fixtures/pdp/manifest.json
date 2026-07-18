@@ -63,5 +63,11 @@
     "expected_offer_count": 3,
     "expected_allowed_price": 65.94,
     "sellers": ["ACG ECOM", "Amazon.com", "TszDirect"]
+  },
+  "nav-shell.html": {
+    "nav_shell": true
+  },
+  "fallback-detail.html": {
+    "fallback_page": true
   }
 }

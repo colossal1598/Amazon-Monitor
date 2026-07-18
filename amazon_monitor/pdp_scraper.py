@@ -927,6 +927,65 @@ async def _page_offers_skeleton_async(page: Any, *, asin: str = "") -> bool:
     return False
 
 
+# Offer-less nav shell: the OTHER degraded serving mode (post-512ba00 dumps,
+# 2026-07-16/17): Amazon returns ONLY the navigation chrome — every element id is
+# nav-*/a-page, no #dp / #ppd / #centerCol / #productTitle / #availability, no buybox,
+# no price markup — while the document <title> still carries the product name. Extraction
+# then recovers a title from the page <title>, every OOS probe is all-negative (the
+# "Buying options" skip link points at #buybox, so no alt-offers ingress matches), and
+# the page lands on explicit_oos/no_pay_price → confirmed_out: a scrape failure ingested
+# as OOS EVIDENCE. Shell windows hit multiple ASINs in the same second (two pairs of
+# same-second dumps across Jul 16-17), so this is a session-serving state, not product
+# state — it must become a degraded_page skip, like the skeleton above.
+_PDP_PRODUCT_BODY_SELECTORS = ("#dp", "#ppd", "#centerCol", "#productTitle", "#availability")
+
+
+async def _page_is_nav_shell_async(page: Any, *, asin: str = "") -> bool:
+    """True when the PDP has no product body at all (nav-chrome-only shell).
+
+    Checked ONLY when the offer-state wait TIMED OUT — every offer signal lives inside
+    the product body, so a page that resolved any signal can never be a shell. Requires
+    ALL product-body containers absent: any one present means a real (possibly degraded)
+    PDP that the skeleton/classification paths own. A selector error counts as present —
+    an inconclusive read must never classify a page as a shell.
+    """
+    for sel in _PDP_PRODUCT_BODY_SELECTORS:
+        try:
+            if await page.query_selector(sel) is not None:
+                return False
+        except Exception:
+            return False
+    LOGGER.info(
+        "PDP nav-shell page detected asin=%s (no product body)",
+        asin or "?",
+        extra={"channel": "debug"},
+    )
+    return True
+
+
+# Cached-fallback PDP: when the live render fails, Amazon can serve a stale page out of
+# cache — seen live 2026-07-17 (B0GW2DK37Q dump: hidden input clientName=
+# "FallbackDetailPage", placeholder session-id, pageLoadTimestampUTC 41h older than the
+# fetch). Whatever such a page shows — price, buybox seller, OOS — is up to days old, so
+# it must never reach the state engine as evidence in either direction.
+_PDP_FALLBACK_CLIENT_SELECTOR = 'input[name="clientName"][value="FallbackDetailPage"]'
+
+
+async def _page_is_fallback_detail_async(page: Any, *, asin: str = "") -> bool:
+    """True when the page marks itself as a cached FallbackDetailPage render."""
+    try:
+        found = await page.query_selector(_PDP_FALLBACK_CLIENT_SELECTOR) is not None
+    except Exception:
+        return False
+    if found:
+        LOGGER.info(
+            "PDP fallback (cached) page detected asin=%s",
+            asin or "?",
+            extra={"channel": "debug"},
+        )
+    return found
+
+
 async def _buybox_purchasable_async(page: Any) -> bool:
     """True when an enabled add-to-cart or buy-now control exists."""
     for sel in _PDP_PURCHASE_BUTTON_SELECTORS:
@@ -1249,6 +1308,10 @@ def pdp_skip_log_label(row: dict[str, Any]) -> str:
     # but if any future path still tags one, label it "aod" — never the misleading "skeleton".
     if detail == "aod_failed":
         return "aod"
+    if detail == "nav_shell":
+        return "nav_shell"
+    if detail == "fallback_page":
+        return "fallback"
     if reason == "degraded_page" or detail in ("skeleton", "not_ready"):
         return "skeleton"
     if detail == "empty_parse":
@@ -1912,13 +1975,42 @@ def select_allowed_aod_offer(
     return None
 
 
+def _aod_check_worthwhile(
+    row: dict[str, Any], *, merchant_blob: str, allowed: list[str]
+) -> bool:
+    """True when the buybox row cannot resolve on its own but AOD might. Pure logic.
+
+    Two shapes qualify:
+      - seller_mismatch/confirmed_out: a 3P seller holds the featured offer (the original
+        F1 case — the allowed Amazon offer may still live in the AOD panel).
+      - priceless purchasable 3P buybox (unknown/no_pay_price, purchase button enabled,
+        non-empty merchant blob matching no allowed seller): the page renders no price in
+        any extractable form, so the row stays unknown forever and the in-page retry can
+        never settle it — only AOD can say whether an allowed offer exists.
+    """
+    if row.get("in_stock"):
+        return False
+    confidence = str(row.get("stock_confidence") or "")
+    reason = str(row.get("stock_reason") or "")
+    if confidence == "confirmed_out" and reason == "seller_mismatch":
+        return True
+    return (
+        confidence == "unknown"
+        and reason == "no_pay_price"
+        and bool(row.get("buybox_purchasable"))
+        and bool((merchant_blob or "").strip())
+        and not merchant_matches_allowed(merchant_blob, allowed)
+    )
+
+
 def _apply_aod_outcome(
     asin: str,
     row: dict[str, Any],
     offers: list[dict[str, Any]] | None,
     allowed: list[str],
 ) -> dict[str, Any]:
-    """Map AOD offers onto a seller_mismatch row. Pure logic (no page / no I/O).
+    """Map AOD offers onto an unresolved buybox row (see _aod_check_worthwhile for which
+    rows qualify). Pure logic (no page / no I/O).
 
     Every outcome carries ``row["aod_checked"] = True`` (so the engine records the per-ASIN
     timestamp and throttles) plus a ``row["aod_outcome"]`` tag.
@@ -2321,6 +2413,42 @@ async def _scrape_pdp_on_context(
                         dom_ok=False,
                     )
 
+                # Offer-less nav shell: nothing below the nav rendered, yet a title
+                # survives via the document <title>, so extraction lands on
+                # explicit_oos/no_pay_price — which both bypasses the skeleton gate
+                # below (it requires not explicit_oos) and would flow to the state
+                # engine as confirmed_out OOS evidence. Must therefore run BEFORE the
+                # skeleton check and without the explicit_oos gate. Shell windows are
+                # session state, not product state: emit a degraded_page skip so
+                # fast-retry / burst-recycle / the mass-flip breaker absorb it instead
+                # of the OOS debounce. The no-price HTML dump already fired inside
+                # _extract_pdp_page_state_async.
+                if not offer_state_resolved and await _page_is_nav_shell_async(page, asin=asin):
+                    await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                    elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
+                    return idx, _pdp_skip_row(
+                        asin,
+                        "degraded_page",
+                        skip_detail="nav_shell",
+                        scrape_attempts=attempt,
+                        scrape_elapsed_ms=elapsed_ms,
+                    )
+
+                # Cached FallbackDetailPage render: everything on it is stale —
+                # in-stock and OOS alike — so it is never evidence, regardless of how
+                # extraction classified it. Not gated on the offer-state wait: a
+                # fallback page is fully rendered and its (stale) offer signals resolve.
+                if await _page_is_fallback_detail_async(page, asin=asin):
+                    await asyncio.sleep(random.uniform(scroll_delay_range[0], scroll_delay_range[1]))
+                    elapsed_ms = int(round((time.monotonic() - worker_started) * 1000))
+                    return idx, _pdp_skip_row(
+                        asin,
+                        "degraded_page",
+                        skip_detail="fallback_page",
+                        scrape_attempts=attempt,
+                        scrape_elapsed_ms=elapsed_ms,
+                    )
+
                 # Degraded (skeleton) page: title rendered but no price and no explicit
                 # OOS text — the exact would-be no_pay_price/priceless_purchasable state.
                 # Only reachable when the offer-state wait TIMED OUT: if any offer signal
@@ -2366,14 +2494,16 @@ async def _scrape_pdp_on_context(
 
                 # F1: a would-be seller_mismatch/confirmed_out row means a 3P seller holds
                 # the featured offer — but the allowed Amazon offer may still live in the
-                # All Offers Display panel. Only when the engine allows it (per-ASIN gating)
-                # and the PDP shows an ingress that other offers exist do we pay for an AOD
-                # fetch; otherwise the confirmed_out row flows to the existing debounce.
+                # All Offers Display panel. Same story for a priceless purchasable 3P
+                # buybox (unknown/no_pay_price with a non-allowed merchant, e.g.
+                # B0GW2DK37Q 2026-07-16: "Kings Games" buybox with no price anywhere on
+                # the page): the buybox can never resolve, so without AOD the ASIN just
+                # burns fast retries. Only when the engine allows it (per-ASIN gating)
+                # and the PDP shows an ingress that other offers exist do we pay for an
+                # AOD fetch; otherwise the row flows to the existing debounce/retry.
                 if (
                     allow_aod
-                    and not row.get("in_stock")
-                    and str(row.get("stock_confidence") or "") == "confirmed_out"
-                    and str(row.get("stock_reason") or "") == "seller_mismatch"
+                    and _aod_check_worthwhile(row, merchant_blob=merchant_blob, allowed=allowed)
                     and await _aod_ingress_present_async(page)
                 ):
                     row = await _apply_aod_offer_check(page, asin, allowed, row)
