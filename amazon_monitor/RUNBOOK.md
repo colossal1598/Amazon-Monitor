@@ -131,6 +131,7 @@ Configured in SQLite (`state_engine.py`):
 | `stock_alert_confirmed_cooldown_minutes` | 10 | Shorter gap after confirmed OOS (explicit "unavailable" evidence) |
 | `aes_oos_confirm_cycles` | 3 | AES mirror must see OOS this many consecutive cycles before flip |
 | `cross_source_alert_dedupe_minutes` | 15 | Suppress duplicate alert for same ASIN from PDP vs AES |
+| `stock_alert_same_price_dedupe_minutes` | 360 | Suppress a back_in_stock at the SAME price as the last one within this window, unless the preceding OOS was a strong page-text sellout. Kills seller-rotation / SERP-flap re-alert churn; price changes always alert. 0 disables. |
 
 ## Captcha and network block
 

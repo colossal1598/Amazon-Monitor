@@ -121,8 +121,10 @@ class TestCrossSourceAlertDedupe(unittest.TestCase):
                     sent_at=utc_now() - timedelta(minutes=20),
                 )
 
+                # New price vs the prior alert: this test proves window/cooldown expiry,
+                # not the same-price dedupe (tested in test_same_price_realert_dedupe).
                 alerts, _ = se.process_aes_serp_mirror(
-                    [_aes_in_stock_row(asin)],
+                    [_aes_in_stock_row(asin, 24.99)],
                     source="aes_llc",
                     config=config,
                 )
@@ -182,8 +184,10 @@ class TestCrossSourceAlertDedupe(unittest.TestCase):
                     sent_at=utc_now() - timedelta(minutes=90),
                 )
 
+                # New price vs the prior alert: this test proves cooldown expiry, not
+                # the same-price dedupe (tested in test_same_price_realert_dedupe).
                 alerts, _ = se.process_pdp_watch_candidates(
-                    [_pdp_in_stock_row(asin)],
+                    [_pdp_in_stock_row(asin, 24.99)],
                     {asin},
                     config=config,
                 )
@@ -197,6 +201,8 @@ class TestCrossSourceAlertDedupe(unittest.TestCase):
             config = {
                 "cross_source_alert_dedupe_minutes": 0,
                 "stock_alert_cooldown_minutes": 0,
+                # All suppression knobs off, including the same-price dedupe window.
+                "stock_alert_same_price_dedupe_minutes": 0,
             }
             try:
                 asin = "B011111111"

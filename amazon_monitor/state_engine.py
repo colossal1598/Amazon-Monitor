@@ -100,7 +100,8 @@ class StateEngine:
                     is_preorder INTEGER NOT NULL DEFAULT 0,
                     target_alert_armed INTEGER NOT NULL DEFAULT 1,
                     target_alert_last_sent TEXT,
-                    priceless_streak INTEGER NOT NULL DEFAULT 0
+                    priceless_streak INTEGER NOT NULL DEFAULT 0,
+                    last_oos_reason TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS aes_products (
@@ -114,7 +115,8 @@ class StateEngine:
                     last_stock_alert TEXT,
                     image_url TEXT,
                     oos_miss_streak INTEGER NOT NULL DEFAULT 0,
-                    last_oos_confirmed INTEGER NOT NULL DEFAULT 0
+                    last_oos_confirmed INTEGER NOT NULL DEFAULT 0,
+                    last_oos_reason TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS alerts (
@@ -174,6 +176,9 @@ class StateEngine:
             self.conn.execute(
                 "ALTER TABLE products ADD COLUMN priceless_streak INTEGER NOT NULL DEFAULT 0"
             )
+        for table in ("products", "aes_products"):
+            if not self._table_has_column(table, "last_oos_reason"):
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN last_oos_reason TEXT")
 
     def _maybe_cache_image(
         self,
@@ -269,6 +274,40 @@ class StateEngine:
             return row
         return None
 
+    def _recent_same_price_back_in_stock(
+        self, asin: str, price: float, window_minutes: int
+    ) -> sqlite3.Row | None:
+        """Most recent back_in_stock (any source) within the window at the SAME price.
+
+        Only the latest back_in_stock is considered: if the last one carried a different
+        price, this restock is new information and must alert. Suppressed re-fires do not
+        write to ``alerts``, so the window is anchored on the last alert the client
+        actually received — worst case one same-price alert per window per ASIN.
+        """
+        if window_minutes <= 0:
+            return None
+        row = self.conn.execute(
+            """
+            SELECT source, sent_at, new_price FROM alerts
+            WHERE asin = ? AND alert_type = 'back_in_stock'
+            ORDER BY sent_at DESC LIMIT 1
+            """,
+            (asin,),
+        ).fetchone()
+        if row is None or row["new_price"] is None:
+            return None
+        try:
+            sent_at = datetime.fromisoformat(str(row["sent_at"]))
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        if utc_now() - sent_at >= timedelta(minutes=window_minutes):
+            return None
+        if abs(float(row["new_price"]) - float(price)) >= 0.005:
+            return None
+        return row
+
     def _emit_stock_alert_if_allowed(
         self,
         *,
@@ -284,6 +323,7 @@ class StateEngine:
         cycle_id: int,
         _tel: Any,
         confirmed_transition: bool = False,
+        prior_oos_reason: str | None = None,
     ) -> dict[str, Any] | None:
         """Build and return a stock alert, or None when suppressed by dedupe/cooldown.
 
@@ -292,6 +332,16 @@ class StateEngine:
         sell-out -> restock events, so they only respect the short confirmed cooldown;
         weak-evidence transitions (SERP absence, missing price, inferred OOS) use the
         long cooldown because they are usually scrape noise.
+
+        ``prior_oos_reason`` is the stored reason for the OOS period this restock ends
+        (products/aes_products.last_oos_reason). Unless it is a strong page-text sellout,
+        a back_in_stock at the SAME price as the last one inside the same-price dedupe
+        window is suppressed: buybox seller rotation and SERP presence flapping produce
+        confirmed 0->1 edges every 15-100 min at an unchanged price, and the 3-min
+        confirmed cooldown never catches them (2026-07-16/17: ~60 of 68 pdp re-alerts,
+        e.g. B0GYVHLP4L 31x back_in_stock at $99.99 — 35/61 rated alerts were
+        dislike-tagged "duplicate"). A genuine sellout (strong OOS text) keeps today's
+        fast wave re-alert behavior, and any price CHANGE always alerts.
         """
         if confirmed_transition:
             cooldown = self._config_minutes(config, "stock_alert_confirmed_cooldown_minutes", 10)
@@ -310,6 +360,27 @@ class StateEngine:
                 confirmed_transition=confirmed_transition,
             )
             return None
+        if (
+            alert_type == "back_in_stock"
+            and price is not None
+            and (prior_oos_reason or "") not in _STRONG_OOS_REASONS
+        ):
+            same_price_window = self._config_minutes(
+                config, "stock_alert_same_price_dedupe_minutes", 360
+            )
+            prior_same = self._recent_same_price_back_in_stock(asin, float(price), same_price_window)
+            if prior_same is not None:
+                _tel(
+                    "stock_alert_same_price_suppressed",
+                    asin=asin,
+                    source=source,
+                    price=price,
+                    prior_source=prior_same["source"],
+                    prior_sent_at=prior_same["sent_at"],
+                    prior_oos_reason=prior_oos_reason or "",
+                    window_minutes=same_price_window,
+                )
+                return None
         window = self._config_minutes(config, "cross_source_alert_dedupe_minutes", 15)
         prior = self._recent_stock_alert(asin, alert_type, window, exclude_source=source)
         if prior is not None:
@@ -728,18 +799,35 @@ class StateEngine:
                         or (reason == "seller_mismatch" and miss_streak >= confirm_cycles)
                         else (int(row["last_oos_confirmed"] or 0) if old_stock == 0 else 0)
                     )
+                    # Remember WHY this OOS period exists: the restock alert uses it to
+                    # decide whether a same-price re-alert is a genuine wave (strong
+                    # page-text sellout) or seller-rotation churn. Strong evidence
+                    # upgrades a stored weak reason; while already OOS a weak reason
+                    # never overwrites the one that started the period.
+                    if oos_strong or old_stock != 0:
+                        oos_reason_store = reason or ""
+                    else:
+                        oos_reason_store = str(row["last_oos_reason"] or "") or (reason or "")
                     self.conn.execute(
                         """
                         UPDATE products
                         SET in_stock = ?,
                             oos_miss_streak = ?,
                             last_oos_confirmed = ?,
+                            last_oos_reason = ?,
                             priceless_streak = 0,
                             image_url = COALESCE(?, image_url),
                             target_alert_armed = 1
                         WHERE asin = ?
                         """,
-                        (0 if flip_oos else 1, miss_streak, oos_confirmed, image_url, asin),
+                        (
+                            0 if flip_oos else 1,
+                            miss_streak,
+                            oos_confirmed,
+                            oos_reason_store,
+                            image_url,
+                            asin,
+                        ),
                     )
                     self._maybe_cache_image(asin, image_url, config)
                     continue
@@ -756,6 +844,7 @@ class StateEngine:
                             priceless_streak = 0,
                             is_preorder = ?,
                             last_seen = ?,
+                            last_oos_reason = NULL,
                             image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
@@ -854,6 +943,7 @@ class StateEngine:
                         cycle_id=cycle_id,
                         _tel=_tel,
                         confirmed_transition=bool(row["last_oos_confirmed"]),
+                        prior_oos_reason=str(row["last_oos_reason"] or ""),
                     )
                     if alert is not None:
                         alerts.append(alert)
@@ -986,7 +1076,21 @@ class StateEngine:
                     )
                     self._maybe_cache_image(asin, image_url, config)
                     inserted_count += 1
-                    if _should_emit_new_product_alert(new_stock, new_price):
+                    if _should_emit_new_product_alert(new_stock, new_price) and self.conn.execute(
+                        "SELECT 1 FROM products WHERE asin = ?", (asin,)
+                    ).fetchone() is not None:
+                        # First aes_products row for an ASIN the client already watches
+                        # on the PDP side: "new product" is meaningless to them — they
+                        # have been getting stock/price alerts for it all along. Live
+                        # case 2026-07-17 (alert id 1601, B0GYVHLP4L): the aes row was
+                        # re-inserted and re-fired new_product for a watched ASIN,
+                        # rated "duplicate" by the client. Mirror row still recorded.
+                        _tel(
+                            "aes_new_product_suppressed_watched",
+                            asin=asin,
+                            price=new_price,
+                        )
+                    elif _should_emit_new_product_alert(new_stock, new_price):
                         nd = decide_new_product(is_first_observation=True)
                         assert nd.emit and nd.alert_type is not None
                         alert = self._emit_stock_alert_if_allowed(
@@ -1032,6 +1136,13 @@ class StateEngine:
                             confirm_cycles=oos_confirm_cycles,
                         )
                     oos_confirmed = 1 if explicit_oos else (int(row["last_oos_confirmed"] or 0) if old_stock == 0 else 0)
+                    # Mirror the PDP path: keep the reason that started/upgraded the OOS
+                    # period so the restock alert can tell genuine sellouts (explicit
+                    # card text) from SERP presence flapping (same-price dedupe).
+                    if explicit_oos or old_stock != 0:
+                        oos_reason_store = "explicit_oos" if explicit_oos else "serp_absence"
+                    else:
+                        oos_reason_store = str(row["last_oos_reason"] or "") or "serp_absence"
                     self.conn.execute(
                         """
                         UPDATE aes_products
@@ -1039,11 +1150,21 @@ class StateEngine:
                             in_stock = ?,
                             oos_miss_streak = ?,
                             last_oos_confirmed = ?,
+                            last_oos_reason = ?,
                             last_seen = ?,
                             image_url = COALESCE(?, image_url)
                         WHERE asin = ?
                         """,
-                        (title, 0 if flip_oos else 1, miss_streak, oos_confirmed, now, image_url, asin),
+                        (
+                            title,
+                            0 if flip_oos else 1,
+                            miss_streak,
+                            oos_confirmed,
+                            oos_reason_store,
+                            now,
+                            image_url,
+                            asin,
+                        ),
                     )
                     self._maybe_cache_image(asin, image_url, config)
                     continue
@@ -1056,6 +1177,7 @@ class StateEngine:
                         in_stock = 1,
                         oos_miss_streak = 0,
                         last_seen = ?,
+                        last_oos_reason = NULL,
                         image_url = COALESCE(?, image_url)
                     WHERE asin = ?
                     """,
@@ -1079,6 +1201,7 @@ class StateEngine:
                         cycle_id=cycle_id,
                         _tel=_tel,
                         confirmed_transition=bool(row["last_oos_confirmed"]),
+                        prior_oos_reason=str(row["last_oos_reason"] or ""),
                     )
                     if alert is not None:
                         alerts.append(alert)

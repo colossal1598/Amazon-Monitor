@@ -2,7 +2,11 @@
 evidence. Two consecutive of them flip the DB to out-of-stock AND arm the confirmed
 transition flag, so the next Amazon allocation wave re-alerts on the SHORT confirmed
 cooldown instead of being swallowed by the long weak cooldown. Previously the row
-stayed unknown, the DB never flipped, and no 0->1 edge fired for repeat waves."""
+stayed unknown, the DB never flipped, and no 0->1 edge fired for repeat waves.
+
+Since 2026-07-18, rotation-flip re-alerts at an UNCHANGED price are additionally
+deduped (stock_alert_same_price_dedupe_minutes; see test_same_price_realert_dedupe) —
+the waves here return at a NEW price so they keep proving cooldown selection."""
 
 import tempfile
 import unittest
@@ -115,11 +119,13 @@ class TestWaveRealert(unittest.TestCase):
                 self.assertEqual(int(row_b["in_stock"]), 0)  # flipped OOS
                 self.assertEqual(int(row_b["last_oos_confirmed"]), 1)  # confirmed transition armed
 
-                # (c) Amazon wave 2: in-stock again. A prior back_in_stock alert exists
-                # within the 60-min weak window, so this only fires because it used the
-                # short confirmed cooldown (0 min) -> proves the confirmed path.
+                # (c) Amazon wave 2: in-stock again at a NEW price. A prior
+                # back_in_stock alert exists within the 60-min weak window, so this only
+                # fires because it used the short confirmed cooldown (0 min) -> proves
+                # the confirmed path. (A same-price wave 2 would now be held by the
+                # same-price dedupe — the rotation-churn case the client dislikes.)
                 alerts_c, _ = se.process_pdp_watch_candidates(
-                    [_in_stock_row(asin)], {asin}, config=_CONFIG
+                    [_in_stock_row(asin, price=24.99)], {asin}, config=_CONFIG
                 )
                 self.assertEqual([a["type"] for a in alerts_c], ["back_in_stock"])
                 self.assertEqual(int(_row(se, asin)["in_stock"]), 1)
@@ -157,7 +163,9 @@ class TestWaveRealert(unittest.TestCase):
                 )
                 se.conn.commit()
 
-                row = _in_stock_row(asin)
+                # New price vs the prior alert so the same-price dedupe stays out of the
+                # picture — this test proves cooldown selection only.
+                row = _in_stock_row(asin, price=24.99)
                 row["is_preorder"] = True
                 alerts, _ = se.process_pdp_watch_candidates([row], {asin}, config=_CONFIG)
                 self.assertEqual([a["type"] for a in alerts], ["back_in_stock"])

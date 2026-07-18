@@ -114,11 +114,13 @@ class TestConfirmedRestockCooldown(unittest.TestCase):
                 asin = "B011111111"
                 _seed_products_row(se, asin, in_stock=0, last_oos_confirmed=1)
                 # Alerted 20 min ago: inside the 60-min long window, past the 10-min
-                # confirmed window -> must fire because the OOS was real.
+                # confirmed window -> must fire because the OOS was real. Restock comes
+                # at a NEW price so the same-price dedupe (its own tests in
+                # test_same_price_realert_dedupe) stays out of the picture.
                 _insert_alert(se, asin=asin, source="pdp_watch", sent_at=utc_now() - timedelta(minutes=20))
 
                 alerts, _ = se.process_pdp_watch_candidates(
-                    [_pdp_in_stock_row(asin)], {asin}, config=_CONFIG
+                    [_pdp_in_stock_row(asin, price=24.99)], {asin}, config=_CONFIG
                 )
                 self.assertEqual([a["type"] for a in alerts], ["back_in_stock"])
             finally:
