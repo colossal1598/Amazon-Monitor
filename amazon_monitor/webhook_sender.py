@@ -1,5 +1,6 @@
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -30,6 +31,11 @@ def _post_wa(config: dict[str, Any], payload: dict[str, Any]) -> bool:
     headers = {}
     if api_key:
         headers["x-api-key"] = api_key
+    # One key per LOGICAL send, stable across the retry loop below: wa-server (v2)
+    # joins/replays an in-flight or completed send with the same key instead of
+    # delivering the message twice. Without this, a send that succeeded slower than
+    # our HTTP timeout got retried and the client received duplicates.
+    headers["x-idempotency-key"] = uuid.uuid4().hex
     try:
         attempts = max(1, int(config.get("wa_send_attempts", 3)))
     except (TypeError, ValueError):
