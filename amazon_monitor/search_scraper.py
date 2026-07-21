@@ -746,6 +746,17 @@ def _scrape_single_attempt_on_context(
                     browser_factory.NAV_WAIT_UNTIL,
                     e,
                 )
+                if page_num > 1:
+                    # Later pages are best-effort extras: a failed page 2+ must never
+                    # discard what earlier pages already collected (prod 2026-07-21:
+                    # a soft-error on &page=2 failed the whole AES cycle).
+                    LOGGER.warning(
+                        "SERP page %s failed; keeping %s items from pages 1-%s",
+                        page_num,
+                        len(all_products),
+                        page_num - 1,
+                    )
+                    break
                 raise
             LOGGER.info(
                 "SERP navigation committed source=%s page=%s; stabilizing DOM",
@@ -756,12 +767,29 @@ def _scrape_single_attempt_on_context(
             _serp_stabilize_page(page)
             _serp_captcha_or_raise(page, source)
 
-            _wait_serp_result_cards(
-                page,
-                current_url,
-                source,
-                serp_inner_retries=serp_inner_retries,
-            )
+            try:
+                _wait_serp_result_cards(
+                    page,
+                    current_url,
+                    source,
+                    serp_inner_retries=serp_inner_retries,
+                )
+            except (CaptchaBlocked, BrowserDisconnected, NetworkAccessDenied):
+                raise
+            except Exception as exc:
+                if page_num > 1:
+                    # Same best-effort rule for the ready check (soft-error
+                    # interstitial on a later page): partial coverage beats failing
+                    # the cycle and losing page 1.
+                    LOGGER.warning(
+                        "SERP page %s not ready (%s); keeping %s items from pages 1-%s",
+                        page_num,
+                        exc,
+                        len(all_products),
+                        page_num - 1,
+                    )
+                    break
+                raise
             if serp_scroll_profile == "minimal":
                 _scroll_serp_to_settle(page, scroll_delay_range, max_steps=3)
             else:
@@ -1569,6 +1597,17 @@ async def _scrape_single_attempt_on_context_async(
                     browser_factory.NAV_WAIT_UNTIL,
                     e,
                 )
+                if page_num > 1:
+                    # Later pages are best-effort extras: a failed page 2+ must never
+                    # discard what earlier pages already collected (prod 2026-07-21:
+                    # a soft-error on &page=2 failed the whole AES cycle).
+                    LOGGER.warning(
+                        "SERP page %s failed; keeping %s items from pages 1-%s",
+                        page_num,
+                        len(all_products),
+                        page_num - 1,
+                    )
+                    break
                 raise
             LOGGER.info(
                 "SERP navigation committed source=%s page=%s; stabilizing DOM",
@@ -1579,13 +1618,30 @@ async def _scrape_single_attempt_on_context_async(
             await _serp_stabilize_page_async(page)
             await _serp_captcha_or_raise_async(page, source)
 
-            await _wait_serp_result_cards_async(
-                page,
-                current_url,
-                source,
-                serp_inner_retries=serp_inner_retries,
-                selector_timeout_ms=selector_timeout_ms,
-            )
+            try:
+                await _wait_serp_result_cards_async(
+                    page,
+                    current_url,
+                    source,
+                    serp_inner_retries=serp_inner_retries,
+                    selector_timeout_ms=selector_timeout_ms,
+                )
+            except (CaptchaBlocked, BrowserDisconnected, NetworkAccessDenied):
+                raise
+            except Exception as exc:
+                if page_num > 1:
+                    # Same best-effort rule for the ready check (soft-error
+                    # interstitial on a later page): partial coverage beats failing
+                    # the cycle and losing page 1.
+                    LOGGER.warning(
+                        "SERP page %s not ready (%s); keeping %s items from pages 1-%s",
+                        page_num,
+                        exc,
+                        len(all_products),
+                        page_num - 1,
+                    )
+                    break
+                raise
             if serp_scroll_profile == "minimal":
                 await _scroll_serp_to_settle_async(page, scroll_delay_range, max_steps=3)
             else:
