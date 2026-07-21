@@ -777,7 +777,11 @@ def _scrape_single_attempt_on_context(
                 ipp = page_meta_first.get("asinOnPageCount") or card_count or 1
                 total = page_meta_first.get("totalResultCount") or card_count
                 if scrape_mode == "newest_front":
-                    total_pages_cap = 1
+                    # Historically hard-capped at page 1; now honors fixed_pages so the
+                    # AES cycle can cover more of the storefront (page 1 held only 16
+                    # of 57 items — B0F6PQLR16 stayed invisible for weeks). Callers
+                    # passing fixed_pages=1 keep the old single-page behavior.
+                    total_pages_cap = min(max_search_pages, max(1, fixed_pages))
                 elif scrape_mode == "featured_full" and pagination_mode == "auto" and page_meta_first.get("totalResultCount"):
                     computed = max(1, math.ceil(total / max(1, ipp)))
                     total_pages_cap = min(max_search_pages, computed)
@@ -863,8 +867,6 @@ def _scrape_single_attempt_on_context(
                 cards_page1 = len(seen_asins_page)
 
             if page_num >= total_pages_cap:
-                break
-            if scrape_mode == "newest_front":
                 break
             next_btn = page.query_selector("a.s-pagination-next")
             disabled = (next_btn.get_attribute("aria-disabled") if next_btn else "true") == "true"
@@ -1599,7 +1601,11 @@ async def _scrape_single_attempt_on_context_async(
                 ipp = page_meta_first.get("asinOnPageCount") or card_count or 1
                 total = page_meta_first.get("totalResultCount") or card_count
                 if scrape_mode == "newest_front":
-                    total_pages_cap = 1
+                    # Historically hard-capped at page 1; now honors fixed_pages so the
+                    # AES cycle can cover more of the storefront (page 1 held only 16
+                    # of 57 items — B0F6PQLR16 stayed invisible for weeks). Callers
+                    # passing fixed_pages=1 keep the old single-page behavior.
+                    total_pages_cap = min(max_search_pages, max(1, fixed_pages))
                 elif scrape_mode == "featured_full" and pagination_mode == "auto" and page_meta_first.get("totalResultCount"):
                     computed = max(1, math.ceil(total / max(1, ipp)))
                     total_pages_cap = min(max_search_pages, computed)
@@ -1685,8 +1691,6 @@ async def _scrape_single_attempt_on_context_async(
                 cards_page1 = len(seen_asins_page)
 
             if page_num >= total_pages_cap:
-                break
-            if scrape_mode == "newest_front":
                 break
             next_btn = await page.query_selector("a.s-pagination-next")
             disabled = ((await next_btn.get_attribute("aria-disabled")) if next_btn else "true") == "true"

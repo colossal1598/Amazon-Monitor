@@ -28,6 +28,23 @@ function toLines(text) {
     .filter(Boolean);
 }
 
+function parseTargetPriceLines(text) {
+  // "ASIN price" per line -> {ASIN: price}. Invalid lines are dropped silently
+  // (the ASIN format check mirrors the server-side one for watch/blacklist).
+  const out = {};
+  for (const line of toLines(text)) {
+    const m = line.match(/^([A-Za-z0-9]{10})[\s,=:]+(\d+(?:\.\d+)?)$/);
+    if (!m) {
+      continue;
+    }
+    const price = parseFloat(m[2]);
+    if (Number.isFinite(price) && price > 0) {
+      out[m[1].toUpperCase()] = price;
+    }
+  }
+  return out;
+}
+
 function isValidAsin(raw) {
   return /^[A-Z0-9]{10}$/.test(String(raw || "").trim().toUpperCase());
 }
@@ -379,6 +396,7 @@ function fillSettings(settings) {
   byId("asin-check-interval-seconds").value = settings.asin_check_interval_seconds ?? "";
   byId("stream-concurrent-tabs").value = settings.stream_concurrent_tabs ?? "";
   byId("aes-check-minutes").value = settings.aes_check_minutes ?? "";
+  byId("aes-max-pages").value = settings.aes_max_pages ?? "";
   byId("browser-recycle-minutes").value = settings.browser_recycle_minutes ?? "";
   byId("pdp-settle-seconds").value = settings.pdp_settle_seconds ?? "";
   byId("pdp-continue-shopping-max-clicks").value =
@@ -394,6 +412,8 @@ function fillSettings(settings) {
 
   byId("stock-alert-same-price-dedupe-minutes").value =
     settings.stock_alert_same_price_dedupe_minutes ?? "";
+  byId("stock-alert-same-price-tolerance-pct").value =
+    settings.stock_alert_same_price_tolerance_pct ?? "";
   byId("cross-source-alert-dedupe-minutes").value =
     settings.cross_source_alert_dedupe_minutes ?? "";
   byId("stock-alert-confirmed-cooldown-minutes").value =
@@ -407,6 +427,9 @@ function fillSettings(settings) {
     settings.pdp_priceless_alert_cooldown_minutes ?? "";
 
   byId("aes-url").value = ((settings.search_urls || {}).aes_llc) || "";
+  byId("aes-target-prices").value = Object.entries(settings.aes_target_prices || {})
+    .map(([asin, price]) => `${asin} ${price}`)
+    .join("\n");
   byId("required-keywords").value = (settings.required_keywords || []).join("\n");
   byId("title-blacklist-phrases").value = (settings.title_blacklist_phrases || []).join("\n");
   byId("allowed-sellers").value = (settings.pdp_allowed_seller_substrings || []).join("\n");
@@ -427,6 +450,10 @@ function collectSettingsPayload() {
     })(),
     stream_concurrent_tabs: Math.min(4, Math.max(1, streamTabs)),
     aes_check_minutes: parsePositiveInt(byId("aes-check-minutes").value, 5),
+    aes_max_pages: (() => {
+      const n = parsePositiveInt(byId("aes-max-pages").value, 2);
+      return Math.min(5, n);
+    })(),
     browser_recycle_minutes: parsePositiveInt(byId("browser-recycle-minutes").value, 60),
     pdp_settle_seconds: (() => {
       const n = parseFloat(String(byId("pdp-settle-seconds").value || "").trim());
@@ -446,7 +473,11 @@ function collectSettingsPayload() {
     max_requests_per_minute: parsePositiveInt(byId("max-requests-per-minute").value, 25),
     affiliate_tag: String(byId("affiliate-tag").value || "").trim(),
     stock_alert_same_price_dedupe_minutes: parseNonNegInt(
-      byId("stock-alert-same-price-dedupe-minutes").value, 360),
+      byId("stock-alert-same-price-dedupe-minutes").value, 720),
+    stock_alert_same_price_tolerance_pct: (() => {
+      const n = parseFloat(String(byId("stock-alert-same-price-tolerance-pct").value || "").trim());
+      return Number.isFinite(n) && n >= 0 ? Math.min(20, n) : 3.0;
+    })(),
     cross_source_alert_dedupe_minutes: parseNonNegInt(
       byId("cross-source-alert-dedupe-minutes").value, 15),
     stock_alert_confirmed_cooldown_minutes: parseNonNegInt(
@@ -461,6 +492,7 @@ function collectSettingsPayload() {
     search_urls: {
       aes_llc: String(byId("aes-url").value || "").trim(),
     },
+    aes_target_prices: parseTargetPriceLines(byId("aes-target-prices").value),
     required_keywords: toLines(byId("required-keywords").value),
     title_blacklist_phrases: toLines(byId("title-blacklist-phrases").value),
     pdp_allowed_seller_substrings: toLines(byId("allowed-sellers").value),
@@ -504,6 +536,7 @@ function bindDirtyTracking() {
     "stock-alert-confirmed-cooldown-minutes", "stock-alert-cooldown-minutes",
     "pdp-oos-confirm-cycles", "aes-oos-confirm-cycles",
     "target-price-alert-cooldown-hours", "pdp-priceless-alert-cooldown-minutes",
+    "aes-target-prices", "aes-max-pages", "stock-alert-same-price-tolerance-pct",
   ];
   for (const id of ids) {
     const el = byId(id);

@@ -938,14 +938,18 @@ class MonitorEngine:
                         extra={"channel": "debug"},
                     )
                 try:
+                    aes_pages = max(1, min(5, int(config.get("aes_max_pages", 2) or 1)))
+                except (TypeError, ValueError):
+                    aes_pages = 2
+                try:
                     aes_items, scrape_data = await scrape_search_on_context_async(
                         context,
                         attempt_url,
                         source="aes_llc",
                         scrape_mode="newest_front",
                         pagination_mode="fixed",
-                        fixed_pages=1,
-                        max_search_pages=1,
+                        fixed_pages=aes_pages,
+                        max_search_pages=aes_pages,
                         collect_debug=False,
                         max_cycle_seconds=attempt_budget,
                         serp_scroll_profile="minimal",

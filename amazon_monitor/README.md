@@ -66,7 +66,10 @@ main.py  →  MonitorEngine (monitor_engine.py)
 | `price_drop_percent` | 10 | Price-drop alert threshold |
 | `stock_alert_cooldown_minutes` | 60 | Cooldown for unconfirmed OOS→in-stock |
 | `stock_alert_confirmed_cooldown_minutes` | 10 | Cooldown after confirmed OOS |
-| `stock_alert_same_price_dedupe_minutes` | 360 | Same-price back_in_stock dedupe (rotation/flap churn); strong sellouts exempt |
+| `stock_alert_same_price_dedupe_minutes` | 720 | Same-price back_in_stock dedupe (rotation/flap churn); strong sellouts exempt |
+| `stock_alert_same_price_tolerance_pct` | 3.0 | Relative band for "same price" (rotation price drift); 0 = exact |
+| `aes_max_pages` | 2 | Storefront SERP pages scanned per AES cycle |
+| `aes_target_prices` | {} | AES-side per-ASIN price gates: listed ASINs alert only at/below target |
 | `aes_oos_confirm_cycles` | 3 | AES mirror OOS debounce (consecutive cycles) |
 | `cross_source_alert_dedupe_minutes` | 15 | Suppress duplicate alerts across PDP/AES |
 
