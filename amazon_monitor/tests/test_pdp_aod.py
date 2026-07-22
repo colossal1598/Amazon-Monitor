@@ -16,7 +16,9 @@ import json
 import unittest
 from pathlib import Path
 
+from pdp_helpers import shipping_display_for
 from pdp_scraper import (
+    _aod_offer_shipping,
     _apply_aod_offer_check,
     _apply_aod_outcome,
     _fetch_aod_offers_async,
@@ -72,6 +74,47 @@ class TestParseAodOffers(unittest.TestCase):
         self.assertEqual([o["seller_text"] for o in self.offers], MANIFEST["aod-offers.html"]["sellers"])
 
 
+class TestAodOfferShipping(unittest.TestCase):
+    """Delivery info extracted from one AOD offer block for the alert's shipping line."""
+
+    def test_csa_attr_price_wins(self) -> None:
+        block = (
+            '<div id="aod-offer"><span data-csa-c-delivery-price="$6.99">'
+            "$6.99 delivery August 4 - 14</span></div>"
+        )
+        self.assertEqual(_aod_offer_shipping(block), "$6.99 delivery")
+
+    def test_csa_attr_free_is_free(self) -> None:
+        block = '<div id="aod-offer"><span data-csa-c-delivery-price="FREE">FREE delivery</span></div>'
+        self.assertEqual(_aod_offer_shipping(block), "FREE delivery")
+
+    def test_csa_attr_bare_number_gets_dollar_prefix(self) -> None:
+        block = '<div id="aod-offer"><span data-csa-c-delivery-price="6.99">delivery</span></div>'
+        self.assertEqual(_aod_offer_shipping(block), "$6.99 delivery")
+
+    def test_free_shipping_text_without_attr(self) -> None:
+        block = '<div id="aod-offer"><span class="a-color-bold">FREE Shipping</span></div>'
+        self.assertEqual(_aod_offer_shipping(block), "FREE delivery")
+
+    def test_paid_delivery_text_without_attr(self) -> None:
+        block = "<div id='aod-offer'><span>$4.48 delivery August 4 - 14</span></div>"
+        self.assertEqual(_aod_offer_shipping(block), "$4.48 delivery")
+
+    def test_offer_price_alone_is_not_a_delivery_charge(self) -> None:
+        block = "<div id='aod-offer'><span class='a-offscreen'>$79.95</span> Condition: New</div>"
+        self.assertEqual(_aod_offer_shipping(block), "")
+
+    def test_shipping_line_renders_in_hebrew_display(self) -> None:
+        self.assertEqual(
+            shipping_display_for("$6.99 delivery", seller_text="ACG ECOM", source="pdp_watch"),
+            "משלוח: $6.99",
+        )
+        self.assertEqual(
+            shipping_display_for("FREE delivery", seller_text="ACG ECOM", source="pdp_watch"),
+            "משלוח חינם",
+        )
+
+
 class TestSelectAllowedAodOffer(unittest.TestCase):
     def setUp(self) -> None:
         self.offers = parse_aod_offers(AOD_HTML)
@@ -107,6 +150,39 @@ class TestApplyAodOutcome(unittest.TestCase):
         self.assertIn("Amazon.com", row["seller_text"])
         self.assertTrue(row["aod_checked"])
         self.assertEqual(row["aod_outcome"], "offer_found")
+
+    def test_aod_offer_shipping_replaces_stale_page_shipping(self) -> None:
+        # The page-level shipping text describes the non-allowed buybox offer (or a bare
+        # date estimate); once the AOD offer is the evidence it must not ride into the
+        # restock alert — the matched offer's own delivery info replaces it.
+        stale = _pdp_row(
+            "B0DLQJ613B",
+            title="Widget",
+            price=79.95,
+            shipping_text="Delivery Thu, Jul 30",
+            image_url=None,
+            merchant_blob="Sold by ACG ECOM",
+            allowed=["amazon.com"],
+        )
+        offers = [{"seller_text": "Amazon.com", "price": 65.94, "shipping_text": "$6.99 delivery"}]
+        row = _apply_aod_outcome("B0DLQJ613B", stale, offers, ["amazon.com"])
+        self.assertTrue(row["in_stock"])
+        self.assertEqual(row["shipping_text"], "$6.99 delivery")
+
+    def test_aod_offer_without_delivery_info_blanks_stale_shipping(self) -> None:
+        stale = _pdp_row(
+            "B0DLQJ613B",
+            title="Widget",
+            price=79.95,
+            shipping_text="$12.44 delivery Wednesday",
+            image_url=None,
+            merchant_blob="Sold by ACG ECOM",
+            allowed=["amazon.com"],
+        )
+        offers = [{"seller_text": "Amazon.com", "price": 65.94, "shipping_text": ""}]
+        row = _apply_aod_outcome("B0DLQJ613B", stale, offers, ["amazon.com"])
+        self.assertTrue(row["in_stock"])
+        self.assertEqual(row["shipping_text"], "")
 
     def test_allowed_offer_without_price_is_priceless_purchasable(self) -> None:
         # Live AOD often ships a blank .a-offscreen with no whole/fraction — an allowed

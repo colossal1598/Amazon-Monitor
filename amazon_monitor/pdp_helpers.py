@@ -160,8 +160,11 @@ def shipping_display_hebrew(shipping_text: str | None) -> str:
         if re.search(r"delivery|shipping|ship|arrives|import charges|₪|\$|ils", line, re.IGNORECASE)
     ]
     # Prefer a delivery line that actually carries an amount; a date-only line
-    # ("Delivery Thu, Jul 30") says nothing about the shipping cost.
+    # ("Delivery Thu, Jul 30") says nothing about the shipping cost. Among priced
+    # lines, one naming "delivery" (Amazon's "$X delivery <date>" charge) beats a
+    # line that only mentions shipping/import charges (usually a tooltip figure).
     priced_lines = [line for line in delivery_lines if _CURRENCY_RE.search(line)]
-    picked = priced_lines[0] if priced_lines else (delivery_lines[0] if delivery_lines else lines[0])
+    delivery_priced = [line for line in priced_lines if re.search(r"delivery", line, re.IGNORECASE)]
+    picked = (delivery_priced or priced_lines or delivery_lines or lines)[0]
     tail = _paid_delivery_price_tail(picked)
     return f"משלוח: {tail}" if tail else ""

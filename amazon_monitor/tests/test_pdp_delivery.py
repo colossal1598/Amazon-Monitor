@@ -44,6 +44,12 @@ class TestPdpDelivery(unittest.TestCase):
         text = "Delivery Thu, Jul 30\n$4.99 shipping"
         self.assertEqual(shipping_display_hebrew(text), "משלוח: $4.99")
 
+    def test_delivery_priced_line_beats_import_charges_line(self) -> None:
+        """When the tooltip's import-charges figure and the real "$X delivery" charge land
+        on SEPARATE lines, the delivery-keyword line must win regardless of order."""
+        text = "$47.95 Shipping & Import Charges to Israel Details\n$17.96 delivery Wednesday, June 4"
+        self.assertEqual(shipping_display_hebrew(text), "משלוח: $17.96")
+
     def test_amazon_export_seller_always_free_shipping(self) -> None:
         """Business rule: Amazon Export Sales LLC always ships free — a delivery
         charge shown on the page for an Export-sold item is an Amazon display bug."""

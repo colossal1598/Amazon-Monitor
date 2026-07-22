@@ -774,6 +774,18 @@ def _extract_pdp_shipping(page) -> str:
             if line and line not in lines:
                 lines.append(line)
 
+    # The csa delivery-price attribute is the charge Amazon itself binds to the delivery
+    # widget ("$17.96" / "FREE") — collected FIRST so the alert line prefers it over
+    # looser text like the import-charges tooltip (shipping_display picks the first
+    # priced line).
+    try:
+        for el in page.query_selector_all("[data-csa-c-delivery-price]"):
+            price = (el.get_attribute("data-csa-c-delivery-price") or "").strip()
+            text = (el.inner_text() or "").strip()
+            add_line(" ".join(x for x in (price, text) if x))
+    except Exception:
+        pass
+
     for root_sel in ("#qualifiedBuybox", "#desktop_buybox", "#buybox", "#offerDisplayFeature_feature_div"):
         try:
             root = page.query_selector(root_sel)
@@ -801,14 +813,6 @@ def _extract_pdp_shipping(page) -> str:
                 add_line(t)
         except Exception:
             continue
-
-    try:
-        for el in page.query_selector_all("[data-csa-c-delivery-price]"):
-            price = (el.get_attribute("data-csa-c-delivery-price") or "").strip()
-            text = (el.inner_text() or "").strip()
-            add_line(" ".join(x for x in (price, text) if x))
-    except Exception:
-        pass
 
     return "\n".join(lines)
 
@@ -1465,6 +1469,15 @@ async def _extract_pdp_shipping_async(page: Any) -> str:
             if line and line not in lines:
                 lines.append(line)
 
+    # Attr-price lines first — see the sync twin (_extract_pdp_shipping) for why.
+    try:
+        for el in await page.query_selector_all("[data-csa-c-delivery-price]"):
+            price = (await el.get_attribute("data-csa-c-delivery-price") or "").strip()
+            text = (await el.inner_text() or "").strip()
+            add_line(" ".join(x for x in (price, text) if x))
+    except Exception:
+        pass
+
     for root_sel in ("#qualifiedBuybox", "#desktop_buybox", "#buybox", "#offerDisplayFeature_feature_div"):
         try:
             root = await page.query_selector(root_sel)
@@ -1492,14 +1505,6 @@ async def _extract_pdp_shipping_async(page: Any) -> str:
                 add_line(t)
         except Exception:
             continue
-
-    try:
-        for el in await page.query_selector_all("[data-csa-c-delivery-price]"):
-            price = (await el.get_attribute("data-csa-c-delivery-price") or "").strip()
-            text = (await el.inner_text() or "").strip()
-            add_line(" ".join(x for x in (price, text) if x))
-    except Exception:
-        pass
 
     return "\n".join(lines)
 
@@ -1669,18 +1674,19 @@ async def _extract_row_shipping_async(row: Any) -> str:
             if line and line not in lines:
                 lines.append(line)
 
-    try:
-        for el in await row.query_selector_all("span.a-color-secondary"):
-            text = (await el.inner_text() or "").strip()
-            if text and _DELIVERY_RELEVANT_RE.search(text):
-                add_line(text)
-    except Exception:
-        pass
+    # Attr-price lines first — see _extract_pdp_shipping for why.
     try:
         for el in await row.query_selector_all("[data-csa-c-delivery-price]"):
             price = (await el.get_attribute("data-csa-c-delivery-price") or "").strip()
             text = (await el.inner_text() or "").strip()
             add_line(" ".join(x for x in (price, text) if x))
+    except Exception:
+        pass
+    try:
+        for el in await row.query_selector_all("span.a-color-secondary"):
+            text = (await el.inner_text() or "").strip()
+            if text and _DELIVERY_RELEVANT_RE.search(text):
+                add_line(text)
     except Exception:
         pass
     return "\n".join(lines)
@@ -1951,8 +1957,42 @@ def _aod_offer_price(block: str) -> float | None:
     return None
 
 
+_AOD_DELIVERY_PRICE_ATTR_RE = re.compile(r'data-csa-c-delivery-price="([^"]*)"', re.IGNORECASE)
+_AOD_FREE_DELIVERY_TEXT_RE = re.compile(r"free\s+(?:delivery|shipping)", re.IGNORECASE)
+_AOD_PAID_DELIVERY_TEXT_RE = re.compile(
+    r"(\$\s*[0-9][0-9,]*(?:\.[0-9]{2})?)\s*(?:delivery|shipping)", re.IGNORECASE
+)
+
+
+def _aod_offer_shipping(block: str) -> str:
+    """Delivery line for one AOD offer block: "FREE delivery" / "$X delivery", else "".
+
+    Preference order mirrors the PDP extractors: the csa delivery-price attribute (the
+    charge Amazon itself binds to the delivery widget) beats free-text parsing. The
+    output is a shipping_text-style line so shipping_display_hebrew renders it as
+    "משלוח חינם" / "משלוח: $X" — never a date estimate.
+    """
+    m = _AOD_DELIVERY_PRICE_ATTR_RE.search(block)
+    if m:
+        val = " ".join(m.group(1).split())
+        if val:
+            if re.fullmatch(r"(?i)free|\$?\s*0(?:[.,]0{1,2})?", val):
+                return "FREE delivery"
+            if re.fullmatch(r"[0-9][0-9,]*(?:\.[0-9]{2})?", val):
+                val = f"${val}"
+            return f"{val} delivery"
+    text = " ".join(re.sub(r"<[^>]+>", " ", block).split())
+    if _AOD_FREE_DELIVERY_TEXT_RE.search(text):
+        return "FREE delivery"
+    pm = _AOD_PAID_DELIVERY_TEXT_RE.search(text)
+    if pm:
+        return f"{pm.group(1)} delivery"
+    return ""
+
+
 def parse_aod_offers(html: str) -> list[dict[str, Any]]:
-    """Parse the AOD fragment into ``[{"seller_text": name, "price": float|None}, ...]``.
+    """Parse the AOD fragment into
+    ``[{"seller_text": name, "price": float|None, "shipping_text": line}, ...]``.
 
     ``seller_text`` is the sold-by seller NAME only (never the shipsFrom fulfiller).
     """
@@ -1961,7 +2001,13 @@ def parse_aod_offers(html: str) -> list[dict[str, Any]]:
         seller = _aod_offer_seller_name(block)
         price = _aod_offer_price(block)
         if seller or price is not None:
-            offers.append({"seller_text": seller, "price": price})
+            offers.append(
+                {
+                    "seller_text": seller,
+                    "price": price,
+                    "shipping_text": _aod_offer_shipping(block),
+                }
+            )
     return offers
 
 
@@ -2042,6 +2088,10 @@ def _apply_aod_outcome(
         return row
     row["aod_outcome"] = "offer_found"
     seller_text = str(matched.get("seller_text") or "").strip()
+    # Once the AOD offer is the stock evidence, the page-level shipping text (which
+    # described the non-allowed buybox offer) must not ride into the alert — use the
+    # AOD offer's own delivery info, possibly empty rather than wrong.
+    row["shipping_text"] = str(matched.get("shipping_text") or "")
     price = matched.get("price")
     if isinstance(price, (int, float)):
         row["in_stock"] = True
