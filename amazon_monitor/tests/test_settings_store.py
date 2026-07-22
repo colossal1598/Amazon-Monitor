@@ -169,9 +169,7 @@ class TestSettingsStore(unittest.TestCase):
         # them (previously invisible until explicitly set).
         with tempfile.TemporaryDirectory() as tmp:
             cfg = load_runtime_config(str(Path(tmp) / "monitor.db"))
-            self.assertEqual(cfg.get("stock_alert_same_price_dedupe_minutes"), 720)
-            self.assertEqual(cfg.get("stock_alert_same_price_tolerance_pct"), 3.0)
-            self.assertEqual(cfg.get("aes_max_pages"), 2)
+            self.assertEqual(cfg.get("stock_alert_same_price_dedupe_minutes"), 360)
             self.assertEqual(cfg.get("pdp_aod_min_interval_seconds"), 240)
             self.assertEqual(cfg.get("mass_flip_min_flips"), 2)
             self.assertEqual(cfg.get("watchdog_stall_seconds"), 600)

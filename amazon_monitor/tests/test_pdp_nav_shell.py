@@ -176,17 +176,6 @@ class TestAodCheckWorthwhile(unittest.TestCase):
         row = self._row(stock_confidence="confirmed_out", stock_reason="seller_mismatch")
         self.assertTrue(_aod_check_worthwhile(row, merchant_blob="Kings Games", allowed=self.ALLOWED))
 
-    def test_explicit_oos_confirmed_out_qualifies(self) -> None:
-        # REGRESSION 2026-07-21 (B0G3CV6Z9D): explicit-OOS page variants ran for 2.5
-        # days (oos_miss_streak 3,239) while the allowed offer sat in AOD — every
-        # confirmed_out row is worth an AOD look, not just seller_mismatch.
-        row = self._row(
-            stock_confidence="confirmed_out",
-            stock_reason="explicit_oos_text",
-            buybox_purchasable=False,
-        )
-        self.assertTrue(_aod_check_worthwhile(row, merchant_blob="", allowed=self.ALLOWED))
-
     def test_priceless_purchasable_3p_buybox_qualifies(self) -> None:
         # B0GW2DK37Q 2026-07-16: "Kings Games" buybox, enabled buy button, no price
         # anywhere on the page — only AOD can say whether an allowed offer exists.

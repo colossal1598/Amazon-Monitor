@@ -55,19 +55,6 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
-def _normalize_target_prices(raw: Any) -> dict[str, float]:
-    """{ASIN: positive float target} from the aes_target_prices setting; junk dropped."""
-    out: dict[str, float] = {}
-    if not isinstance(raw, dict):
-        return out
-    for key, value in raw.items():
-        asin = str(key).strip().upper()
-        price = _as_float(value)
-        if asin and price is not None and price > 0:
-            out[asin] = price
-    return out
-
-
 # Decide if a first-time-seen product is “good enough to message about” by requiring it to look in-stock and have a real price.
 def _should_emit_new_product_alert(new_stock: int, new_price: float | None) -> bool:
     """First DB row for an ASIN only triggers WhatsApp when the offer is plausibly buyable."""
@@ -287,30 +274,8 @@ class StateEngine:
             return row
         return None
 
-    def _recent_target_alert(self, asin: str, cooldown_hours: float) -> bool:
-        """True when a price_below_target alert for this ASIN fired inside the cooldown."""
-        if cooldown_hours <= 0:
-            return False
-        row = self.conn.execute(
-            """
-            SELECT sent_at FROM alerts
-            WHERE asin = ? AND alert_type = 'price_below_target'
-            ORDER BY sent_at DESC LIMIT 1
-            """,
-            (asin,),
-        ).fetchone()
-        if row is None:
-            return False
-        try:
-            sent_at = datetime.fromisoformat(str(row["sent_at"]))
-            if sent_at.tzinfo is None:
-                sent_at = sent_at.replace(tzinfo=timezone.utc)
-        except ValueError:
-            return False
-        return utc_now() - sent_at < timedelta(hours=cooldown_hours)
-
     def _recent_same_price_back_in_stock(
-        self, asin: str, price: float, window_minutes: int, tolerance_pct: float = 0.0
+        self, asin: str, price: float, window_minutes: int
     ) -> sqlite3.Row | None:
         """Most recent back_in_stock (any source) within the window at the SAME price.
 
@@ -318,13 +283,6 @@ class StateEngine:
         price, this restock is new information and must alert. Suppressed re-fires do not
         write to ``alerts``, so the window is anchored on the last alert the client
         actually received — worst case one same-price alert per window per ASIN.
-
-        ``tolerance_pct`` widens "same price" to a relative band: live seller rotation
-        drifts the price by cents-to-dollars between re-fires (B0GG16Q4X1 Jul 19-20:
-        225.97 / 219.43 / 218.99 / 215.99 — six back_in_stock, exact-match caught none),
-        and a change smaller than the band is not information the client wants a message
-        for. Real price DROPS beyond the band still alert (and the price_drop path is
-        independent of this check).
         """
         if window_minutes <= 0:
             return None
@@ -346,9 +304,7 @@ class StateEngine:
             return None
         if utc_now() - sent_at >= timedelta(minutes=window_minutes):
             return None
-        prior_price = float(row["new_price"])
-        band = max(0.005, prior_price * max(0.0, float(tolerance_pct)) / 100.0)
-        if abs(prior_price - float(price)) > band:
+        if abs(float(row["new_price"]) - float(price)) >= 0.005:
             return None
         return row
 
@@ -410,17 +366,9 @@ class StateEngine:
             and (prior_oos_reason or "") not in _STRONG_OOS_REASONS
         ):
             same_price_window = self._config_minutes(
-                config, "stock_alert_same_price_dedupe_minutes", 720
+                config, "stock_alert_same_price_dedupe_minutes", 360
             )
-            try:
-                tolerance_pct = float(
-                    (config or {}).get("stock_alert_same_price_tolerance_pct", 3.0)
-                )
-            except (TypeError, ValueError):
-                tolerance_pct = 3.0
-            prior_same = self._recent_same_price_back_in_stock(
-                asin, float(price), same_price_window, tolerance_pct
-            )
+            prior_same = self._recent_same_price_back_in_stock(asin, float(price), same_price_window)
             if prior_same is not None:
                 _tel(
                     "stock_alert_same_price_suppressed",
@@ -558,12 +506,7 @@ class StateEngine:
                 continue
             by_asin[asin_key] = item
         watch_upper = {a.upper() for a in watch_asins}
-        # degraded_page included since 2026-07-21: nav_shell/fallback/skeleton skips
-        # previously left NO per-ASIN telemetry (only cycle counters), which made the
-        # Jul-21 blindness forensics impossible for the shell-window ASINs.
-        _SCRAPE_DEBUG_REASONS = frozenset(
-            {"navigation_failed", "parse_failed", "goto_failed", "degraded_page"}
-        )
+        _SCRAPE_DEBUG_REASONS = frozenset({"navigation_failed", "parse_failed", "goto_failed"})
         target_prices = (config or {}).get("pdp_watch_target_prices") or {}
         if not isinstance(target_prices, dict):
             target_prices = {}
@@ -602,12 +545,7 @@ class StateEngine:
                 if item.get("_skip_update"):
                     reason = str(item.get("skip_reason") or "unknown")
                     if reason in _SCRAPE_DEBUG_REASONS:
-                        _tel(
-                            "pdp_watch_skip_update",
-                            asin=asin,
-                            reason=reason,
-                            detail=str(item.get("skip_detail") or ""),
-                        )
+                        _tel("pdp_watch_skip_update", asin=asin, reason=reason)
                     skipped_update_count += 1
                     continue
                 row_source = str(item.get("source") or source)
@@ -1105,15 +1043,6 @@ class StateEngine:
         except (TypeError, ValueError):
             oos_confirm_cycles = 3
 
-        # Client-configured AES price gates: a listed ASIN only alerts at/below its
-        # target (discovery products that show up overpriced stay silent), and a
-        # crossing below target while in stock fires price_below_target.
-        aes_targets = _normalize_target_prices((config or {}).get("aes_target_prices"))
-        try:
-            target_cooldown_hours = float((config or {}).get("target_price_alert_cooldown_hours", 6))
-        except (TypeError, ValueError):
-            target_cooldown_hours = 6.0
-
         def _tel(event: str, *, asin: str | None = None, **fields: Any) -> None:
             if telemetry and cycle_id:
                 telemetry.debug(cycle_id, event, asin=asin, **fields)
@@ -1135,14 +1064,6 @@ class StateEngine:
                 new_stock = 1 if bool(item.get("in_stock")) else 0
                 now = utc_iso()
 
-                target = aes_targets.get(asin)
-                # A listed ASIN above its target is deliberately silent: the row is
-                # still mirrored (so the crossing edge can fire later), only alerts
-                # are gated. A missing price counts as above-target — the client's
-                # gate is "alert only at a price I approved", and priceless AES rows
-                # carry no approvable price.
-                above_target = target is not None and (new_price is None or new_price > target)
-
                 row = self.conn.execute("SELECT * FROM aes_products WHERE asin = ?", (asin,)).fetchone()
                 if row is None:
                     self.conn.execute(
@@ -1156,8 +1077,7 @@ class StateEngine:
                     self._maybe_cache_image(asin, image_url, config)
                     inserted_count += 1
                     if _should_emit_new_product_alert(new_stock, new_price) and self.conn.execute(
-                        "SELECT 1 FROM asins WHERE asin = ? AND role = 'watch' AND enabled = 1",
-                        (asin,),
+                        "SELECT 1 FROM products WHERE asin = ?", (asin,)
                     ).fetchone() is not None:
                         # First aes_products row for an ASIN the client already watches
                         # on the PDP side: "new product" is meaningless to them — they
@@ -1165,22 +1085,10 @@ class StateEngine:
                         # case 2026-07-17 (alert id 1601, B0GYVHLP4L): the aes row was
                         # re-inserted and re-fired new_product for a watched ASIN,
                         # rated "duplicate" by the client. Mirror row still recorded.
-                        # Membership means the CURRENT watch list (asins role=watch) —
-                        # NOT the products table: stale rows from the search era live
-                        # there forever, and keying on them silenced B0F6PQLR16's first
-                        # real detection for 21h (2026-07-19, missed_reports id 7).
                         _tel(
                             "aes_new_product_suppressed_watched",
                             asin=asin,
                             price=new_price,
-                        )
-                    elif _should_emit_new_product_alert(new_stock, new_price) and above_target:
-                        _tel(
-                            "aes_target_above_suppressed",
-                            asin=asin,
-                            alert_type="new_product",
-                            price=new_price,
-                            target_price=target,
                         )
                     elif _should_emit_new_product_alert(new_stock, new_price):
                         nd = decide_new_product(is_first_observation=True)
@@ -1279,15 +1187,7 @@ class StateEngine:
 
                 stock_decision = decide_back_in_stock(old_stock, 1)
                 emitted_back_in_stock = False
-                if stock_decision.emit and above_target:
-                    _tel(
-                        "aes_target_above_suppressed",
-                        asin=asin,
-                        alert_type="back_in_stock",
-                        price=new_price,
-                        target_price=target,
-                    )
-                elif stock_decision.emit:
+                if stock_decision.emit:
                     alert = self._emit_stock_alert_if_allowed(
                         alert_type="back_in_stock",
                         source=source,
@@ -1311,8 +1211,7 @@ class StateEngine:
                         )
                         back_in_stock_count += 1
                         emitted_back_in_stock = True
-                emitted_price_drop = False
-                if not emitted_back_in_stock and not above_target:
+                if not emitted_back_in_stock:
                     price_decision = decide_price_drop(
                         old_price,
                         new_price,
@@ -1353,44 +1252,6 @@ class StateEngine:
                         self._record_alert(alert)
                         self.conn.execute("UPDATE aes_products SET last_price_alert = ? WHERE asin = ?", (now, asin))
                         price_drop_count += 1
-                        emitted_price_drop = True
-
-                # Crossing edge for a target-listed ASIN: price moved from above the
-                # target (or unknown) to at/below it while the product stayed in
-                # stock — the moment the client actually wants to hear about. Edge is
-                # derived from the stored old_price, so it re-arms only after the
-                # price goes back above target. Skipped when a back_in_stock or
-                # price_drop already alerted this cycle (one message is enough), and
-                # rate-limited by the target cooldown against fast re-crossing.
-                if (
-                    target is not None
-                    and not emitted_back_in_stock
-                    and not emitted_price_drop
-                    and old_stock == 1
-                    and new_price is not None
-                    and new_price <= target
-                    and (old_price is None or old_price > target)
-                    and not self._recent_target_alert(asin, target_cooldown_hours)
-                ):
-                    target_alert = self._build_alert(
-                        "price_below_target",
-                        source,
-                        asin,
-                        title,
-                        new_price,
-                        image_url=image_url,
-                        shipping=ship_line,
-                    )
-                    target_alert["target_price"] = float(target)
-                    self._record_alert(target_alert)
-                    alerts.append(target_alert)
-                    _tel(
-                        "aes_target_crossed",
-                        asin=asin,
-                        price=new_price,
-                        old_price=old_price,
-                        target_price=target,
-                    )
 
             if reconcile_absence:
                 # Absence from filtered page-1 is a weak OOS signal (page churn, filter

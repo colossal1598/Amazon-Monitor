@@ -746,17 +746,6 @@ def _scrape_single_attempt_on_context(
                     browser_factory.NAV_WAIT_UNTIL,
                     e,
                 )
-                if page_num > 1:
-                    # Later pages are best-effort extras: a failed page 2+ must never
-                    # discard what earlier pages already collected (prod 2026-07-21:
-                    # a soft-error on &page=2 failed the whole AES cycle).
-                    LOGGER.warning(
-                        "SERP page %s failed; keeping %s items from pages 1-%s",
-                        page_num,
-                        len(all_products),
-                        page_num - 1,
-                    )
-                    break
                 raise
             LOGGER.info(
                 "SERP navigation committed source=%s page=%s; stabilizing DOM",
@@ -767,29 +756,12 @@ def _scrape_single_attempt_on_context(
             _serp_stabilize_page(page)
             _serp_captcha_or_raise(page, source)
 
-            try:
-                _wait_serp_result_cards(
-                    page,
-                    current_url,
-                    source,
-                    serp_inner_retries=serp_inner_retries,
-                )
-            except (CaptchaBlocked, BrowserDisconnected, NetworkAccessDenied):
-                raise
-            except Exception as exc:
-                if page_num > 1:
-                    # Same best-effort rule for the ready check (soft-error
-                    # interstitial on a later page): partial coverage beats failing
-                    # the cycle and losing page 1.
-                    LOGGER.warning(
-                        "SERP page %s not ready (%s); keeping %s items from pages 1-%s",
-                        page_num,
-                        exc,
-                        len(all_products),
-                        page_num - 1,
-                    )
-                    break
-                raise
+            _wait_serp_result_cards(
+                page,
+                current_url,
+                source,
+                serp_inner_retries=serp_inner_retries,
+            )
             if serp_scroll_profile == "minimal":
                 _scroll_serp_to_settle(page, scroll_delay_range, max_steps=3)
             else:
@@ -805,11 +777,7 @@ def _scrape_single_attempt_on_context(
                 ipp = page_meta_first.get("asinOnPageCount") or card_count or 1
                 total = page_meta_first.get("totalResultCount") or card_count
                 if scrape_mode == "newest_front":
-                    # Historically hard-capped at page 1; now honors fixed_pages so the
-                    # AES cycle can cover more of the storefront (page 1 held only 16
-                    # of 57 items — B0F6PQLR16 stayed invisible for weeks). Callers
-                    # passing fixed_pages=1 keep the old single-page behavior.
-                    total_pages_cap = min(max_search_pages, max(1, fixed_pages))
+                    total_pages_cap = 1
                 elif scrape_mode == "featured_full" and pagination_mode == "auto" and page_meta_first.get("totalResultCount"):
                     computed = max(1, math.ceil(total / max(1, ipp)))
                     total_pages_cap = min(max_search_pages, computed)
@@ -895,6 +863,8 @@ def _scrape_single_attempt_on_context(
                 cards_page1 = len(seen_asins_page)
 
             if page_num >= total_pages_cap:
+                break
+            if scrape_mode == "newest_front":
                 break
             next_btn = page.query_selector("a.s-pagination-next")
             disabled = (next_btn.get_attribute("aria-disabled") if next_btn else "true") == "true"
@@ -1597,17 +1567,6 @@ async def _scrape_single_attempt_on_context_async(
                     browser_factory.NAV_WAIT_UNTIL,
                     e,
                 )
-                if page_num > 1:
-                    # Later pages are best-effort extras: a failed page 2+ must never
-                    # discard what earlier pages already collected (prod 2026-07-21:
-                    # a soft-error on &page=2 failed the whole AES cycle).
-                    LOGGER.warning(
-                        "SERP page %s failed; keeping %s items from pages 1-%s",
-                        page_num,
-                        len(all_products),
-                        page_num - 1,
-                    )
-                    break
                 raise
             LOGGER.info(
                 "SERP navigation committed source=%s page=%s; stabilizing DOM",
@@ -1618,30 +1577,13 @@ async def _scrape_single_attempt_on_context_async(
             await _serp_stabilize_page_async(page)
             await _serp_captcha_or_raise_async(page, source)
 
-            try:
-                await _wait_serp_result_cards_async(
-                    page,
-                    current_url,
-                    source,
-                    serp_inner_retries=serp_inner_retries,
-                    selector_timeout_ms=selector_timeout_ms,
-                )
-            except (CaptchaBlocked, BrowserDisconnected, NetworkAccessDenied):
-                raise
-            except Exception as exc:
-                if page_num > 1:
-                    # Same best-effort rule for the ready check (soft-error
-                    # interstitial on a later page): partial coverage beats failing
-                    # the cycle and losing page 1.
-                    LOGGER.warning(
-                        "SERP page %s not ready (%s); keeping %s items from pages 1-%s",
-                        page_num,
-                        exc,
-                        len(all_products),
-                        page_num - 1,
-                    )
-                    break
-                raise
+            await _wait_serp_result_cards_async(
+                page,
+                current_url,
+                source,
+                serp_inner_retries=serp_inner_retries,
+                selector_timeout_ms=selector_timeout_ms,
+            )
             if serp_scroll_profile == "minimal":
                 await _scroll_serp_to_settle_async(page, scroll_delay_range, max_steps=3)
             else:
@@ -1657,11 +1599,7 @@ async def _scrape_single_attempt_on_context_async(
                 ipp = page_meta_first.get("asinOnPageCount") or card_count or 1
                 total = page_meta_first.get("totalResultCount") or card_count
                 if scrape_mode == "newest_front":
-                    # Historically hard-capped at page 1; now honors fixed_pages so the
-                    # AES cycle can cover more of the storefront (page 1 held only 16
-                    # of 57 items — B0F6PQLR16 stayed invisible for weeks). Callers
-                    # passing fixed_pages=1 keep the old single-page behavior.
-                    total_pages_cap = min(max_search_pages, max(1, fixed_pages))
+                    total_pages_cap = 1
                 elif scrape_mode == "featured_full" and pagination_mode == "auto" and page_meta_first.get("totalResultCount"):
                     computed = max(1, math.ceil(total / max(1, ipp)))
                     total_pages_cap = min(max_search_pages, computed)
@@ -1747,6 +1685,8 @@ async def _scrape_single_attempt_on_context_async(
                 cards_page1 = len(seen_asins_page)
 
             if page_num >= total_pages_cap:
+                break
+            if scrape_mode == "newest_front":
                 break
             next_btn = await page.query_selector("a.s-pagination-next")
             disabled = ((await next_btn.get_attribute("aria-disabled")) if next_btn else "true") == "true"

@@ -197,18 +197,6 @@
           </table>
           <p class="empty-note hidden" id="blacklist-empty">הרשימה השחורה ריקה</p>
         </div>
-
-        <div class="card">
-          <h2>מחירי יעד — דף חיפוש הספק (AES)</h2>
-          <p class="hint">
-            מוצר שרשום כאן יתריע מדף החיפוש רק כשהמחיר שלו שווה או נמוך מהיעד —
-            כולל התראה ברגע שהמחיר יורד מתחת ליעד. מוצרים שלא רשומים מתריעים כרגיל.
-            שורה לכל מוצר: קוד מוצר, רווח, מחיר יעד בדולרים. לדוגמה: <code dir="ltr">B0F6PQLR16 120</code>
-          </p>
-          <div class="field">
-            <textarea id="aes-target-prices" rows="6" dir="ltr" placeholder="B0XXXXXXXXX 99.99"></textarea>
-          </div>
-        </div>
       </section>
 
       <!-- ============ Tab: WhatsApp & alerts ============ -->
@@ -251,11 +239,6 @@
               <label for="stock-alert-same-price-dedupe-minutes">מניעת התראה חוזרת באותו מחיר (דקות)</label>
               <input id="stock-alert-same-price-dedupe-minutes" type="number" min="0" step="1">
               <p class="hint">חוסם הקפצות חוזרות של אותו מוצר באותו מחיר; שינוי מחיר תמיד יתריע</p>
-            </div>
-            <div class="field">
-              <label for="stock-alert-same-price-tolerance-pct">סף "אותו מחיר" (אחוזים)</label>
-              <input id="stock-alert-same-price-tolerance-pct" type="number" min="0" max="20" step="0.5">
-              <p class="hint">שינוי מחיר קטן מהאחוז הזה נחשב אותו מחיר (סחף מוכרים). 0 = השוואה מדויקת</p>
             </div>
             <div class="field">
               <label for="cross-source-alert-dedupe-minutes">מניעת כפילות בין מקורות (דקות)</label>
@@ -406,11 +389,6 @@
               <label for="aes-check-minutes">בדיקת חיפוש AES כל (דקות)</label>
               <input id="aes-check-minutes" type="number" min="1" step="1">
               <p class="hint">סריקת עמוד הספק בין בדיקות המוצרים</p>
-            </div>
-            <div class="field">
-              <label for="aes-max-pages">עמודי חיפוש AES בכל סריקה</label>
-              <input id="aes-max-pages" type="number" min="1" max="5" step="1">
-              <p class="hint">עמוד אחד = ~16 מוצרים בלבד. כל עמוד נוסף מאריך מעט את הסריקה</p>
             </div>
             <div class="field">
               <label for="browser-recycle-minutes">מיחזור דפדפן כל (דקות)</label>

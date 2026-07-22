@@ -24,10 +24,6 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "asin_check_interval_seconds": 60,
     "stream_concurrent_tabs": 2,
     "aes_check_minutes": 5,
-    # SERP pages scanned per AES cycle. Page 1 covered only 16 of 57 storefront
-    # items (2026-07-21: B0F6PQLR16 invisible for weeks). Each extra page adds one
-    # navigation per cycle — watch aes cycle seconds when raising.
-    "aes_max_pages": 2,
     "browser_recycle_minutes": 60,
     # Headed is the production mode of record: headless sessions get served
     # offer-less (nav-shell) PDPs. The engine falls back to headless (with a
@@ -41,12 +37,6 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     },
     "required_keywords": ["pokemon", "tcg"],
     "title_blacklist_phrases": [],
-    # AES-side target prices: {ASIN: max_price}. A listed ASIN appearing on the AES
-    # SERP alerts ONLY at/below its target (all alert types); crossing below target
-    # while in stock fires price_below_target. Unlisted ASINs alert as usual. Lets
-    # the client gate known-overpriced discovery products without adding them to
-    # PDP watch.
-    "aes_target_prices": {},
     "pdp_allowed_seller_substrings": ["amazon.com", "amazon export"],
     "pdp_watch_max_attempts": 2,
     "pdp_watch_tab_jitter_seconds": [0.15, 0.55],
@@ -67,13 +57,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     # Suppress a back_in_stock at the SAME price as the last one within this window,
     # unless the preceding OOS was a strong page-text sellout (last_oos_reason).
     # Kills seller-rotation / SERP-flap re-alert churn; price changes always alert.
-    # 0 disables. Raised 360->720 on 2026-07-21: live churners re-fired at 7.5-9h
-    # gaps (B0DN4LQL4Y, 5x $47.99, client-tagged duplicate).
-    "stock_alert_same_price_dedupe_minutes": 720,
-    # "Same price" band as a percentage of the prior alert's price: rotation drifts
-    # prices by cents-to-dollars between re-fires and exact matching missed them all
-    # (B0GG16Q4X1: 225.97/219.43/218.99/215.99). 0 = exact match only.
-    "stock_alert_same_price_tolerance_pct": 3.0,
+    # 0 disables.
+    "stock_alert_same_price_dedupe_minutes": 360,
     # Consecutive AES/SERP cycles an item must look out-of-stock (absent from the
     # filtered page or non-qualifying row) before the mirror flips to OOS. 1 = old
     # immediate behavior.
@@ -98,12 +83,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "degraded_recycle_threshold": 4,
     "degraded_recycle_window_seconds": 180,
     # F1 AOD side-fetch gating: min gap per OOS ASIN (previously-in-stock ASINs
-    # always re-check), engine-wide pacing between ANY two OOS-ASIN fetches
-    # (bounds total AOD tab-time so a mostly-OOS watch list can't stretch the
-    # sweep — the 2026-07-21 latency regression), and engine-wide disable after
-    # consecutive fetch failures.
+    # always re-check), and engine-wide disable after consecutive fetch failures.
     "pdp_aod_min_interval_seconds": 240,
-    "pdp_aod_engine_min_gap_seconds": 20,
     "aod_fail_disable_threshold": 5,
     "aod_fail_disable_minutes": 30,
     # F2 mass-flip circuit breaker: >= min_flips DISTINCT in-stock ASINs flipping

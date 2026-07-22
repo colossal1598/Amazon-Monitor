@@ -310,46 +310,6 @@ class TestShouldCheckAod(unittest.TestCase):
             )
         )
 
-    def test_oos_blocked_by_engine_gap(self) -> None:
-        # REGRESSION 2026-07-21: with every confirmed_out row AOD-worthy, a mostly-OOS
-        # watch list fetched AOD on ~every-4th check and stretched the sweep — alerts
-        # arrived minutes late. Engine-wide pacing bounds total AOD tab-time.
-        self.assertFalse(
-            _should_check_aod(
-                prior_in_stock=False,
-                now=1300.0,
-                last_aod=1000.0,
-                min_interval_seconds=240.0,
-                last_engine_aod=1295.0,
-                engine_min_gap_seconds=20.0,
-            )
-        )
-
-    def test_oos_allowed_once_engine_gap_elapsed(self) -> None:
-        self.assertTrue(
-            _should_check_aod(
-                prior_in_stock=False,
-                now=1300.0,
-                last_aod=1000.0,
-                min_interval_seconds=240.0,
-                last_engine_aod=1275.0,
-                engine_min_gap_seconds=20.0,
-            )
-        )
-
-    def test_prior_in_stock_bypasses_engine_gap(self) -> None:
-        # Rotation transitions are the accuracy-critical moment — never paced.
-        self.assertTrue(
-            _should_check_aod(
-                prior_in_stock=True,
-                now=1300.0,
-                last_aod=1299.0,
-                min_interval_seconds=240.0,
-                last_engine_aod=1299.0,
-                engine_min_gap_seconds=20.0,
-            )
-        )
-
 
 class TestAodFailureBackoff(unittest.TestCase):
     """F1 backoff (_account_aod_outcome): a failed side-fetch records the per-ASIN timestamp

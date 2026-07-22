@@ -1852,11 +1852,9 @@ async (url) => {
 }
 """
 
-# PDP ingress hint that other offers exist. Used as an offer-state readiness signal
-# only — NOT as a precondition for the AOD fetch: the old assumption ("ingress absent
-# + 3P buybox = no other offers") was disproven live on 2026-07-21 (B0G3CV6Z9D:
-# priceless-3P page variants with zero ingress selectors rendered while the allowed
-# Amazon Export offer sat in AOD; 2.5 days of false OOS).
+# PDP ingress hint that other offers exist. Cheap precondition read off the already-loaded
+# PDP page: if it is absent AND the buybox is 3P (seller_mismatch), there are no other
+# offers, so we keep confirmed_out WITHOUT paying for an AOD fetch.
 _AOD_INGRESS_SELECTORS = (
     'span[data-action="show-all-offers-display"] a',
     'span[data-action="show-all-offers-display"]',
@@ -1982,23 +1980,19 @@ def _aod_check_worthwhile(
 ) -> bool:
     """True when the buybox row cannot resolve on its own but AOD might. Pure logic.
 
-    Shapes that qualify:
-      - ANY confirmed_out row (seller_mismatch, explicit OOS text, no_pay_price):
-        the featured slot saying "gone" does not mean the allowed offer is gone —
-        B0G3CV6Z9D 2026-07-18..21 accumulated a 3,239-observation explicit-OOS
-        streak over 2.5 days while the public page sold the allowed Amazon Export
-        offer the whole time. AOD is the only view of the real offer list.
+    Two shapes qualify:
+      - seller_mismatch/confirmed_out: a 3P seller holds the featured offer (the original
+        F1 case — the allowed Amazon offer may still live in the AOD panel).
       - priceless purchasable 3P buybox (unknown/no_pay_price, purchase button enabled,
         non-empty merchant blob matching no allowed seller): the page renders no price in
         any extractable form, so the row stays unknown forever and the in-page retry can
         never settle it — only AOD can say whether an allowed offer exists.
-    Engine-side gating (per-ASIN min interval, failure backoff) bounds the cost.
     """
     if row.get("in_stock"):
         return False
     confidence = str(row.get("stock_confidence") or "")
     reason = str(row.get("stock_reason") or "")
-    if confidence == "confirmed_out":
+    if confidence == "confirmed_out" and reason == "seller_mismatch":
         return True
     return (
         confidence == "unknown"
@@ -2498,20 +2492,19 @@ async def _scrape_pdp_on_context(
                     row["stock_reason"] = explicit_reason
                 row["is_preorder"] = bool(state.get("is_preorder"))
 
-                # F1: a would-be confirmed_out row means the featured slot looks gone —
-                # but the allowed Amazon offer may still live in the All Offers Display
-                # panel. Same story for a priceless purchasable 3P buybox
-                # (unknown/no_pay_price with a non-allowed merchant, e.g. B0GW2DK37Q
-                # 2026-07-16: "Kings Games" buybox with no price anywhere on the page).
-                # NOT gated on an AOD ingress being visible: live evidence 2026-07-21
-                # (B0G3CV6Z9D dumps 05:23Z) shows Amazon serving priceless-3P/OOS page
-                # variants with NO ingress rendered at all while the allowed offer
-                # exists in AOD — the ingress requirement made the offer structurally
-                # invisible for 2.5 days (oos_miss_streak 3,239). The in-page ajax
-                # fetch works regardless of ingress; the engine's per-ASIN throttle
-                # and failure backoff bound the cost.
-                if allow_aod and _aod_check_worthwhile(
-                    row, merchant_blob=merchant_blob, allowed=allowed
+                # F1: a would-be seller_mismatch/confirmed_out row means a 3P seller holds
+                # the featured offer — but the allowed Amazon offer may still live in the
+                # All Offers Display panel. Same story for a priceless purchasable 3P
+                # buybox (unknown/no_pay_price with a non-allowed merchant, e.g.
+                # B0GW2DK37Q 2026-07-16: "Kings Games" buybox with no price anywhere on
+                # the page): the buybox can never resolve, so without AOD the ASIN just
+                # burns fast retries. Only when the engine allows it (per-ASIN gating)
+                # and the PDP shows an ingress that other offers exist do we pay for an
+                # AOD fetch; otherwise the row flows to the existing debounce/retry.
+                if (
+                    allow_aod
+                    and _aod_check_worthwhile(row, merchant_blob=merchant_blob, allowed=allowed)
+                    and await _aod_ingress_present_async(page)
                 ):
                     row = await _apply_aod_offer_check(page, asin, allowed, row)
 

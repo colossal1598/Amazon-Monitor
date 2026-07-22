@@ -187,28 +187,15 @@ def _should_check_aod(
     now: float,
     last_aod: float,
     min_interval_seconds: float,
-    last_engine_aod: float = 0.0,
-    engine_min_gap_seconds: float = 0.0,
 ) -> bool:
     """F1 gating: fetch AOD on a mismatch when the ASIN was previously in stock (transition
-    accuracy — always), or when the min interval since the last AOD fetch has elapsed AND
-    the engine-wide pacing gap has passed.
-
-    The engine-wide gap (2026-07-21) bounds TOTAL AOD tab-time: once every confirmed_out
-    row became AOD-worthy, a mostly-OOS watch list fetched AOD on ~every-4th check and
-    the added seconds per check stretched the sweep — alerts arrived minutes late on the
-    slow client PC. Steady-state OOS ASINs now share a paced budget (default one fetch
-    per 20s engine-wide, i.e. each OOS ASIN reached every few minutes); previously-in-
-    stock transitions bypass the gap because that is the accuracy-critical moment and
-    rotation events are rare.
+    accuracy — always), or when the min interval since the last AOD fetch has elapsed.
 
     Pure logic so the gating decision is testable without the browser/engine.
     """
     if prior_in_stock:
         return True
-    if (now - last_aod) < min_interval_seconds:
-        return False
-    return (now - last_engine_aod) >= engine_min_gap_seconds
+    return (now - last_aod) >= min_interval_seconds
 
 
 def _mass_flip_tripped(
@@ -355,8 +342,6 @@ class MonitorEngine:
         self._recycle_requested = False
         # F1 AOD gating: per-ASIN last-AOD-fetch monotonic timestamp.
         self._aod_last_checked: dict[str, float] = {}
-        # Engine-wide AOD pacing anchor (see _should_check_aod's engine gap).
-        self._aod_last_fetch_mono: float = 0.0
         # F1 AOD failure backoff: consecutive engine-wide AOD fetch failures, and the monotonic
         # instant an engine-wide AOD disable expires. A chronically 404ing endpoint must not add
         # a failing side-request to every seller_mismatch check, so after a threshold of
@@ -485,12 +470,6 @@ class MonitorEngine:
         except (TypeError, ValueError):
             return 240.0
 
-    def _pdp_aod_engine_min_gap_seconds(self) -> float:
-        try:
-            return max(0.0, float(self.config.get("pdp_aod_engine_min_gap_seconds", 20)))
-        except (TypeError, ValueError):
-            return 20.0
-
     def _aod_fail_disable_threshold(self) -> int:
         try:
             return max(1, int(self.config.get("aod_fail_disable_threshold", 5)))
@@ -516,7 +495,6 @@ class MonitorEngine:
         if not row.get("aod_checked"):
             return
         self._aod_last_checked[asin] = now
-        self._aod_last_fetch_mono = now
         outcome = str(row.get("aod_outcome") or "")
         if outcome == "fetch_failed":
             self._aod_consecutive_failures += 1
@@ -782,8 +760,6 @@ class MonitorEngine:
             now=time.monotonic(),
             last_aod=self._aod_last_checked.get(asin, 0.0),
             min_interval_seconds=self._pdp_aod_min_interval_seconds(),
-            last_engine_aod=self._aod_last_fetch_mono,
-            engine_min_gap_seconds=self._pdp_aod_engine_min_gap_seconds(),
         )
         rows, _elapsed = await _scrape_pdp_on_context(
             context,
@@ -962,25 +938,14 @@ class MonitorEngine:
                         extra={"channel": "debug"},
                     )
                 try:
-                    aes_pages = max(1, min(5, int(config.get("aes_max_pages", 2) or 1)))
-                except (TypeError, ValueError):
-                    aes_pages = 2
-                if self._aes_fail_streak > 0:
-                    # Soft-error pressure window: extra pages just burn navigations
-                    # and rate budget exactly when Amazon is throttling (2026-07-21
-                    # deploy log: the &page=2 attempt added retries to an already
-                    # soft-erroring cycle). Cover page 1 first; resume full coverage
-                    # once a cycle succeeds and the streak resets.
-                    aes_pages = 1
-                try:
                     aes_items, scrape_data = await scrape_search_on_context_async(
                         context,
                         attempt_url,
                         source="aes_llc",
                         scrape_mode="newest_front",
                         pagination_mode="fixed",
-                        fixed_pages=aes_pages,
-                        max_search_pages=aes_pages,
+                        fixed_pages=1,
+                        max_search_pages=1,
                         collect_debug=False,
                         max_cycle_seconds=attempt_budget,
                         serp_scroll_profile="minimal",

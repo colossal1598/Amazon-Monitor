@@ -222,45 +222,6 @@ class TestPdpSamePriceDedupe(unittest.TestCase):
             finally:
                 se.conn.close()
 
-    def test_price_drift_within_tolerance_suppressed(self) -> None:
-        # REGRESSION 2026-07-21 (B0GG16Q4X1): rotation drifted the price by
-        # cents-to-dollars between re-fires (225.97/219.43/218.99/...) and exact-price
-        # matching caught none of six duplicates. Default tolerance is 3%.
-        with tempfile.TemporaryDirectory() as tmp:
-            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
-            try:
-                asin = "B011111111"
-                _seed_products_row(se, asin, in_stock=1)
-                _flip_oos_via_seller_mismatch(se, asin)
-                _insert_alert(se, asin=asin, source="pdp_watch", sent_at=utc_now() - timedelta(minutes=20))
-
-                alerts, _ = se.process_pdp_watch_candidates(
-                    [_pdp_in_stock_row(asin, price=101.49)], {asin}, config=_CONFIG
-                )
-                self.assertEqual(alerts, [])
-            finally:
-                se.conn.close()
-
-    def test_tolerance_zero_restores_exact_match(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
-            config = dict(_CONFIG, stock_alert_same_price_tolerance_pct=0)
-            try:
-                asin = "B011111111"
-                _seed_products_row(se, asin, in_stock=1)
-                for _ in range(2):
-                    se.process_pdp_watch_candidates(
-                        [_pdp_oos_row(asin, "seller_mismatch")], {asin}, config=config
-                    )
-                _insert_alert(se, asin=asin, source="pdp_watch", sent_at=utc_now() - timedelta(minutes=20))
-
-                alerts, _ = se.process_pdp_watch_candidates(
-                    [_pdp_in_stock_row(asin, price=100.04)], {asin}, config=config
-                )
-                self.assertEqual([a["type"] for a in alerts], ["back_in_stock"])
-            finally:
-                se.conn.close()
-
     def test_restock_clears_stored_oos_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
@@ -349,18 +310,6 @@ class TestAesSamePriceDedupe(unittest.TestCase):
 
 
 class TestAesNewProductWatchedGuard(unittest.TestCase):
-    @staticmethod
-    def _seed_watch_entry(se: StateEngine, asin: str) -> None:
-        now = "2020-01-01T00:00:00+00:00"
-        se.conn.execute(
-            """
-            INSERT INTO asins (asin, role, enabled, created_at, updated_at)
-            VALUES (?, 'watch', 1, ?, ?)
-            """,
-            (asin, now, now),
-        )
-        se.conn.commit()
-
     def test_new_product_suppressed_for_pdp_watched_asin(self) -> None:
         # Live alert id 1601 (2026-07-17): aes_products row re-inserted for a watched
         # ASIN and re-fired "new_product"; client rated it duplicate.
@@ -368,7 +317,6 @@ class TestAesNewProductWatchedGuard(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 asin = "B033333333"
-                self._seed_watch_entry(se, asin)
                 _seed_products_row(se, asin, in_stock=1)
 
                 alerts, _ = se.process_aes_serp_mirror(
@@ -380,23 +328,6 @@ class TestAesNewProductWatchedGuard(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(row)
                 self.assertEqual(int(row[0]), 1)
-            finally:
-                se.conn.close()
-
-    def test_stale_products_row_does_not_suppress(self) -> None:
-        # REGRESSION 2026-07-21 (B0F6PQLR16): a dead search-era products row (ASIN not
-        # on the watch list) silenced the first real AES detection for 21h. The guard
-        # keys on the CURRENT asins watch list, never on products-table history.
-        with tempfile.TemporaryDirectory() as tmp:
-            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
-            try:
-                asin = "B055555555"
-                _seed_products_row(se, asin, in_stock=0)
-
-                alerts, _ = se.process_aes_serp_mirror(
-                    [_aes_row(asin, in_stock=True)], source="aes_llc", config=_CONFIG
-                )
-                self.assertEqual([a["type"] for a in alerts], ["new_product"])
             finally:
                 se.conn.close()
 
