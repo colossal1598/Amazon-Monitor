@@ -98,8 +98,12 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "degraded_recycle_threshold": 4,
     "degraded_recycle_window_seconds": 180,
     # F1 AOD side-fetch gating: min gap per OOS ASIN (previously-in-stock ASINs
-    # always re-check), and engine-wide disable after consecutive fetch failures.
+    # always re-check), engine-wide pacing between ANY two OOS-ASIN fetches
+    # (bounds total AOD tab-time so a mostly-OOS watch list can't stretch the
+    # sweep — the 2026-07-21 latency regression), and engine-wide disable after
+    # consecutive fetch failures.
     "pdp_aod_min_interval_seconds": 240,
+    "pdp_aod_engine_min_gap_seconds": 20,
     "aod_fail_disable_threshold": 5,
     "aod_fail_disable_minutes": 30,
     # F2 mass-flip circuit breaker: >= min_flips DISTINCT in-stock ASINs flipping
