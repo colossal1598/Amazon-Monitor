@@ -23,6 +23,17 @@ def _config(**overrides):
     return base
 
 
+def test_disabled_by_default(tmp_path) -> None:
+    # Operator decision 2026-07-23: operational error messages to the client's WhatsApp
+    # are OFF unless client_alerts_enabled is explicitly set to true.
+    store = TelemetryStore(str(tmp_path / "t.db"))
+    cfg = _config()
+    del cfg["client_alerts_enabled"]
+    with patch("client_alerts.send_client_message") as send:
+        assert client_alerts.maybe_alert("captcha", cfg, store, detail="test") is False
+        assert send.call_count == 0
+
+
 def test_maybe_alert_sends_once(tmp_path) -> None:
     store = TelemetryStore(str(tmp_path / "t.db"))
     cfg = _config()

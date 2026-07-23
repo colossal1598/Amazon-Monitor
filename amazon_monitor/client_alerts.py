@@ -31,7 +31,10 @@ CLIENT_MESSAGES: dict[str, str] = {
 
 
 def _enabled(config: dict[str, Any]) -> bool:
-    return bool(config.get("client_alerts_enabled", True))
+    # Default OFF (operator decision 2026-07-23): operational error messages to the
+    # client's WhatsApp teach nothing and add pressure. Set client_alerts_enabled=true
+    # in settings to re-enable; logs/telemetry keep recording either way.
+    return bool(config.get("client_alerts_enabled", False))
 
 
 def _recipient(config: dict[str, Any]) -> str | None:

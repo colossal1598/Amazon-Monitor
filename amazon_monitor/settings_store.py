@@ -127,7 +127,9 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "telemetry_db_path": "data/telemetry.db",
     "telemetry_stats_keep_days": 90,
     "telemetry_events_keep_days": 7,
-    "client_alerts_enabled": True,
+    # Operator decision 2026-07-23: operational error messages to the client's WhatsApp
+    # teach nothing and add pressure — everything still lands in logs/telemetry.
+    "client_alerts_enabled": False,
     "client_alert_cooldown_minutes": 30,
     "client_alert_max_per_window": 3,
     "client_alert_window_hours": 6,
