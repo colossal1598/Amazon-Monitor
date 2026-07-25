@@ -69,7 +69,10 @@ def _normalize_ascii(value: str) -> str:
 def _title_signals_pokemon_tcg_scope(title: str) -> bool:
     """Whether the visible title is the card-game product line (not every product with 'Pokemon' in the name)."""
     text = _normalize_ascii(title)
-    if "pokemon tcg" in text or "pokemon trading card game" in text:
+    # "Pokemon Card Game" is the official Japanese-import TCG brand name — those titles
+    # carry no literal "TCG" token (live miss 2026-07-24, B0G1XB2STM "Pokemon Card Game
+    # MEGA Expansion Pack Ninja Spinner Box").
+    if "pokemon tcg" in text or "pokemon trading card game" in text or "pokemon card game" in text:
         return True
     if "pokemon" not in text:
         return False
