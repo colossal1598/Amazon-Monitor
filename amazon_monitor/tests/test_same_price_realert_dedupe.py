@@ -309,14 +309,25 @@ class TestAesSamePriceDedupe(unittest.TestCase):
                 se.conn.close()
 
 
+def _seed_watch_asin(se: StateEngine, asin: str) -> None:
+    now = "2020-01-01T00:00:00+00:00"
+    se.conn.execute(
+        "INSERT INTO asins (asin, role, enabled, created_at, updated_at) VALUES (?, 'watch', 1, ?, ?)",
+        (asin, now, now),
+    )
+    se.conn.commit()
+
+
 class TestAesNewProductWatchedGuard(unittest.TestCase):
     def test_new_product_suppressed_for_pdp_watched_asin(self) -> None:
         # Live alert id 1601 (2026-07-17): aes_products row re-inserted for a watched
-        # ASIN and re-fired "new_product"; client rated it duplicate.
+        # ASIN and re-fired "new_product"; client rated it duplicate. The guard keys
+        # on the LIVE watch list (asins), not the products table.
         with tempfile.TemporaryDirectory() as tmp:
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 asin = "B033333333"
+                _seed_watch_asin(se, asin)
                 _seed_products_row(se, asin, in_stock=1)
 
                 alerts, _ = se.process_aes_serp_mirror(
@@ -336,6 +347,22 @@ class TestAesNewProductWatchedGuard(unittest.TestCase):
             se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
             try:
                 asin = "B044444444"
+                alerts, _ = se.process_aes_serp_mirror(
+                    [_aes_row(asin, in_stock=True)], source="aes_llc", config=_CONFIG
+                )
+                self.assertEqual([a["type"] for a in alerts], ["new_product"])
+            finally:
+                se.conn.close()
+
+    def test_stale_products_row_alone_does_not_silence_new_product(self) -> None:
+        # Regression (B0F6PQLR16, 2026-07-21): a dead search-era products row silenced
+        # a genuinely-new AES item for 21h. Only a live asins watch row may suppress.
+        with tempfile.TemporaryDirectory() as tmp:
+            se = StateEngine(str(Path(tmp) / "m.db"), price_drop_percent=10)
+            try:
+                asin = "B055555555"
+                _seed_products_row(se, asin, in_stock=1)  # stale row, NOT on watch list
+
                 alerts, _ = se.process_aes_serp_mirror(
                     [_aes_row(asin, in_stock=True)], source="aes_llc", config=_CONFIG
                 )

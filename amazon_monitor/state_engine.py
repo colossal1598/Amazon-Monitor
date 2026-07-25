@@ -308,6 +308,48 @@ class StateEngine:
             return None
         return row
 
+    def _recent_alert_same_new_price(
+        self,
+        asin: str,
+        price: float,
+        window_minutes: int,
+        alert_types: tuple[str, ...] = ("back_in_stock", "new_product", "price_drop"),
+    ) -> sqlite3.Row | None:
+        """Most recent product alert for the ASIN (any source) if it is inside the
+        window AND carries the same new_price.
+
+        Latest-only, like _recent_same_price_back_in_stock: a newer alert at a
+        different price means the price genuinely moved, so the next alert is new
+        information. Used to kill cross-pipeline "echo" alerts — the PDP (~55s) and
+        AES (~2min) pipelines catch the same pricing event independently and the
+        slower one re-announces it 2-5 minutes later at the identical price
+        (2026-07-23 B0G3CV6Z9D: 4 alerts for 2 events; client: "always 2 alerts").
+        """
+        if window_minutes <= 0:
+            return None
+        placeholders = ",".join("?" for _ in alert_types)
+        row = self.conn.execute(
+            f"""
+            SELECT alert_type, source, sent_at, new_price FROM alerts
+            WHERE asin = ? AND alert_type IN ({placeholders})
+            ORDER BY sent_at DESC LIMIT 1
+            """,
+            (asin, *alert_types),
+        ).fetchone()
+        if row is None or row["new_price"] is None:
+            return None
+        try:
+            sent_at = datetime.fromisoformat(str(row["sent_at"]))
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        if utc_now() - sent_at >= timedelta(minutes=window_minutes):
+            return None
+        if abs(float(row["new_price"]) - float(price)) >= 0.005:
+            return None
+        return row
+
     def _emit_stock_alert_if_allowed(
         self,
         *,
@@ -379,6 +421,25 @@ class StateEngine:
                     prior_sent_at=prior_same["sent_at"],
                     prior_oos_reason=prior_oos_reason or "",
                     window_minutes=same_price_window,
+                )
+                return None
+            # A price_drop just announced this exact price (either pipeline): a weak
+            # 0->1 flip re-announcing it minutes later is an echo, not a restock
+            # (2026-07-23 17:14 B0G3CV6Z9D: aes price_drop $95.88 -> pdp back_in_stock
+            # $95.88 +21s). Strong page-text sellouts skip this whole block above.
+            echo_window = self._config_minutes(config, "cross_source_alert_dedupe_minutes", 15)
+            prior_drop = self._recent_alert_same_new_price(
+                asin, float(price), echo_window, alert_types=("price_drop",)
+            )
+            if prior_drop is not None:
+                _tel(
+                    "stock_alert_price_echo_suppressed",
+                    asin=asin,
+                    source=source,
+                    price=price,
+                    prior_source=prior_drop["source"],
+                    prior_sent_at=prior_drop["sent_at"],
+                    window_minutes=echo_window,
                 )
                 return None
         window = self._config_minutes(config, "cross_source_alert_dedupe_minutes", 15)
@@ -979,21 +1040,41 @@ class StateEngine:
                             last_price_alert=row["last_price_alert"],
                         )
                     if price_decision.emit:
-                        alert = self._build_alert(
-                            "price_drop",
-                            row_source,
-                            asin,
-                            title,
-                            new_price,
-                            old_price=old_price,
-                            new_price=new_price,
-                            image_url=image_url,
-                            shipping=ship_line,
+                        echo_window = self._config_minutes(
+                            config, "cross_source_alert_dedupe_minutes", 15
                         )
-                        alerts.append(alert)
-                        self._record_alert(alert)
-                        self.conn.execute("UPDATE products SET last_price_alert = ? WHERE asin = ?", (now, asin))
-                        price_drop_count += 1
+                        prior_echo = (
+                            self._recent_alert_same_new_price(asin, float(new_price), echo_window)
+                            if new_price is not None
+                            else None
+                        )
+                        if prior_echo is not None:
+                            _tel(
+                                "price_drop_echo_suppressed",
+                                asin=asin,
+                                where=row_source,
+                                new_price=new_price,
+                                prior_type=prior_echo["alert_type"],
+                                prior_source=prior_echo["source"],
+                                prior_sent_at=prior_echo["sent_at"],
+                                window_minutes=echo_window,
+                            )
+                        else:
+                            alert = self._build_alert(
+                                "price_drop",
+                                row_source,
+                                asin,
+                                title,
+                                new_price,
+                                old_price=old_price,
+                                new_price=new_price,
+                                image_url=image_url,
+                                shipping=ship_line,
+                            )
+                            alerts.append(alert)
+                            self._record_alert(alert)
+                            self.conn.execute("UPDATE products SET last_price_alert = ? WHERE asin = ?", (now, asin))
+                            price_drop_count += 1
 
             missing_candidates = len(watch_upper - set(by_asin.keys()))
             summary = {
@@ -1077,7 +1158,8 @@ class StateEngine:
                     self._maybe_cache_image(asin, image_url, config)
                     inserted_count += 1
                     if _should_emit_new_product_alert(new_stock, new_price) and self.conn.execute(
-                        "SELECT 1 FROM products WHERE asin = ?", (asin,)
+                        "SELECT 1 FROM asins WHERE asin = ? AND role = 'watch' AND enabled = 1",
+                        (asin,),
                     ).fetchone() is not None:
                         # First aes_products row for an ASIN the client already watches
                         # on the PDP side: "new product" is meaningless to them — they
@@ -1085,6 +1167,9 @@ class StateEngine:
                         # case 2026-07-17 (alert id 1601, B0GYVHLP4L): the aes row was
                         # re-inserted and re-fired new_product for a watched ASIN,
                         # rated "duplicate" by the client. Mirror row still recorded.
+                        # Keyed on the LIVE watch list (asins), not the products table:
+                        # stale search-era products rows silenced genuinely-new AES
+                        # items for hours (B0F6PQLR16, 2026-07-21: 21h silent).
                         _tel(
                             "aes_new_product_suppressed_watched",
                             asin=asin,
@@ -1237,21 +1322,41 @@ class StateEngine:
                             last_price_alert=row["last_price_alert"],
                         )
                     if price_decision.emit:
-                        alert = self._build_alert(
-                            "price_drop",
-                            source,
-                            asin,
-                            title,
-                            new_price,
-                            old_price=old_price,
-                            new_price=new_price,
-                            image_url=image_url,
-                            shipping=ship_line,
+                        echo_window = self._config_minutes(
+                            config, "cross_source_alert_dedupe_minutes", 15
                         )
-                        alerts.append(alert)
-                        self._record_alert(alert)
-                        self.conn.execute("UPDATE aes_products SET last_price_alert = ? WHERE asin = ?", (now, asin))
-                        price_drop_count += 1
+                        prior_echo = (
+                            self._recent_alert_same_new_price(asin, float(new_price), echo_window)
+                            if new_price is not None
+                            else None
+                        )
+                        if prior_echo is not None:
+                            _tel(
+                                "price_drop_echo_suppressed",
+                                asin=asin,
+                                where=source,
+                                new_price=new_price,
+                                prior_type=prior_echo["alert_type"],
+                                prior_source=prior_echo["source"],
+                                prior_sent_at=prior_echo["sent_at"],
+                                window_minutes=echo_window,
+                            )
+                        else:
+                            alert = self._build_alert(
+                                "price_drop",
+                                source,
+                                asin,
+                                title,
+                                new_price,
+                                old_price=old_price,
+                                new_price=new_price,
+                                image_url=image_url,
+                                shipping=ship_line,
+                            )
+                            alerts.append(alert)
+                            self._record_alert(alert)
+                            self.conn.execute("UPDATE aes_products SET last_price_alert = ? WHERE asin = ?", (now, asin))
+                            price_drop_count += 1
 
             if reconcile_absence:
                 # Absence from filtered page-1 is a weak OOS signal (page churn, filter
