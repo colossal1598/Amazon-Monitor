@@ -94,15 +94,22 @@ def _fetch_and_cache(config: dict[str, Any]) -> None:
         _write_cache_file(config, rate)
         LOGGER.info("fx_rate: refreshed usd_ils=%.4f", rate)
         return
+    # Failed fetch: the static fallback must NEVER clobber a real last-known rate.
+    # Precedence: in-memory last good -> disk cache -> configured fallback. One failed
+    # Frankfurter call otherwise put fallback 3.7 over a live ~3.05 rate and every ILS
+    # line ran ~20% high until the next successful refresh (2026-07-20 incident,
+    # recurred 2026-07-25 after the rollback dropped the first fix).
+    if _cached_usd_ils is not None:
+        LOGGER.info("fx_rate: fetch failed, keeping last good usd_ils=%.4f", _cached_usd_ils)
+        return
+    _load_cache_file(config)
+    if _cached_usd_ils is not None:
+        LOGGER.info("fx_rate: restored from file usd_ils=%.4f", _cached_usd_ils)
+        return
     fb = _fallback_rate(config)
     if fb is not None:
         _cached_usd_ils = fb
         LOGGER.info("fx_rate: using fallback usd_ils=%.4f", fb)
-        return
-    if _cached_usd_ils is None:
-        _load_cache_file(config)
-        if _cached_usd_ils is not None:
-            LOGGER.info("fx_rate: restored from file usd_ils=%.4f", _cached_usd_ils)
 
 
 # Count successful monitor cycles and occasionally refresh the exchange rate so alerts don’t go stale without calling the network too often.
