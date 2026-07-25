@@ -1,7 +1,44 @@
 import unittest
 
 from pdp_helpers import _paid_delivery_price_tail, shipping_display_for, shipping_display_hebrew
-from pdp_scraper import _pdp_row
+from pdp_scraper import _extract_pdp_shipping, _pdp_row
+
+
+class _AttrEl:
+    def __init__(self, price: str, text: str = "") -> None:
+        self._price = price
+        self._text = text
+
+    def get_attribute(self, _name: str) -> str:
+        return self._price
+
+    def inner_text(self) -> str:
+        return self._text
+
+
+class _BuyboxRoot:
+    def __init__(self, attr_els: list) -> None:
+        self._attr_els = attr_els
+
+    def query_selector_all(self, sel: str) -> list:
+        if sel == "[data-csa-c-delivery-price]":
+            return self._attr_els
+        return []
+
+
+class _ScopedFakePage:
+    """Delivery-price attr elements exist ONLY under #buybox; any document-wide
+    query_selector_all is an error — that unscoped sweep grabbed a carousel's $6.99
+    over the buybox's real $18.52 (live 2026-07-24, B0GW2DK37Q)."""
+
+    def __init__(self, root: _BuyboxRoot | None) -> None:
+        self._root = root
+
+    def query_selector(self, sel: str):
+        return self._root if sel == "#buybox" else None
+
+    def query_selector_all(self, sel: str) -> list:
+        raise AssertionError(f"document-wide sweep must not run: {sel}")
 
 
 class TestPdpDelivery(unittest.TestCase):
@@ -101,6 +138,20 @@ class TestPdpDelivery(unittest.TestCase):
         )
         self.assertFalse(row["in_stock"])
         self.assertIsNone(row["price"])
+
+
+class TestDeliveryAttrScope(unittest.TestCase):
+    def test_attr_price_comes_from_buybox_scope_only(self) -> None:
+        page = _ScopedFakePage(
+            _BuyboxRoot([_AttrEl("$18.52", "$18.52 delivery Wednesday, July 30")])
+        )
+        text = _extract_pdp_shipping(page)
+        self.assertIn("$18.52", text)
+        self.assertEqual(shipping_display_hebrew(text), "משלוח: $18.52")
+
+    def test_no_buybox_container_yields_no_shipping_not_a_page_wide_grab(self) -> None:
+        page = _ScopedFakePage(None)
+        self.assertEqual(_extract_pdp_shipping(page), "")
 
 
 if __name__ == "__main__":

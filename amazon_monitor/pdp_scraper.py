@@ -762,6 +762,21 @@ def _extract_pdp_image(page) -> str | None:
     return None
 
 
+# Containers whose [data-csa-c-delivery-price] attribute belongs to the ACTUAL buybox
+# offer. The attribute also appears on unrelated widgets (carousels, other-sellers
+# boxes) elsewhere in the DOM — a document-wide sweep picked those first (live
+# 2026-07-24: B0GW2DK37Q alert said shipping $6.99 from an unrelated widget while the
+# buybox delivery was $18.52).
+_PDP_DELIVERY_ATTR_ROOTS = (
+    "#qualifiedBuybox",
+    "#desktop_buybox",
+    "#buybox",
+    "#offerDisplayFeature_feature_div",
+    "#deliveryBlockContainer",
+    "#deliveryBlock_feature_div",
+)
+
+
 # Extract the delivery/shipping message from the product page so alerts can show whether it ships to your location.
 def _extract_pdp_shipping(page) -> str:
     lines: list[str] = []
@@ -777,14 +792,19 @@ def _extract_pdp_shipping(page) -> str:
     # The csa delivery-price attribute is the charge Amazon itself binds to the delivery
     # widget ("$17.96" / "FREE") — collected FIRST so the alert line prefers it over
     # looser text like the import-charges tooltip (shipping_display picks the first
-    # priced line).
-    try:
-        for el in page.query_selector_all("[data-csa-c-delivery-price]"):
-            price = (el.get_attribute("data-csa-c-delivery-price") or "").strip()
-            text = (el.inner_text() or "").strip()
-            add_line(" ".join(x for x in (price, text) if x))
-    except Exception:
-        pass
+    # priced line). Scoped to the buybox/delivery containers only — see
+    # _PDP_DELIVERY_ATTR_ROOTS.
+    for root_sel in _PDP_DELIVERY_ATTR_ROOTS:
+        try:
+            root = page.query_selector(root_sel)
+            if not root:
+                continue
+            for el in root.query_selector_all("[data-csa-c-delivery-price]"):
+                price = (el.get_attribute("data-csa-c-delivery-price") or "").strip()
+                text = (el.inner_text() or "").strip()
+                add_line(" ".join(x for x in (price, text) if x))
+        except Exception:
+            continue
 
     for root_sel in ("#qualifiedBuybox", "#desktop_buybox", "#buybox", "#offerDisplayFeature_feature_div"):
         try:
@@ -1469,14 +1489,19 @@ async def _extract_pdp_shipping_async(page: Any) -> str:
             if line and line not in lines:
                 lines.append(line)
 
-    # Attr-price lines first — see the sync twin (_extract_pdp_shipping) for why.
-    try:
-        for el in await page.query_selector_all("[data-csa-c-delivery-price]"):
-            price = (await el.get_attribute("data-csa-c-delivery-price") or "").strip()
-            text = (await el.inner_text() or "").strip()
-            add_line(" ".join(x for x in (price, text) if x))
-    except Exception:
-        pass
+    # Attr-price lines first, scoped to the buybox/delivery containers — see the sync
+    # twin (_extract_pdp_shipping) and _PDP_DELIVERY_ATTR_ROOTS for why.
+    for root_sel in _PDP_DELIVERY_ATTR_ROOTS:
+        try:
+            root = await page.query_selector(root_sel)
+            if not root:
+                continue
+            for el in await root.query_selector_all("[data-csa-c-delivery-price]"):
+                price = (await el.get_attribute("data-csa-c-delivery-price") or "").strip()
+                text = (await el.inner_text() or "").strip()
+                add_line(" ".join(x for x in (price, text) if x))
+        except Exception:
+            continue
 
     for root_sel in ("#qualifiedBuybox", "#desktop_buybox", "#buybox", "#offerDisplayFeature_feature_div"):
         try:
