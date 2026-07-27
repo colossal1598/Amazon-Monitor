@@ -33,7 +33,9 @@ CLIENT_MESSAGES: dict[str, str] = {
 def _enabled(config: dict[str, Any]) -> bool:
     # Default OFF (operator decision 2026-07-23): operational error messages to the
     # client's WhatsApp teach nothing and add pressure. Set client_alerts_enabled=true
-    # in settings to re-enable; logs/telemetry keep recording either way.
+    # in settings to re-enable. Gates ONLY the WhatsApp send — maybe_alert records every
+    # event to telemetry regardless (2026-07-26/27 the disable silently took the
+    # captcha/browser_disconnected counters dark and blinded the delay forensics).
     return bool(config.get("client_alerts_enabled", False))
 
 
@@ -78,10 +80,23 @@ def maybe_alert(
     cycle_id: int | None = None,
     detail: str | None = None,
 ) -> bool:
-    """Send a client alert if rate limits allow. Returns True if sent."""
-    if not _enabled(config) or not _recipient(config):
-        return False
+    """Record the event to telemetry, then send a client alert if enabled and rate limits allow.
+
+    Returns True if sent. The telemetry record must never depend on the WhatsApp
+    enable flag or the rate limits — it is the only counter for captcha /
+    browser_disconnected / network_blocked pressure.
+    """
     if kind not in CLIENT_MESSAGES:
+        return False
+
+    def _record(suppressed: str | None) -> None:
+        if telemetry is None or not cycle_id:
+            return
+        extra = {"suppressed": suppressed} if suppressed else {}
+        telemetry.debug(cycle_id, "client_alert_detail", kind=kind, detail=detail or "", **extra)
+
+    if not _enabled(config) or not _recipient(config):
+        _record("disabled")
         return False
 
     now = israel_now_iso()
@@ -92,8 +107,7 @@ def maybe_alert(
         try:
             if _parse_il(now) - _parse_il(state["last_sent_at_il"]) < timedelta(minutes=cooldown):
                 LOGGER.info("client_alert_suppressed kind=%s reason=cooldown", kind)
-                if telemetry and cycle_id and detail:
-                    telemetry.debug(cycle_id, "client_alert_detail", kind=kind, detail=detail, suppressed="cooldown")
+                _record("cooldown")
                 return False
         except ValueError:
             pass
@@ -103,10 +117,7 @@ def maybe_alert(
             if _parse_il(now) - window_start <= timedelta(hours=_window_hours(config)):
                 if state["sent_count_in_window"] >= _max_per_window(config):
                     LOGGER.info("client_alert_suppressed kind=%s reason=max_per_window", kind)
-                    if telemetry and cycle_id and detail:
-                        telemetry.debug(
-                            cycle_id, "client_alert_detail", kind=kind, detail=detail, suppressed="max_per_window"
-                        )
+                    _record("max_per_window")
                     return False
         except ValueError:
             pass
@@ -115,8 +126,7 @@ def maybe_alert(
     send_client_message(message, config)
     if telemetry:
         telemetry.record_alert_sent(kind)
-        if cycle_id and detail:
-            telemetry.debug(cycle_id, "client_alert_detail", kind=kind, detail=detail)
+    _record(None)
     return True
 
 

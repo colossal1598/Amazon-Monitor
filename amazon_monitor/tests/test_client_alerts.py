@@ -34,6 +34,44 @@ def test_disabled_by_default(tmp_path) -> None:
         assert send.call_count == 0
 
 
+def _detail_rows(store: TelemetryStore) -> list[tuple]:
+    return store.conn.execute(
+        "SELECT event, payload_json FROM debug_events WHERE event = 'client_alert_detail' ORDER BY id"
+    ).fetchall()
+
+
+def test_disabled_still_records_telemetry(tmp_path) -> None:
+    """The enable flag gates ONLY the WhatsApp send. Turning client alerts off on
+    2026-07-26 silently killed the captcha/browser_disconnected telemetry counters
+    and blinded the next forensics round — every event must land in debug_events
+    regardless of the flag."""
+    store = TelemetryStore(str(tmp_path / "t.db"))
+    cfg = _config()
+    del cfg["client_alerts_enabled"]
+    with patch("client_alerts.send_client_message") as send:
+        assert client_alerts.maybe_alert("captcha", cfg, store, cycle_id=1, detail="B0X captcha") is False
+        assert client_alerts.maybe_alert("browser_disconnected", cfg, store, cycle_id=1, detail="pipe died") is False
+        assert send.call_count == 0
+    rows = _detail_rows(store)
+    assert len(rows) == 2
+    assert '"kind": "captcha"' in rows[0][1]
+    assert '"suppressed": "disabled"' in rows[0][1]
+    assert '"kind": "browser_disconnected"' in rows[1][1]
+
+
+def test_rate_limited_send_still_records_each_event(tmp_path) -> None:
+    store = TelemetryStore(str(tmp_path / "t.db"))
+    cfg = _config()
+    with patch("client_alerts.send_client_message") as send:
+        assert client_alerts.maybe_alert("captcha", cfg, store, cycle_id=1, detail="first") is True
+        assert client_alerts.maybe_alert("captcha", cfg, store, cycle_id=2, detail="second") is False
+        assert send.call_count == 1
+    rows = _detail_rows(store)
+    assert len(rows) == 2
+    assert "suppressed" not in rows[0][1]
+    assert '"suppressed": "cooldown"' in rows[1][1]
+
+
 def test_maybe_alert_sends_once(tmp_path) -> None:
     store = TelemetryStore(str(tmp_path / "t.db"))
     cfg = _config()
